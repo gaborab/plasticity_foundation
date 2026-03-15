@@ -20,15 +20,32 @@ def preprocessing_cnt(cntFilePath, l_freq=0.1, h_freq=75.0, sfreq:int=200):
     return eegData, raw.ch_names
 
 
-def preprocessing_edf(edfFilePath, l_freq=0.1, h_freq=75.0, sfreq:int=200, drop_channels: list=None, standard_channels: list=None):
+def preprocessing_edf(edfFilePath, l_freq=0.1, h_freq=75.0, sfreq:int=200, drop_channels: list=None, standard_channels: list=None, channel_rename_lut: dict=None):
     # reading edf
     raw = mne.io.read_raw_edf(edfFilePath, preload=True)
+
+
+    # drop channels from specified list
     if drop_channels is not None:
-        useless_chs = []
+        useless_channels = []
         for ch in drop_channels:
             if ch in raw.ch_names:
-                useless_chs.append(ch)
-        raw.drop_channels(useless_chs)
+                useless_channels.append(ch)
+        raw.drop_channels(useless_channels)
+
+    # rename channels based on LUT
+    if channel_rename_lut is not None:
+        # drop channels not in the LUT
+        useless_channels = []
+        for ch in raw.ch_names:
+            if ch not in channel_rename_lut:
+                useless_channels.append(ch)
+        raw.drop_channels(useless_channels)
+        # rename channels
+        raw.rename_channels(channel_rename_lut)
+
+    print(f"Total number of channels: {len(raw.ch_names)}")
+    print(f"Channels: {raw.ch_names}")
 
     if standard_channels is not None and len(standard_channels) == len(raw.ch_names):
         try:
