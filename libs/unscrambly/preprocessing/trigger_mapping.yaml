@@ -1,0 +1,55 @@
+# Mismatch ID-to-trigger value mapping
+trigger_names:
+  # Mismatch Onsets
+  left_onset:
+    short: L_ON
+    full: Left Onset
+  center_onset:
+    short: C_ON
+    full: Center Onset
+  right_onset:
+    short: R_ON
+    full: Right Onset
+  global_onset:
+    short: G_ON
+    full: Global Onset
+
+  # Mismatch Offsets
+  left_offset:
+    short: L_OFF
+    full: Left Offset
+  center_offset:
+    short: C_OFF
+    full: Center Offset
+  right_offset:
+    short: R_OFF
+    full: Right Offset
+  global_offset:
+    short: G_OFF
+    full: Global Offset
+
+  # Subject Actions
+  mismatch_hit:
+    short: MM_HIT
+    full: Mismatch Hit
+
+# Trigger ID-to-name mappings
+trigger_mappings:
+  # Mismatch Onsets
+  DIN21: left_onset
+  DIN31: center_onset
+  DIN41: right_onset
+  DIN51: global_onset
+
+  # Mismatch Offsets
+  DIN23: left_offset
+  DIN33: center_offset
+  DIN43: right_offset
+  DIN53: global_offset
+  
+  # Subject actions
+  DIN14: button_press
+  DIN15: gaze_start
+  DIN16: mismatch_hit
+  DIN17: back_to_speedo
+  DIN19: task_fail

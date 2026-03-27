@@ -24,7 +24,6 @@ from optim_factory import create_optimizer
 
 from engine_for_vqnsp import evaluate, train_one_epoch, calculate_codebook_usage
 from utils import NativeScalerWithGradNormCount as NativeScaler
-import modeling_vqnsp
 import utils
 
 
@@ -263,7 +262,7 @@ def main(args):
 
     print("Use step level LR & WD scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+        args.lr, args.min_lr, args.all_epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
 
@@ -278,10 +277,10 @@ def main(args):
         test_stats = calculate_codebook_usage(data_loader_val, model, device, log_writer, 0, args=args)
         exit(0)
         
-    print(f"Start training for {args.epochs} epochs")
+    print(f"Start training for {args.all_epochs} epochs")
     start_time = time.time()
             
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, args.all_epochs):
         if args.distributed:
             for data_loader_train in data_loader_train_list:
                 data_loader_train.sampler.set_epoch(epoch)

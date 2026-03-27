@@ -10,7 +10,6 @@
 
 import argparse
 import datetime
-from pyexpat import model
 import numpy as np
 import time
 import torch
@@ -20,17 +19,15 @@ import os
 
 from pathlib import Path
 from collections import OrderedDict
-from timm.data.mixup import Mixup
 from timm.models import create_model
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from timm.loss import LabelSmoothingCrossEntropy
 from timm.utils import ModelEma
 from optim_factory import create_optimizer, get_parameter_groups, LayerDecayValueAssigner
 
 from engine_for_finetuning import train_one_epoch, evaluate
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
-from scipy import interpolate
-import modeling_finetune
+
 
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -435,13 +432,13 @@ def main(args, ds_init):
 
     print("Use step level LR scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
+        args.lr, args.min_lr, args.all_epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
     if args.weight_decay_end is None:
         args.weight_decay_end = args.weight_decay
     wd_schedule_values = utils.cosine_scheduler(
-        args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
+        args.weight_decay, args.weight_decay_end, args.all_epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
     if args.nb_classes == 1:
@@ -467,11 +464,11 @@ def main(args, ds_init):
         print(f"======Accuracy: {np.mean(accuracy)} {np.std(accuracy)}, balanced accuracy: {np.mean(balanced_accuracy)} {np.std(balanced_accuracy)}")
         exit(0)
 
-    print(f"Start training for {args.epochs} epochs")
+    print(f"Start training for {args.all_epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
     max_accuracy_test = 0.0
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, args.all_epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
