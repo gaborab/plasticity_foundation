@@ -29,14 +29,16 @@ from torch import inf
 import h5py
 
 from tensorboardX import SummaryWriter
-from data_processor.dataset import ShockDataset
+from libs.labram.data_processor.dataset import ShockDataset
 import pickle
 from scipy.signal import resample
 from pyhealth.metrics import binary_metrics_fn, multiclass_metrics_fn
 import pandas as pd
 from sklearn.metrics import r2_score
 from sklearn.metrics import mean_squared_error
+from sklearn.metrics import mean_absolute_error
 from scipy.stats import pearsonr
+
 
 
 standard_1020 = [
@@ -804,6 +806,11 @@ def prepare_TUAB_dataset(root):
 
 
 def get_metrics(output, target, metrics, is_binary, threshold=0.5):
+    regression_indicators = {"mse", "mae", "r2", "pearsonr"}
+    if any(m in regression_indicators for m in metrics):
+        return regression_metrics_fn(target, output, metrics=metrics)
+
+    # kept for compatibility with previous code, but not used
     if is_binary:
         if 'roc_auc' not in metrics or sum(target) * (len(target) - sum(target)) != 0:  # to prevent all 0 or all 1 and raise the AUROC error
             results = binary_metrics_fn(
@@ -823,4 +830,22 @@ def get_metrics(output, target, metrics, is_binary, threshold=0.5):
         results = multiclass_metrics_fn(
             target, output, metrics=metrics
         )
+    return results
+
+def regression_metrics_fn(y_true, y_pred, metrics=None):
+    """
+    Custom bypass for the missing pyhealth function.
+    Calculates MSE, MAE, and R2 scores for the LaBraM regression head.
+    """
+    if metrics is None:
+        metrics = ["mse", "mae", "r2"]
+
+    results = {}
+    if "mse" in metrics:
+        results["mse"] = mean_squared_error(y_true, y_pred)
+    if "mae" in metrics:
+        results["mae"] = mean_absolute_error(y_true, y_pred)
+    if "r2" in metrics:
+        results["r2"] = r2_score(y_true, y_pred)
+
     return results
