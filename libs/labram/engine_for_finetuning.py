@@ -58,6 +58,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     param_group["weight_decay"] = wd_schedule_values[it]
 
         samples = samples.float().to(device, non_blocking=True) / 100
+        if samples.shape[-1] == 201:
+            samples = samples[..., :200]
+        if samples.ndim == 3:
+            samples.unsqueeze(2)  # add channel dimension
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
         
         targets = targets.to(device, non_blocking=True).float().view(-1, 1)
@@ -83,7 +87,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             optimizer.zero_grad()
             if model_ema is not None:
                 model_ema.update(model)
-        loss_scale_value = loss_scaler.state_dict()["scale"]
+        loss_scale_value = loss_scaler._scaler.get_scale()
         torch.cuda.synchronize()
 
         output_np = output.detach().cpu().numpy()
@@ -178,7 +182,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
     true = torch.cat(true, dim=0).numpy()
 
     ret = utils.get_metrics(pred, true, metrics, is_binary=is_binary)
-    for key, value in final_results.items():
+    for key, value in ret.items():
         if key not in metric_logger.meters:
             metric_logger.add_meter(key, utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
         metric_logger.meters[key].update(value)

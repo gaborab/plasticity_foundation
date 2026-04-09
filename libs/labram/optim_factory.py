@@ -100,7 +100,7 @@ def get_parameter_groups(model, weight_decay=1e-5, skip_list=(), get_num_layer=N
 
         parameter_group_vars[group_name]["params"].append(param)
         parameter_group_names[group_name]["params"].append(name)
-    print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
+    #print("Param groups = %s" % json.dumps(parameter_group_names, indent=2))
     return list(parameter_group_vars.values())
 
 
@@ -128,7 +128,10 @@ def create_optimizer(args, model, get_num_layer=None, get_layer_scale=None, filt
     if hasattr(args, 'opt_betas') and args.opt_betas is not None:
         opt_args['betas'] = args.opt_betas
     
-    print('Optimizer config:', opt_args)
+    print('Optimizer config:')
+    print(f"    lr = {opt_args.get('lr', None):.8e}")
+    print(f"    weight_decay = {opt_args.get('weight_decay', weight_decay):.8e}")
+    print(f"    eps = {opt_args.get('eps', None):.8e}" if 'eps' in opt_args else "    eps = None")
     opt_split = opt_lower.split('_')
     opt_lower = opt_split[-1]
     if opt_lower == 'sgd' or opt_lower == 'nesterov':

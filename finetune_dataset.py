@@ -15,24 +15,39 @@ class FinetuneLoader(torch.utils.data.Dataset):
     """
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[Any]]]):
         self.samples = []
+        self.subjects = list(epochs_dict.keys())
         for subj, conds in epochs_dict.items():
-            for cond, data in conds.items():
-                self.samples.extend((data, subj, cond))
+            for cond, epoch_list in conds.items():
+                for epoch in epoch_list:
+                    tensor_data = torch.tensor(epoch, dtype=torch.float32)
+                    self.samples.append((tensor_data, tensor_data))
+               # self.samples.extend((data, subj, cond))
+    #TODO replace regression with autoencoder
+    #TODO does run_general_finetuning even have any specific logic for generalizing or is it all happening here?
+
+    @property
+    def target_dim(self) -> int:
+        if len(self.samples) == 0:
+            return 0
+        # Returns the total number of elements in the target tensor (Flattened size)
+        return self.samples[0][1].numel()
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        return self.epochs_dict[idx]
+        return self.samples[idx]
 
 class FinetuneSplits:
     """
-    This class can be implemented to hold the training, validation, and testing epochs for a single fold of cross-validation. It provides a method `get_datasets()` to return these epochs as tensors for model input.
+    This class can be implemented to hold the training, validation, and testing epochs as torch dataset loaders for a single fold of cross-validation. It provides a method `get_datasets()` to return these epochs as tensors for model input.
+    Expects input dictionaries in the format: {subject: {condition: [epoch_tensor1, epoch_tensor2, ...]}}
     """
-    def __init__(self, training_epochs: FinetuneLoader, validation_epochs: FinetuneLoader, testing_epochs=FinetuneLoader):
-        self.training_epochs = training_epochs
-        self.validation_epochs = validation_epochs
-        self.testing_epochs = testing_epochs
+
+    def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict):
+        self.training_epochs = FinetuneLoader(training_dict)
+        self.validation_epochs = FinetuneLoader(validation_dict)
+        self.testing_epochs = FinetuneLoader(testing_dict)
 
     def get_datasets(self) -> Dict[str, FinetuneLoader]:
         """This method can be implemented to return the training, validation, and testing epochs as torch datasets for model input.
@@ -48,7 +63,7 @@ class FinetuneSplits:
 
 class KFoldSplitter:
     """
-    Build a list of `FinetuneDataset` instances, one per fold.
+    Build a list of `FinetuneSplit` instances, one per fold.
     If `all_epochs` is None the constructor loads from disk using `EpochIO`
     and `settings.FINETUNE_DIR`.
     """
@@ -78,12 +93,13 @@ class KFoldSplitter:
             test_subj = folds[i]
             train_val_subj = [s for s in subjects if s not in test_subj]
             rng.shuffle(train_val_subj)
-            val_subj = train_val_subj[:len(train_val_subj) // 5]  # 20% for validation
-            train_subj = train_val_subj[len(train_val_subj) // 5:]  # 80% for training
+            split_idx = len(train_val_subj) // 5  # 20% for validation
+            val_subj = train_val_subj[:split_idx]  # 20% for validation
+            train_subj = train_val_subj[split_idx:]  # 80% for training
             train = {subject: self.all_epochs[subject] for subject in train_subj}
             val = {subject: self.all_epochs[subject] for subject in val_subj}
             test = {subject: self.all_epochs[subject] for subject in test_subj}
-            datasets.append(FinetuneSplits(training_epochs=train, validation_epochs=val, testing_epochs=test))
+            datasets.append(FinetuneSplits(training_dict=train, validation_dict=val, testing_dict=test))
 
         return datasets
 

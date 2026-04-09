@@ -41,8 +41,8 @@ EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41',
 RECORDINGS_PER_CONDITION = None
 
 
-# Base directories
-DATA_ROOT = r".\data\STMD_data"
+# Base directories //TODO change back to \data\STMD_data
+DATA_ROOT = r".\STMD_data"
 FINETUNE_DIR = Path('.') / "finetune_epochs"
 PATCH_DIR = Path('.') / "postpatch_epochs"
 FINETUNE_OUTPUT_DIR = Path('.') / "finetune_outputs"

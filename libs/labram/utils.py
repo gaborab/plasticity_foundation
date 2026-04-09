@@ -580,7 +580,7 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
 
     if not getattr(args, 'enable_deepspeed', False):
         checkpoint_paths = [output_dir / 'checkpoint.pth']
-        if epoch == 'best':
+        if epoch == 'best_val' or epoch == 'best_test':
             checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch_name),]
         elif (epoch + 1) % save_ckpt_freq == 0:
             checkpoint_paths.append(output_dir / ('checkpoint-%s.pth' % epoch_name))

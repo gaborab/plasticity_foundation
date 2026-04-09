@@ -2,7 +2,7 @@ import time, datetime
 from pathlib import Path
 
 import torch
-
+import libs.labram.modeling_finetune
 import settings
 from finetune_dataset import KFoldSplitter
 import torch.nn as nn
@@ -70,6 +70,8 @@ def main(opts):
     nb_classes = 1  # regression task
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for regression
     ch_names = settings.CHORDER_STANDARD
+    # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
+    ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     if opts.model_name is None:
         print("Please specify model name")
         return
@@ -82,9 +84,9 @@ def main(opts):
     for dataset in datasets:
         print(f"\n=== Fold {i}/{len(datasets)} ===")
         tensors = dataset.get_datasets()
-        print(f"  Train subjects: {list(dataset.training_epochs.keys())}")
-        print(f"  Val subjects: {list(dataset.validation_epochs.keys())}")
-        print(f"  Test subjects: {list(dataset.testing_epochs.keys())}")
+        print(f"  Train subjects: {list(dataset.training_epochs.subjects)}")
+        print(f"  Val subjects: {list(dataset.validation_epochs.subjects)}")
+        print(f"  Test subjects: {list(dataset.testing_epochs.subjects)}")
         # create output and log directory
         print("Creating output and log directories...")
         output_dir = output_dir_base / str(i)
@@ -94,13 +96,16 @@ def main(opts):
         # INITIALIZING
         # initialize samplers
         print("Initializing dataloaders...")
-        train_sampler = torch.utils.data.RandomSampler(tensors["train"])
-        val_sampler = torch.utils.data.SequentialSampler(tensors["val"])
-        test_sampler = torch.utils.data.SequentialSampler(tensors["test"])
+        train_dataset = tensors["train"]
+        val_dataset = tensors["val"]
+        test_dataset = tensors["test"]
+        train_sampler = torch.utils.data.RandomSampler(train_dataset)
+        val_sampler = torch.utils.data.SequentialSampler(val_dataset)
+        test_sampler = torch.utils.data.SequentialSampler(test_dataset)
         # initialize dataloaders
-        train_loader = torch.utils.data.DataLoader(tensors["train"], sampler = train_sampler)
-        val_loader = torch.utils.data.DataLoader(tensors["val"], sampler = val_sampler)
-        test_loader = torch.utils.data.DataLoader(tensors["test"], sampler = test_sampler)
+        train_loader = torch.utils.data.DataLoader(train_dataset, sampler = train_sampler)
+        val_loader = torch.utils.data.DataLoader(val_dataset, sampler = val_sampler)
+        test_loader = torch.utils.data.DataLoader(test_dataset, sampler = test_sampler)
 
         print("Initializing model with regression head...")
         # initialize LaBraM
@@ -110,12 +115,13 @@ def main(opts):
         )
         input_dim = model.embed_dim
         hidden_dim = input_dim // 2  # Common heuristic
+        target_dim = train_dataset.target_dim
         # set model head as an MLP for regression
         model.head = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, 1)
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, target_dim),
         )
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         device = torch.device(dev)
@@ -137,11 +143,11 @@ def main(opts):
         print("Initializing parameters and utils...")
         criterion = nn.MSELoss()
         total_batch_size = BATCH_SIZE * UPDATE_FREQ
-        num_training_steps_per_epoch = len(tensors["train"]) // total_batch_size
+        num_training_steps_per_epoch = len(train_dataset) // total_batch_size
         assigner = LayerDecayValueAssigner(
             list(LAYER_DECAY ** (num_layers + 1 - i) for i in range(num_layers + 2)))
         optimizer = create_optimizer(
-            args=OPTIMIZER_ARGS,
+            args=argparse.Namespace(**OPTIMIZER_ARGS),
             model=model,
             skip_list=model.no_weight_decay(),
             get_num_layer=assigner.get_layer_id,
@@ -172,7 +178,7 @@ def main(opts):
                 log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
                 lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
-                ch_names=ch_names, is_binary= nb_classes == 1
+                ch_names=ch_names, is_binary=False
             )
             print(f"saving model to {output_dir}")
             utils.save_model(
@@ -180,10 +186,10 @@ def main(opts):
                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
 
             val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
-                                 is_binary=nb_classes == 1)
+                                 is_binary=False)
             print(f"R2 of the network on the {len(tensors['val'])} val EEG: {val_stats['r2']:.2f}")
             test_stats = evaluate(test_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics,
-                                  is_binary=nb_classes == 1)
+                                  is_binary=False)
             print(f"R2 of the network on the {len(tensors['test'])} test EEG: {test_stats['r2']:.2f}")
 
             print(f"Logging val and test stats to {log_dir}")
@@ -198,6 +204,21 @@ def main(opts):
             log_writer.flush()
             with open(os.path.join(output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
+
+            if val_stats['r2'] > max_r2:
+                max_r2 = val_stats['r2']
+                print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
+                utils.save_model(
+                    args={"output_dir": output_dir}, model=model, model_without_ddp=model, optimizer=optimizer,
+                    loss_scaler=loss_scaler, epoch="best_val", model_ema=model_ema
+                )
+            if test_stats['r2'] > max_r2_test:
+                max_r2_test = test_stats['r2']
+                print(f"New best R2 on test: {max_r2_test:.4f}. Saving model.")
+                utils.save_model(
+                    args={"output_dir": output_dir}, model=model, model_without_ddp=model, optimizer=optimizer,
+                    loss_scaler=loss_scaler, epoch="best_test", model_ema=model_ema
+                )
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))

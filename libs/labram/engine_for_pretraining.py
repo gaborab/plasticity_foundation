@@ -115,7 +115,7 @@ def train_one_epoch(model: torch.nn.Module, vqnsp: torch.nn.Module,
             loss /= args.gradient_accumulation_steps
             grad_norm = loss_scaler(loss, optimizer, clip_grad=max_norm,
                                     parameters=model.parameters(), create_graph=is_second_order, update_grad=(step + 1) % args.gradient_accumulation_steps == 0)
-            loss_scale_value = loss_scaler.state_dict()["scale"]
+            loss_scale_value = loss_scaler._scaler.get_scale()
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.zero_grad()
 
