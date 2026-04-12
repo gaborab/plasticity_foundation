@@ -42,10 +42,11 @@ RECORDINGS_PER_CONDITION = None
 
 
 # Base directories
-DATA_ROOT = r".\data\STMD_data"
-FINETUNE_DIR = Path('.') / "finetune_epochs"
-PATCH_DIR = Path('.') / "postpatch_epochs"
-FINETUNE_OUTPUT_DIR = Path('.') / "finetune_outputs"
+DATA_ROOT = r".\data\raw\STMD_data"
+PROCESS_DIR = Path('..') / "data" / "processed"
+FINETUNE_DIR = PROCESS_DIR / "pre_patching"
+PATCH_DIR = PROCESS_DIR / "post_patching"
+FINETUNE_OUTPUT_DIR = Path('..')/ "outputs" / "finetune_outputs"
 
 # Model
 LABRAM_VERSION = 'labram_base_patch200_200'  # Set the model architecture to use for fine-tuning (must be supported by timm.create_model())

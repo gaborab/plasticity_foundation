@@ -5,7 +5,7 @@ import torch
 
 class EpochIO:
     """
-    Simple utility for saving/loading epoch tensors to a directory.
+    Simple utility for saving/loading epoch tensors to/from a directory.
 
     Filename convention: {subject}_{condition}_epoch{index}.pt
     Example: STMD1_left_epoch1.pt

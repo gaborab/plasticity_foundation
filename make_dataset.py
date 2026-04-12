@@ -4,20 +4,16 @@
 # Based on BIOT code base
 # https://github.com/ycq091044/BIOT
 # --------------------------------------------------------
-import os
-import pickle
 
-from multiprocessing import Pool
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import mne
 import torch
 
-from epoch_io import EpochIO
+from core.epoch_io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
-import settings
+from core import settings
 
 
 def match_and_order(raw_io: mne.io.Raw):

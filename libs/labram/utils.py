@@ -806,9 +806,10 @@ def prepare_TUAB_dataset(root):
 
 
 def get_metrics(output, target, metrics, is_binary, threshold=0.5):
-    regression_indicators = {"mse", "mae", "r2", "pearsonr"}
-    if any(m in regression_indicators for m in metrics):
-        return regression_metrics_fn(target, output, metrics=metrics)
+    # MODIFIED: add autoencoder metrics calculation
+    autoencoder_indicators = {"mse", "mae", "r2", "pearsonr"}
+    if any(m in autoencoder_indicators for m in metrics):
+        return autoencoder_metrics_fn(target, output, metrics=metrics)
 
     # kept for compatibility with previous code, but not used
     if is_binary:
@@ -832,10 +833,11 @@ def get_metrics(output, target, metrics, is_binary, threshold=0.5):
         )
     return results
 
-def regression_metrics_fn(y_true, y_pred, metrics=None):
+# ADDED: autoencoder metrics calculation function
+def autoencoder_metrics_fn(y_true, y_pred, metrics=None):
     """
     Custom bypass for the missing pyhealth function.
-    Calculates MSE, MAE, and R2 scores for the LaBraM regression head.
+    Calculates MSE, MAE, and R2 scores for the LaBraM autoencoder head.
     """
     if metrics is None:
         metrics = ["mse", "mae", "r2"]

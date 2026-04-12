@@ -15,6 +15,7 @@ from timm.utils import ModelEma
 from . import utils as utils
 from einops import rearrange
 from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
 
 def train_class_batch(model, samples, target, criterion, ch_names):
     outputs = model(samples, ch_names)
@@ -31,7 +32,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, log_writer=None,
                     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None, ch_names=None, is_binary=True):
+                    num_training_steps_per_epoch=None, update_freq=None, ch_names=None):
     input_chans = None
     if ch_names is not None:
         input_chans = utils.get_input_chans(ch_names)

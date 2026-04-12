@@ -2,10 +2,9 @@
 This class is designed to work with the epochs generated from the preprocessing step and saved to disk.
 It provides a structure for loading and accessing training, validating and testing epochs for fine-tuning the model head.
 """
-from pathlib import Path
 import random
-import settings
-from epoch_io import EpochIO
+from core import settings
+from core.epoch_io import EpochIO
 from typing import Dict, List, Any, Optional
 import torch
 

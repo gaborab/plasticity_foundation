@@ -1,10 +1,9 @@
 import time, datetime
-from pathlib import Path
 
 import torch
-import libs.labram.modeling_finetune
-import settings
-from finetune_dataset import KFoldSplitter
+from core import settings
+from core.architectures import EEGAutoencoder
+from core.datasets import KFoldSplitter
 import torch.nn as nn
 from timm.models import create_model
 
@@ -43,6 +42,7 @@ CLIP_GRAD = None
 BATCH_SIZE = 64
 UPDATE_FREQ = 1
 USE_EMA = False
+SAVE_PLOTS = True
 
 OPTIMIZER_ARGS = {
     "opt": "adamw",
@@ -67,7 +67,7 @@ def main(opts):
     """
     torch.manual_seed(settings.SEED)
     kfold = KFoldSplitter(k_folds=6)
-    datasets = kfold.split_by_subject()
+    folds = kfold.split_by_subject()
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
     ch_names = settings.CHORDER_STANDARD
     # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
@@ -82,12 +82,12 @@ def main(opts):
     max_r2s = []
     i = 1
     # ----------- CROSS-VALIDATION LOOP ------------
-    for dataset in datasets:
-        print(f"\n=== Fold {i}/{len(datasets)} ===")
-        tensors = dataset.get_datasets()
-        print(f"  Train subjects: {list(dataset.training_epochs.subjects)}")
-        print(f"  Val subjects: {list(dataset.validation_epochs.subjects)}")
-        print(f"  Test subjects: {list(dataset.testing_epochs.subjects)}")
+    for fold in folds:
+        print(f"\n=== Fold {i}/{len(folds)} ===")
+        tensors = fold.get_datasets()
+        print(f"  Train subjects: {list(fold.training_epochs.subjects)}")
+        print(f"  Val subjects: {list(fold.validation_epochs.subjects)}")
+        print(f"  Test subjects: {list(fold.testing_epochs.subjects)}")
         # create output and log directory
         print("Creating output and log directories...")
         output_dir = output_dir_base / str(i)
@@ -110,20 +110,7 @@ def main(opts):
 
         print("Initializing model with autoencoder head...")
         # initialize LaBraM
-        model = create_model(
-            settings.LABRAM_VERSION,
-            pretrained=False,  # True?
-        )
-        input_dim = model.embed_dim
-        hidden_dim = input_dim // 2  # Common heuristic
-        target_dim = train_dataset.target_dim
-        # set model head as an MLP for autoencoding
-        model.head = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, target_dim),
-        )
+        model = EEGAutoencoder(train_dataset.target_dim)
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         device = torch.device(dev)
         model.to(device)
