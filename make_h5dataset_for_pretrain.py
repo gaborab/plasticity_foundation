@@ -1,3 +1,16 @@
+"""
+This script prepares a hdf5 file for pretraining.
+
+Applies the following preprocessing steps to match LaBraM's internal representation:
+    - low pass filter: 75 Hz
+    - high pass filter: 0.1 Hz
+    - resampling to 200 Hz
+    - removes channels which can't be mapped to the 10-20 system
+    - orders channels
+
+It reads all .edf files in rawDataPath and saves to savePath.
+"""
+
 from pathlib import Path
 from shock.utils import h5Dataset
 from shock.utils import preprocessing_cnt

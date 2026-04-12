@@ -58,13 +58,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     param_group["weight_decay"] = wd_schedule_values[it]
 
         samples = samples.float().to(device, non_blocking=True) / 100
-        if samples.shape[-1] == 201:
-            samples = samples[..., :200]
-        if samples.ndim == 3:
-            samples.unsqueeze(2)  # add channel dimension
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
-        
-        targets = targets.to(device, non_blocking=True).float().view(-1, 1)
+
+        # flatten to shape (batch_size, n_channels*time)
+        targets = targets.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
 
         with torch.cuda.amp.autocast():
             loss, output = train_class_batch(
@@ -152,7 +149,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
         target = batch[-1]
         EEG = EEG.float().to(device, non_blocking=True) / 100
         EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
-        target = target.to(device, non_blocking=True).float().view(-1, 1)
+        target = target.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
 
 
         
@@ -164,7 +161,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
         output_np = output.detach().cpu().numpy()
         target_np = target.detach().cpu().numpy()
 
-        results = utils.get_metrics(output.numpy(), target.numpy(), metrics, is_binary)
+        results = utils.get_metrics(output_np, target_np, metrics, is_binary)
         pred.append(output)
         true.append(target)
 
@@ -178,8 +175,10 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
     metric_logger.synchronize_between_processes()
     print('* MSE {losses.global_avg:.4f} R2 {r2.global_avg:.4f}'
           .format(losses=metric_logger.loss, r2=metric_logger.r2))
-    pred = torch.cat(pred, dim=0).numpy()
-    true = torch.cat(true, dim=0).numpy()
+
+
+    pred = torch.cat(pred, dim=0).cpu().detach().numpy()
+    true = torch.cat(true, dim=0).cpu().detach().numpy()
 
     ret = utils.get_metrics(pred, true, metrics, is_binary=is_binary)
     for key, value in ret.items():

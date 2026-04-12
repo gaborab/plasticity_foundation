@@ -20,10 +20,15 @@ class FinetuneLoader(torch.utils.data.Dataset):
             for cond, epoch_list in conds.items():
                 for epoch in epoch_list:
                     tensor_data = torch.tensor(epoch, dtype=torch.float32)
+
+                    # cut last time point for matching LaBraM expectations
+                    if tensor_data.shape[-1] == 201:
+                        tensor_data = tensor_data[..., :200]
+
                     self.samples.append((tensor_data, tensor_data))
                # self.samples.extend((data, subj, cond))
-    #TODO replace regression with autoencoder
-    #TODO does run_general_finetuning even have any specific logic for generalizing or is it all happening here?
+
+    #TODO question for future: does run_general_finetuning even have any specific logic for generalizing or is it all happening here?
 
     @property
     def target_dim(self) -> int:
