@@ -5,7 +5,6 @@ from core import settings
 from core.architectures import EEGAutoencoder
 from core.datasets import KFoldSplitter
 import torch.nn as nn
-from timm.models import create_model
 
 from libs.labram import utils
 from libs.labram.engine_for_finetuning import train_one_epoch, evaluate
@@ -29,10 +28,10 @@ import numpy as np
 # -----------------------------------
 
 
-LR = 5e-4
+LR = 1e-3
 MIN_LR = 1e-6
-WEIGHT_DECAY = 5e-2
-EPOCHS = 30
+WEIGHT_DECAY = 5e-3
+EPOCHS = 60
 
 WARMUP_EPOCHS = 5
 WARMUP_STEPS = -1  # overloads epochs if set to >0
@@ -50,6 +49,19 @@ OPTIMIZER_ARGS = {
     "weight_decay": WEIGHT_DECAY,
     "opt_eps": 1e-8,
     "opt_betas": None
+}
+
+run_metadata = {
+    "hyperparameters": {
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "warmup_steps": WARMUP_EPOCHS,
+        "warmup_steps_end": WARMUP_EPOCHS,
+        "weight_decay": WEIGHT_DECAY,
+        "lr": LR,
+        "loss_function": "MSE",
+    },
+    "architecture": "general_autoencoder"
 }
 
 
@@ -80,6 +92,7 @@ def main(opts):
     output_dir_base.mkdir(parents=True, exist_ok=True)
     total_time = 0
     max_r2s = []
+    max_r2_test_epochs = []
     i = 1
     # ----------- CROSS-VALIDATION LOOP ------------
     for fold in folds:
@@ -153,6 +166,7 @@ def main(opts):
         start_time = time.time()
         max_r2 = 0.0
         max_r2_test = 0.0
+        max_r2_test_epoch = 0
         # --------- TRAINING LOOP ----------
         print(f"Training for {EPOCHS} epochs")
         for epoch in range(EPOCHS):
@@ -166,7 +180,7 @@ def main(opts):
                 log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
                 lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
-                ch_names=ch_names, is_binary=False
+                ch_names=ch_names
             )
             print(f"Saving model to {output_dir}")
             utils.save_model(
@@ -213,6 +227,8 @@ def main(opts):
                 )
             if test_stats['r2'] > max_r2_test:
                 max_r2_test = test_stats['r2']
+                max_r2_test_epoch = epoch
+
                 print(f"New best R2 on test: {max_r2_test:.4f}. Saving model.")
                 utils.save_model(
                     args= argparse.Namespace(**{"output_dir": output_dir}),
@@ -229,6 +245,7 @@ def main(opts):
             "test": max_r2_test,
         }
         max_r2s.append(stats)
+        max_r2_test_epochs.append(max_r2_test_epoch)
 
         fold_time = time.time() - start_time
         fold_time_str = str(datetime.timedelta(seconds=int(fold_time)))
@@ -243,11 +260,22 @@ def main(opts):
         print(f"      {i}", fold_res)
     print("")
     print("Average results: ")
-    print("     validation r2: ", np.mean([fold_res['val'] for fold_res in max_r2s]))
-    print("     test r2: ", np.mean([fold_res['test'] for fold_res in max_r2s]))
+    mean_val_r2 = np.mean([fold_res['val'] for fold_res in max_r2s])
+    mean_test_r2 = np.mean([fold_res['test'] for fold_res in max_r2s])
+    print("     validation r2: ", mean_val_r2)
+    print("     test r2: ", mean_test_r2)
 
+    run_metadata["results"] = {
+        "r2_per_fold": max_r2s,
+        "mean_val_r2": float(mean_val_r2),
+        "mean_test_r2": float(mean_test_r2),
+        "max_r2_test_epoch": max_r2_test_epochs,
+    }
 
     print(f"Total training time: {total_time_str}")
+
+    with open(output_dir_base / "metadata.json", mode="w") as f:
+        json.dump(run_metadata, f)
 
 
 def write_stat_logs(log_writer, val_stats, test_stats, epoch):

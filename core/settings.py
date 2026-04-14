@@ -39,14 +39,18 @@ RSFREQ = 200
 INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
 RECORDINGS_PER_CONDITION = None
+TIME_WINDOW = (-0.2, 0.8)# extended time window for labram compatibility
 
 
 # Base directories
-DATA_ROOT = r".\data\raw\STMD_data"
-PROCESS_DIR = Path('..') / "data" / "processed"
+CORE_DIR = Path(__file__).resolve().parent
+BASE_DIR = CORE_DIR.parent
+DATA_ROOT = BASE_DIR / "data" / "raw"/"STMD_data"
+PROCESS_DIR = BASE_DIR / "data" / "processed"
 FINETUNE_DIR = PROCESS_DIR / "pre_patching"
 PATCH_DIR = PROCESS_DIR / "post_patching"
-FINETUNE_OUTPUT_DIR = Path('..')/ "outputs" / "finetune_outputs"
+FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
+PLOT_DIR = BASE_DIR / "outputs" / "plots"
 
 # Model
 LABRAM_VERSION = 'labram_base_patch200_200'  # Set the model architecture to use for fine-tuning (must be supported by timm.create_model())

@@ -1,12 +1,12 @@
 import torch.nn as nn
 from timm.models import create_model
 from core import settings
+from libs.labram import modeling_finetune
 
 
 class EEGAutoencoder(nn.Module):
     def __init__(self, target_dim):
         super(EEGAutoencoder, self).__init__()
-
         self.model = create_model(
             settings.LABRAM_VERSION,
             pretrained=False,
@@ -21,8 +21,8 @@ class EEGAutoencoder(nn.Module):
             nn.Linear(hidden_dim, target_dim),
         )
 
-    def forward(self, x, input_chans=None):
-        return self.model.forward(x, input_chans=input_chans)
+    def forward(self, x, input_chans):
+        return self.model(x, input_chans)
 
     def get_num_layers(self):
         return self.model.get_num_layers()

@@ -68,7 +68,7 @@ if __name__ == "__main__":
         ica_enabled=True,
         ica_n_components=15,
         bad_channels='interpolate',
-        time_window=(-0.2, 0.8), # extended time window for labram compatibility
+        time_window= settings.TIME_WINDOW,
         baseline_win=(-0.2, 0),
         split_by='both',
         re_reference='average',

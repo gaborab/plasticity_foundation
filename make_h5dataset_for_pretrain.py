@@ -17,7 +17,7 @@ from shock.utils import preprocessing_cnt
 from shock.utils import  preprocessing_edf
 
 savePath = Path(r'.\pretrain')
-rawDataPath = Path(r'.\data\STMD_data\STMD1\Baseline')
+rawDataPath = Path(r'data/raw/STMD_data\STMD1\Baseline')
 group = rawDataPath.rglob('*.edf')
 
 # preprocessing parameters

@@ -18,8 +18,8 @@ class FinetuneLoader(torch.utils.data.Dataset):
         for subj, conds in epochs_dict.items():
             for cond, epoch_list in conds.items():
                 for epoch in epoch_list:
-                    tensor_data = torch.tensor(epoch, dtype=torch.float32)
-
+                    #tensor_data = torch.tensor(epoch, dtype=torch.float32)
+                    tensor_data = epoch.clone().detach()
                     # cut last time point for matching LaBraM expectations
                     if tensor_data.shape[-1] == 201:
                         tensor_data = tensor_data[..., :200]
