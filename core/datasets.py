@@ -3,31 +3,50 @@ This class is designed to work with the epochs generated from the preprocessing 
 It provides a structure for loading and accessing training, validating and testing epochs for fine-tuning the model head.
 """
 import random
-from core import settings
+from pathlib import Path
+
+from core import utils
 from core.epoch_io import EpochIO
 from typing import Dict, List, Any, Optional
 import torch
 
-class FinetuneLoader(torch.utils.data.Dataset):
+
+class FinetuneDataset(torch.utils.data.Dataset):
     """
     This class can be implemented to wrap a list of epoch tensors into a PyTorch Dataset for use in DataLoaders during fine-tuning.
+    Expects input dictionaries in the format: {subject: {condition: [epoch_tensor1, epoch_tensor2, ...]}}
     """
-    def __init__(self, epochs_dict: Dict[str, Dict[str, List[Any]]]):
+
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], window_size: int, target_mode='wavelet', wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None):
         self.samples = []
         self.subjects = list(epochs_dict.keys())
         for subj, conds in epochs_dict.items():
             for cond, epoch_list in conds.items():
-                for epoch in epoch_list:
-                    #tensor_data = torch.tensor(epoch, dtype=torch.float32)
-                    tensor_data = epoch.clone().detach()
+                for idx, epoch in epoch_list:
+                    # tensor_data = torch.tensor(epoch, dtype=torch.float32)
+                    epoch_data = epoch.clone().detach()
                     # cut last time point for matching LaBraM expectations
-                    if tensor_data.shape[-1] == 201:
-                        tensor_data = tensor_data[..., :200]
+                    epoch_data = utils.cut_to_timewindow(epoch_data, window_size)
 
-                    self.samples.append((tensor_data, tensor_data))
-               # self.samples.extend((data, subj, cond))
+                    if target_mode == 'autoencoder':
+                        self.samples.append((epoch_data, epoch_data))
 
-    #TODO question for future: does run_general_finetuning even have any specific logic for generalizing or is it all happening here?
+                    if target_mode == 'wavelet':
+                        if wavelet_dir is None:
+                            print("WARNING: wavelet_dir not provided, unable to load wavelet targets for spectral decoding.")
+                            break
+                        io_handler = EpochIO(ext='.pt')
+
+                        mags = io_handler.load_specific(directory=wavelet_dir, subject=subj, cond=cond,
+                                                        idx=str(idx), marker="wavelet")
+
+                        mags_data = mags.clone().detach() if mags is not None else None
+                        print("dimensions of mags:", mags_data.shape) #TODO
+                        if mags_data is not None:
+                            mags_data = utils.cut_to_timewindow(mags_data, window_size)
+                            print("dimensions of mags after cut:", mags_data.shape) #TODO
+                            self.samples.append((epoch_data, mags_data))
+
 
     @property
     def target_dim(self) -> int:
@@ -42,27 +61,24 @@ class FinetuneLoader(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
+
 class FinetuneSplits:
     """
-    This class can be implemented to hold the training, validation, and testing epochs as torch dataset loaders for a single fold of cross-validation. It provides a method `get_datasets()` to return these epochs as tensors for model input.
-    Expects input dictionaries in the format: {subject: {condition: [epoch_tensor1, epoch_tensor2, ...]}}
+    This class can be implemented to hold the training, validation, and testing epochs for a single fold of cross-validation.
+
     """
 
     def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict):
-        self.training_epochs = FinetuneLoader(training_dict)
-        self.validation_epochs = FinetuneLoader(validation_dict)
-        self.testing_epochs = FinetuneLoader(testing_dict)
+        self.training_epochs = training_dict
+        self.validation_epochs = validation_dict
+        self.testing_epochs = testing_dict
 
-    def get_datasets(self) -> Dict[str, FinetuneLoader]:
-        """This method can be implemented to return the training, validation, and testing epochs as torch datasets for model input.
-        Keys: "train", "val", "test"
-        """
+    def initialize_datasets(self, target_mode='wavelet', window_size: int = 200, wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None):
+        training_dataset = FinetuneDataset(self.training_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size = window_size)
+        validation_dataset = FinetuneDataset(self.validation_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size = window_size)
+        testing_dataset = FinetuneDataset(self.testing_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size=window_size)
 
-        return {
-            "train": self.training_epochs,
-            "val": self.validation_epochs,
-            "test": self.testing_epochs
-        }
+        return training_dataset, validation_dataset, testing_dataset
 
 
 class KFoldSplitter:
@@ -72,11 +88,12 @@ class KFoldSplitter:
     and `settings.FINETUNE_DIR`.
     """
 
-    def __init__(self, all_epochs: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6, seed: int = settings.SEED):
-        if all_epochs is None:
+    def __init__(self, data_dir: Path, seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6):
+        if all_data is None:
             io_handler = EpochIO(ext='.pt')
-            all_epochs = io_handler.load_all(settings.FINETUNE_DIR)
-        self.all_epochs = all_epochs
+            # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
+            all_data = io_handler.load_all_epochs(data_dir)
+        self.all_data = all_data
         self.k_folds = k_folds
         self.seed = seed
 
@@ -86,13 +103,13 @@ class KFoldSplitter:
         Used for fine-tuning generalizable models.
         Returns: a list of `FinetuneDataset` instances, one per fold.
         """
-        subjects = list(self.all_epochs.keys())
+        subjects = list(self.all_data.keys())
         rng = random.Random(self.seed)
         rng.shuffle(subjects)
         # Split subjects into K folds
         folds = [subjects[i::self.k_folds] for i in range(self.k_folds)]
         # Iterate over folds to create train/val/test splits for each fold
-        datasets = []
+        splits = []
         for i in range(self.k_folds):
             test_subj = folds[i]
             train_val_subj = [s for s in subjects if s not in test_subj]
@@ -100,13 +117,9 @@ class KFoldSplitter:
             split_idx = len(train_val_subj) // 5  # 20% for validation
             val_subj = train_val_subj[:split_idx]  # 20% for validation
             train_subj = train_val_subj[split_idx:]  # 80% for training
-            train = {subject: self.all_epochs[subject] for subject in train_subj}
-            val = {subject: self.all_epochs[subject] for subject in val_subj}
-            test = {subject: self.all_epochs[subject] for subject in test_subj}
-            datasets.append(FinetuneSplits(training_dict=train, validation_dict=val, testing_dict=test))
+            train = {subject: self.all_data[subject] for subject in train_subj}
+            val = {subject: self.all_data[subject] for subject in val_subj}
+            test = {subject: self.all_data[subject] for subject in test_subj}
+            splits.append(FinetuneSplits(training_dict=train, validation_dict=val, testing_dict=test))
 
-        return datasets
-
-    def split_by_epoch(self, dataset: FinetuneSplits):
-        # This method can be implemented to split the dataset into K folds for cross-validation
-        pass
+        return splits

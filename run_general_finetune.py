@@ -1,8 +1,10 @@
 import time, datetime
+from collections import OrderedDict
 
 import torch
 from core import settings
-from core.architectures import EEGAutoencoder
+from core import utils as core_utils
+from core.architectures import EEGAutoencoder, EEGSpectralDecoder
 from core.datasets import KFoldSplitter
 import torch.nn as nn
 
@@ -15,6 +17,7 @@ import argparse
 import os
 import json
 import numpy as np
+
 # Load datasets with 6-fold cross-validation splits
 
 
@@ -27,6 +30,7 @@ import numpy as np
 # creating dataloaders, initializing the model, and training/evaluating across folds.
 # -----------------------------------
 
+CHECKPOINT_PATH = settings.CHECKPOINT_DIR / "labram-base.pth"
 
 LR = 1e-3
 MIN_LR = 1e-6
@@ -68,6 +72,7 @@ run_metadata = {
 def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
     parser.add_argument('--model_name', type=str)
+    parser.add_argument('--target_mode', type=str, default='wavelet')
 
     return parser.parse_args()
 
@@ -78,7 +83,7 @@ def main(opts):
     dataloaders, initializing the model, and training/evaluating across folds.
     """
     torch.manual_seed(settings.SEED)
-    kfold = KFoldSplitter(k_folds=6)
+    kfold = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, k_folds=6)
     folds = kfold.split_by_subject()
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
     ch_names = settings.CHORDER_STANDARD
@@ -90,6 +95,30 @@ def main(opts):
 
     output_dir_base = settings.FINETUNE_OUTPUT_DIR / opts.model_name
     output_dir_base.mkdir(parents=True, exist_ok=True)
+
+    # Handle loading state_dict from pretrained checkpoint
+    print("Load ckpt from %s" % CHECKPOINT_PATH)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
+    checkpoint_model = None
+    for model_key in ["model", "module"]:
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    if checkpoint_model is not None:
+        all_keys = list(checkpoint_model.keys())
+        new_dict = OrderedDict()
+        for key in all_keys:
+            if key.startswith('student.'):
+                new_dict[key[8:]] = checkpoint_model[key]
+            else:
+                pass
+        checkpoint_model = new_dict
+
+    checkpoint_model = core_utils.add_prefix_dict_keys(checkpoint_model, prefix='model')
+
     total_time = 0
     max_r2s = []
     max_r2_test_epochs = []
@@ -97,36 +126,62 @@ def main(opts):
     # ----------- CROSS-VALIDATION LOOP ------------
     for fold in folds:
         print(f"\n=== Fold {i}/{len(folds)} ===")
-        tensors = fold.get_datasets()
-        print(f"  Train subjects: {list(fold.training_epochs.subjects)}")
-        print(f"  Val subjects: {list(fold.validation_epochs.subjects)}")
-        print(f"  Test subjects: {list(fold.testing_epochs.subjects)}")
+        print(f"  Train subjects: {list(fold.training_epochs.keys())}")
+        print(f"  Val subjects: {list(fold.validation_epochs.keys())}")
+        print(f"  Test subjects: {list(fold.testing_epochs.keys())}")
         # create output and log directory
         print("Creating output and log directories...")
         output_dir = output_dir_base / str(i)
         output_dir.mkdir(parents=True, exist_ok=True)
         log_dir = output_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+
+        print("Initializing model with autoencoder head...")
+        # initialize LaBraM
+        model = None
+        if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet':
+            model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS)
+        elif opts.target_mode == 'autoencoder':
+            model = EEGAutoencoder(**settings.AUTOENCODER_PARAMS)
+        else:
+            raise ValueError(
+                f"Invalid target mode: {opts.target_mode}. Must be 'wavelet', 'superlet' or 'autoencoder'.")
+
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        device = torch.device(dev)
+        print("Setting pretrained weights from checkpoint...")
+        state_dict = model.state_dict()
+        for k in ['head.weight', 'head.bias']:
+            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+
+        all_keys = list(checkpoint_model.keys())
+        for key in all_keys:
+            if "relative_position_index" in key:
+                checkpoint_model.pop(key)
+
+        utils.load_state_dict(model, checkpoint_model, prefix='')
+
+        model.to(device)
+
         # INITIALIZING
         # initialize samplers
-        print("Initializing dataloaders...")
-        train_dataset = tensors["train"]
-        val_dataset = tensors["val"]
-        test_dataset = tensors["test"]
+        print(f"Initializing datasets with {opts.target_mode} target mode...")
+        train_dataset, val_dataset, test_dataset = fold.initialize_datasets(target_mode=opts.target_mode,
+                                                                            window_size=settings.WINDOW_SIZE,
+                                                                            wavelet_dir=settings.FINETUNE_WAVELET_DIR,
+                                                                            superlet_dir=settings.FINETUNE_SUPERLET_DIR)
+
         train_sampler = torch.utils.data.RandomSampler(train_dataset)
         val_sampler = torch.utils.data.SequentialSampler(val_dataset)
         test_sampler = torch.utils.data.SequentialSampler(test_dataset)
         # initialize dataloaders
+        print("Initializing dataloaders...")
         train_loader = torch.utils.data.DataLoader(train_dataset, sampler=train_sampler, batch_size=BATCH_SIZE)
         val_loader = torch.utils.data.DataLoader(val_dataset, sampler=val_sampler, batch_size=BATCH_SIZE)
         test_loader = torch.utils.data.DataLoader(test_dataset, sampler=test_sampler, batch_size=BATCH_SIZE)
 
-        print("Initializing model with autoencoder head...")
-        # initialize LaBraM
-        model = EEGAutoencoder(train_dataset.target_dim)
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
-        device = torch.device(dev)
-        model.to(device)
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
         num_layers = model.get_num_layers()
         print(f"Model initialized to {dev}")
@@ -184,7 +239,7 @@ def main(opts):
             )
             print(f"Saving model to {output_dir}")
             utils.save_model(
-                args= argparse.Namespace(**{"output_dir": output_dir}),
+                args=argparse.Namespace(**{"output_dir": output_dir}),
                 model=model,
                 model_without_ddp=model,
                 optimizer=optimizer,
@@ -217,7 +272,7 @@ def main(opts):
                 max_r2 = val_stats['r2']
                 print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
                 utils.save_model(
-                    args= argparse.Namespace(**{"output_dir": output_dir}),
+                    args=argparse.Namespace(**{"output_dir": output_dir}),
                     model=model,
                     model_without_ddp=model,
                     optimizer=optimizer,
@@ -231,7 +286,7 @@ def main(opts):
 
                 print(f"New best R2 on test: {max_r2_test:.4f}. Saving model.")
                 utils.save_model(
-                    args= argparse.Namespace(**{"output_dir": output_dir}),
+                    args=argparse.Namespace(**{"output_dir": output_dir}),
                     model=model,
                     model_without_ddp=model,
                     optimizer=optimizer,
@@ -253,7 +308,7 @@ def main(opts):
         total_time += fold_time
         i += 1
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print("="*30)
+    print("=" * 30)
     print(f"Training finished for {i} folds.")
     print("Results:")
     for i, fold_res in enumerate(max_r2s):

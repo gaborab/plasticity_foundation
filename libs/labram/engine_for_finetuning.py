@@ -26,6 +26,7 @@ def train_class_batch(model, samples, target, criterion, ch_names):
 def get_loss_scale_for_deepspeed(model):
     optimizer = model.optimizer
     return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
+# TODO move necessary logic to core/engine.py, restore original train_one_epoch and evaluate functions.
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -61,7 +62,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         samples = samples.float().to(device, non_blocking=True) / 100
         samples = rearrange(samples, 'B N (A T) -> B N A T', T=200)
 
-        # flatten to shape (batch_size, n_channels*time)
+        # flatten to shape (batch_size, n_channels*time) or batch_size, n_channels*n_freqs*time) for spectral targets
         targets = targets.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
 
         with torch.cuda.amp.autocast():

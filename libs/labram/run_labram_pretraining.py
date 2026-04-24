@@ -241,21 +241,21 @@ def main(args):
 
     print("Use step level LR & WD scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
-        args.lr, args.min_lr, args.all_epochs, num_training_steps_per_epoch,
+        args.lr, args.min_lr, args.all_data, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
     )
     if args.weight_decay_end is None:
         args.weight_decay_end = args.weight_decay
     wd_schedule_values = utils.cosine_scheduler(
-        args.weight_decay, args.weight_decay_end, args.all_epochs, num_training_steps_per_epoch)
+        args.weight_decay, args.weight_decay_end, args.all_data, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
 
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
-    print(f"Start training for {args.all_epochs} epochs")
+    print(f"Start training for {args.all_data} epochs")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.all_epochs):
+    for epoch in range(args.start_epoch, args.all_data):
         if args.distributed:
             for data_loader_train in data_loader_train_list:
                 data_loader_train.sampler.set_epoch(epoch)
