@@ -1,8 +1,9 @@
-from typing import Tuple
-
+from pathlib import Path
+from typing import Tuple, Optional
 import numpy as np
 import pywt
-
+import torch
+from sklearn.metrics import r2_score
 
 
 def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, **kwargs):
@@ -68,9 +69,60 @@ def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tupl
 
     return tensor[..., from_index:to_index]
 
+
+def cut_to_patchsize(tensor, window_size: int):
+    """
+    Cuts the input tensor to be divisible by the specified patch size along the time dimension.
+    Assumes the time dimension is the last dimension of the tensor.
+    """
+    time_points = tensor.shape[-1]
+    excess = time_points % window_size
+    if excess > 0:
+        return tensor[..., :-excess]
+    return tensor
+
 def add_prefix_dict_keys(dict, prefix, separator='.'):
     """
     Adds a prefix to all keys in the input dictionary.
     """
 
     return {f"{prefix}{separator}{key}": value for key, value in dict.items()}
+
+def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n_chans, time_window, n_freqs: Optional[int] = None, **kwargs):
+    """
+    Reconstructs the model output from a given checkpoint and input tensor, reshaping it according to `n_chans`, `n_freqs`, and `time_window` parameters.
+
+    """
+    checkpoint = torch.load(checkpoint_path)
+    model.load_state_dict(checkpoint["model"])
+    with torch.no_grad():
+        reconstruction = model(input, input_chans).squeeze(0) # remove batch dimension
+    if n_freqs is not None:
+        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, n_freqs, time_window))
+    else:
+        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, time_window))
+
+    epoch_idx = checkpoint["epoch"]
+
+    return recon, epoch_idx
+
+def calculate_r2(y_true, y_pred):
+    """
+    Calculates the R-squared metric for the given true and predicted values of single-channel data.
+    The function expects either 1D or 2D arrays for y_true and y_pred, where the last dimension corresponds to time points. If the input is 2D, it will be flattened before calculation.
+    """
+    if y_true.shape != y_pred.shape:
+        raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
+    if y_true.ndim > 2 or y_pred.ndim > 2:
+        raise ValueError(f"Expected y_true and y_pred to be 1D or 2D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
+
+    if y_true.ndim == 2:
+        # Flatten the arrays if they are 2D (e.g., for wavelet targets)
+        y_true = y_true.flatten()
+        y_pred = y_pred.flatten()
+
+    r2 = r2_score(y_true, y_pred)
+    return r2
+
+
+

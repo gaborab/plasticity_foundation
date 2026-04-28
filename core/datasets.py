@@ -26,7 +26,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
                     # tensor_data = torch.tensor(epoch, dtype=torch.float32)
                     epoch_data = epoch.clone().detach()
                     # cut last time point for matching LaBraM expectations
-                    epoch_data = utils.cut_to_timewindow(epoch_data, window_size)
+                    epoch_data = utils.cut_to_patchsize(epoch_data, window_size)
 
                     if target_mode == 'autoencoder':
                         self.samples.append((epoch_data, epoch_data))
@@ -39,13 +39,14 @@ class FinetuneDataset(torch.utils.data.Dataset):
 
                         mags = io_handler.load_specific(directory=wavelet_dir, subject=subj, cond=cond,
                                                         idx=str(idx), marker="wavelet")
-
-                        mags_data = mags.clone().detach() if mags is not None else None
+                        if mags is None:
+                            print(f"WARNING: wavelet target not found for subject: {subj}, condition: {cond}, id: {idx}")
+                            continue
+                        mags_data = mags.clone().detach()
                         print("dimensions of mags:", mags_data.shape) #TODO
-                        if mags_data is not None:
-                            mags_data = utils.cut_to_timewindow(mags_data, window_size)
-                            print("dimensions of mags after cut:", mags_data.shape) #TODO
-                            self.samples.append((epoch_data, mags_data))
+                        mags_data = utils.cut_to_patchsize(mags_data, window_size)
+                        print("dimensions of mags after cut:", mags_data.shape) #TODO
+                        self.samples.append((epoch_data, mags_data))
 
 
     @property

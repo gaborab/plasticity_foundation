@@ -63,9 +63,7 @@ run_metadata = {
         "warmup_steps_end": WARMUP_EPOCHS,
         "weight_decay": WEIGHT_DECAY,
         "lr": LR,
-        "loss_function": "MSE",
     },
-    "architecture": "general_autoencoder"
 }
 
 
@@ -326,6 +324,8 @@ def main(opts):
         "mean_test_r2": float(mean_test_r2),
         "max_r2_test_epoch": max_r2_test_epochs,
     }
+
+    run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS
 
     print(f"Total training time: {total_time_str}")
 
