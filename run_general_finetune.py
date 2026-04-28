@@ -42,8 +42,8 @@ WARMUP_STEPS = -1  # overloads epochs if set to >0
 WEIGHT_DECAY_END = 2 * WEIGHT_DECAY  # higher end wd helps to lock in learnt features
 LAYER_DECAY = 0.9
 CLIP_GRAD = None
-BATCH_SIZE = 64
-UPDATE_FREQ = 1
+BATCH_SIZE = 8
+UPDATE_FREQ = 8
 USE_EMA = False
 SAVE_PLOTS = True
 
@@ -71,6 +71,7 @@ def get_args():
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
     parser.add_argument('--model_name', type=str)
     parser.add_argument('--target_mode', type=str, default='wavelet')
+    parser.add_argument('--k_folds', type=int, default=6)
 
     return parser.parse_args()
 
@@ -81,7 +82,7 @@ def main(opts):
     dataloaders, initializing the model, and training/evaluating across folds.
     """
     torch.manual_seed(settings.SEED)
-    kfold = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, k_folds=6)
+    kfold = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, k_folds=opts.k_folds)
     folds = kfold.split_by_subject()
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
     ch_names = settings.CHORDER_STANDARD
@@ -182,7 +183,7 @@ def main(opts):
 
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
         num_layers = model.get_num_layers()
-        print(f"Model initialized to {dev}")
+        print(f"Model initialized to {dev}, {torch.cuda.get_device_name(0)}")
         # set exponential moving average (EMA) model if enabled
         model_ema = None
         if USE_EMA:
@@ -235,6 +236,7 @@ def main(opts):
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
                 ch_names=ch_names
             )
+            print("train statistics: ", train_stats)
             print(f"Saving model to {output_dir}")
             utils.save_model(
                 args=argparse.Namespace(**{"output_dir": output_dir}),
@@ -248,10 +250,10 @@ def main(opts):
 
             val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
                                  is_binary=False)
-            print(f"R2 of the network on the {len(tensors['val'])} val EEG: {val_stats['r2']:.2f}")
+            print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
             test_stats = evaluate(test_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics,
                                   is_binary=False)
-            print(f"R2 of the network on the {len(tensors['test'])} test EEG: {test_stats['r2']:.2f}")
+            print(f"R2 of the network on the {len(test_dataset)} test EEG: {test_stats['r2']:.2f}")
 
             print(f"Logging val and test stats to {log_dir}")
             write_stat_logs(log_writer, val_stats, test_stats, epoch)
@@ -322,7 +324,7 @@ def main(opts):
         "r2_per_fold": max_r2s,
         "mean_val_r2": float(mean_val_r2),
         "mean_test_r2": float(mean_test_r2),
-        "max_r2_test_epoch": max_r2_test_epochs,
+        "max_r2_test_epochs": max_r2_test_epochs,
     }
 
     run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS

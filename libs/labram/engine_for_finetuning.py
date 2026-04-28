@@ -43,6 +43,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
+    if update_freq is not None:
+        print(f"using gradient accumulation: {update_freq} steps ")
 
     optimizer.zero_grad()
 
@@ -70,7 +72,6 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 model, samples, targets, criterion, input_chans)
 
         loss_value = loss.item()
-        loss/=update_freq
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))

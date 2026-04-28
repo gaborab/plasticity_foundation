@@ -70,9 +70,9 @@ def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tupl
     return tensor[..., from_index:to_index]
 
 
-def cut_to_patchsize(tensor, window_size: int):
+def cut_to_size(tensor, window_size: int):
     """
-    Cuts the input tensor to be divisible by the specified patch size along the time dimension.
+    Cuts the input tensor to be divisible by the specified size along the time dimension.
     Assumes the time dimension is the last dimension of the tensor.
     """
     time_points = tensor.shape[-1]
@@ -88,9 +88,9 @@ def add_prefix_dict_keys(dict, prefix, separator='.'):
 
     return {f"{prefix}{separator}{key}": value for key, value in dict.items()}
 
-def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n_chans, time_window, n_freqs: Optional[int] = None, **kwargs):
+def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n_chans, window_size, n_freqs: Optional[int] = None, **kwargs):
     """
-    Reconstructs the model output from a given checkpoint and input tensor, reshaping it according to `n_chans`, `n_freqs`, and `time_window` parameters.
+    Reconstructs the model output from a given checkpoint and input tensor, reshaping it according to `n_chans`, `n_freqs`, and `window_size` parameters.
 
     """
     checkpoint = torch.load(checkpoint_path)
@@ -98,12 +98,11 @@ def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n
     with torch.no_grad():
         reconstruction = model(input, input_chans).squeeze(0) # remove batch dimension
     if n_freqs is not None:
-        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, n_freqs, time_window))
+        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, n_freqs, window_size))
     else:
-        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, time_window))
+        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, window_size))
 
     epoch_idx = checkpoint["epoch"]
-
     return recon, epoch_idx
 
 def calculate_r2(y_true, y_pred):

@@ -6,20 +6,16 @@ class BaseMLPWrapper(nn.Module):
     """
     Parent class for models with an MLP head.
     """
-    def __init__(self, target_dim, model_version='labram_base_patch200_200'):
+    def __init__(self, target_dim, hidden_dim, model_version='labram_base_patch200_200'):
         super().__init__()
 
-        # Initialize foundation model
         self.model = create_model(model_version, pretrained=True)
 
-        # Build the shared math box
         input_dim = self.model.embed_dim
-        hidden_dim = input_dim // 2
-
         self.model.head = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
             nn.LayerNorm(hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, target_dim),
         )
 
@@ -36,7 +32,7 @@ class EEGAutoencoder(BaseMLPWrapper):
     The head is designed for autoencoding, where the target is the original input EEG epoch tensor.
     """
     def __init__(self, n_chans, target_dim, model_version='labram_base_patch200_200', **kwargs):
-        super(EEGAutoencoder, self).__init__(target_dim, model_version)
+        super(EEGAutoencoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=512)
         self.n_chans = n_chans
 
     def forward(self, x, input_chans):
@@ -64,7 +60,7 @@ class EEGSpectralDecoder(BaseMLPWrapper):
     The head is designed for spectral decoding, where the target is a spectral representation of the input EEG epoch tensor (e.g., wavelet coefficients).
     """
     def __init__(self, n_chans, n_freqs, target_dim, model_version='labram_base_patch200_200', **kwargs):
-        super(EEGSpectralDecoder, self).__init__(target_dim, model_version)
+        super(EEGSpectralDecoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=1024)
         self.n_chans = n_chans
         self.n_freqs = n_freqs
 
