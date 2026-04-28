@@ -16,6 +16,7 @@ from core.epoch_io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
 from core import settings
 from core import utils
+from typing import Dict, Any, Tuple
 
 
 def match_and_order(raw_io: mne.io.Raw):
@@ -32,10 +33,21 @@ def match_and_order(raw_io: mne.io.Raw):
     if len(settings.CHORDER_STANDARD) == len(raw_io.ch_names):
         raw_io.reorder_channels(settings.CHORDER_STANDARD)
 
+def rescale_to_uv(epochs: Dict[str, Dict[str, Dict[str, Any]]]):
+    for subj, trial_conds in epochs.items(): # STMD1, baseline
+        for trial_cond, conds in trial_conds.items(): # baseline, left_1
+            for cond, epochs_data in conds.items(): # left_1, data
+                print(f"Rescaling {subj} {trial_cond} {cond} to uV, original scale: {epochs_data.get_data().mean()} V")
+                epochs_data.apply_function(lambda x: x * 1e6) # rescale to uV
+                print(f"Rescaled {subj} {trial_cond} {cond} to uV, new scale: {epochs_data.get_data().mean()} uV")
+    return epochs
 
-def dump_epoch_data(epochs: dict[str, dict[str, mne.Epochs]], path: Path, io_handler: EpochIO,
-                    save_superlet: bool, save_wavelet: bool,
-                    scale_to_uv: Optional[bool] = True):
+
+
+
+def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handler: EpochIO,
+                 save_superlet: bool, save_wavelet: bool,
+                 scale_to_uv: Optional[bool] = True):
     """
     Dumps all epochs found in epochs, named according to which subject and which condition(side and eccentricity) it belongs to.
     Also saves superlet and wavelet as targets for spectral prediction if specified.
@@ -47,8 +59,6 @@ def dump_epoch_data(epochs: dict[str, dict[str, mne.Epochs]], path: Path, io_han
     for subj in epochs.keys():
         for cond in epochs[subj].keys():
             epoch_list = epochs[subj][cond].get_data()
-            if scale_to_uv:
-                epoch_list *= 1e6
             try:
                 id = 1
                 for epoch in epoch_list:
@@ -61,21 +71,29 @@ def dump_epoch_data(epochs: dict[str, dict[str, mne.Epochs]], path: Path, io_han
 
                     tensor_data = torch.tensor(epoch, dtype=torch.float32)
                     # save tensor to path with filename convention: {subject}_{condition}_epoch{index}.pt
-                    io_handler.save(tensor_data=tensor_data, directory=epoch_path, subject=subj, condition=cond, epoch_id=id,
-                                    saved_type='epoch')
-                    print(f"Saved epoch {id} for {subj} {cond} to {epoch_path}")
+
 
 
                     if save_superlet:
                         # TODO compute superlet target and save to path with filename convention: {subject}_{condition}_superlet{index}.pt
                         pass
                     if save_wavelet:
+                        print(f"Computing wavelet transform for epoch {id} for {subj} {cond}")
                         mag, freqs = utils.calc_wavelet(tensor_data, fs=settings.RSFREQ, **settings.SPECTRAL_DECODER_PARAMS)
                         wavelet_tensor = torch.tensor(mag, dtype=torch.float32)
                         wavelet_tensor = wavelet_tensor.permute(1, 0, 2) # reorder to (channels, freqs, time) for LaBraM compatibility
+                        print(f"Original wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
+                        wavelet_tensor = utils.cut_to_timewindow(wavelet_tensor, settings.EXTENDED_TIME_WINDOW, settings.TIME_WINDOW, settings.RSFREQ)
+                        print(f"Cut wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
                         io_handler.save(tensor_data=wavelet_tensor, directory=wavelet_path, subject=subj, condition=cond,
                                         epoch_id=id, saved_type='wavelet')
                         print(f"Saved wavelet target for epoch {id} for {subj} {cond} to {wavelet_path}")
+
+                    tensor_data = utils.cut_to_timewindow(tensor_data, settings.EXTENDED_TIME_WINDOW, settings.TIME_WINDOW, settings.RSFREQ)
+                    io_handler.save(tensor_data=tensor_data, directory=epoch_path, subject=subj, condition=cond,
+                                    epoch_id=id,
+                                    saved_type='epoch')
+                    print(f"Saved epoch {id} for {subj} {cond} to {epoch_path}")
                     id += 1
 
             except Exception as e:
@@ -95,7 +113,7 @@ def main(opts):
         ica_enabled=True,
         ica_n_components=15,
         bad_channels='interpolate',
-        time_window=settings.TIME_WINDOW,
+        time_window=settings.EXTENDED_TIME_WINDOW,
         baseline_win=(-0.2, 0),
         split_by='both',
         re_reference='average',
@@ -123,19 +141,21 @@ def main(opts):
 
     # extract epochs (MNE built-in baselining)
     all_epochs = preprocessor.create_subject_epochs(preproc_data, output_format='epochs', manual_baseline=False)
+    # rescale to uV
+    all_epochs = rescale_to_uv(all_epochs)  # subject - baseline/pp
     print("Created epochs for all subjects.")
-
     print("Dumping epochs...")
     # separate epochs
     baseline_epochs = {subj: all_epochs[subj]["Baseline"] for subj in all_epochs.keys()}
     patch_epochs = {subj: all_epochs[subj]["Post-patching"] for subj in all_epochs.keys()}
 
     # dump epochs data for finetuning (pre-patching)
-    dump_epoch_data(epochs=baseline_epochs, path=settings.FINETUNE_DIR, io_handler=io_handler, scale_to_uv=True,
-                    save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
+
+    save_dataset(epochs=baseline_epochs, path=settings.FINETUNE_DIR, io_handler=io_handler, scale_to_uv=True,
+                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
     # dump epochs data for plasticity analysis (post-patching)
-    dump_epoch_data(epochs=patch_epochs, path=settings.PATCH_DIR, io_handler=io_handler, scale_to_uv=True,
-                    save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
+    save_dataset(epochs=patch_epochs, path=settings.PATCH_DIR, io_handler=io_handler, scale_to_uv=True,
+                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
 
     print(f"Preprocessed epochs saved to {settings.FINETUNE_EPOCHS_DIR} and {settings.PATCH_EPOCHS_DIR}.")
 

@@ -40,7 +40,9 @@ RSFREQ = 200
 INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
 RECORDINGS_PER_CONDITION = None
-TIME_WINDOW = (-0.2, 0.8)# extended time window for labram compatibility
+TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
+EXTENDED_OFFSET = 1
+EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
 WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
 
 EPOCHS_DIR_NAME = "epochs"

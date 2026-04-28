@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import numpy as np
 import pywt
 
@@ -52,16 +54,19 @@ def vars_to_filename(subject, condition, id, marker, ext):
     filename = f"{subject}_{condition}_{marker}{str(id)}{ext}"
     return filename
 
-def cut_to_timewindow(tensor, window_size: int):
+def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tuple[int, int], fs:int):
     """
-    Cuts the input tensor to be divisible by the specified patch size along the time dimension.
-    Assumes the time dimension is the last dimension of the tensor.
+        Cuts the time dimension of a tensor based on the sampling frequency.
+        Expects time to be the last dimension.
     """
-    time_points = tensor.shape[-1]
-    excess = time_points % window_size
-    if excess > 0:
-        return tensor[..., :-excess]
-    return tensor
+
+    from_index =  int((new_window[0] - original_window[0]) * fs)
+    to_index = int((new_window[1] - original_window[0]) * fs)
+
+    if from_index < 0 or to_index > tensor.shape[-1]:
+        raise ValueError(f"Requested window {new_window} is outside original window {original_window} range.")
+
+    return tensor[..., from_index:to_index]
 
 def add_prefix_dict_keys(dict, prefix, separator='.'):
     """
