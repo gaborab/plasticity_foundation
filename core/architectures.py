@@ -36,7 +36,9 @@ class EEGAutoencoder(BaseMLPWrapper):
         self.n_chans = n_chans
 
     def forward(self, x, input_chans):
-        return self.model(x, input_chans)
+        pred = self.model(x, input_chans, return_patch_tokens=True)
+        print("pred shape:", pred.shape)
+        return pred
 
     def get_num_layers(self):
         return self.model.get_num_layers()
@@ -48,8 +50,8 @@ class EEGAutoencoder(BaseMLPWrapper):
         """
         Returns the predicted temporal output for the first channel, reshaped to (n_chans, time_points).
         """
-        flat_pred = self.model(x, input_chans)
-
+        flat_pred = self.model(x, input_chans, return_patch_tokens=True)
+        print("flat pred shape:", flat_pred.shape)
         reshaped = flat_pred.unflatten(dim=0, sizes=(self.n_chans, self.model.patch_size))
         return reshaped[0, :]
 
@@ -65,7 +67,9 @@ class EEGSpectralDecoder(BaseMLPWrapper):
         self.n_freqs = n_freqs
 
     def forward(self, x, input_chans):
-        return self.model(x, input_chans)
+        pred = self.model(x, input_chans, return_patch_tokens=True)
+        print("pred shape:", pred.shape)
+        return pred
 
     def get_num_layers(self):
         return self.model.get_num_layers()
@@ -77,7 +81,7 @@ class EEGSpectralDecoder(BaseMLPWrapper):
         """
         Predicts spectral output for all channels, reshaped to (n_chans, n_freqs, time_points).
         """
-        flat_pred = self.model(x, input_chans)
+        flat_pred = self.model(x, input_chans, return_patch_tokens=True)
 
-        reshaped = flat_pred.unflatten(dim=0, sizes=(self.n_chans, self.n_freqs, self.model.patch_size))
+        reshaped = flat_pred.unflatten(dim=-1, sizes=(self.n_chans, self.n_freqs, self.model.patch_size))
         return reshaped

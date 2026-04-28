@@ -75,7 +75,7 @@ LABRAM_VERSION = 'labram_base_patch200_200'
 
 AUTOENCODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'target_dim': N_CHANNELS *  WINDOW_SIZE,
+    'target_dim': WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
     'loss_type': 'mse', # TODO change loss
 }
@@ -85,7 +85,7 @@ SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'freq_window': (4, 60),
     'n_freqs': N_FREQS,
-    'target_dim': N_CHANNELS*N_FREQS*WINDOW_SIZE,
+    'target_dim': N_FREQS*WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
     'loss_type': 'mse',
     'wavelet': 'cmor1.5-1.0'
