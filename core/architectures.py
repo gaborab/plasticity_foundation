@@ -1,6 +1,7 @@
 import torch.nn as nn
 from timm.models import create_model
-from libs.labram import modeling_finetune
+from einops import rearrange
+from libs.labram import modeling_finetune # this import is needed for model to work
 
 class BaseMLPWrapper(nn.Module):
     """
@@ -37,7 +38,7 @@ class EEGAutoencoder(BaseMLPWrapper):
 
     def forward(self, x, input_chans):
         pred = self.model(x, input_chans, return_patch_tokens=True)
-        print("pred shape:", pred.shape)
+        pred = rearrange(pred, 'B N T -> B (N T)')
         return pred
 
     def get_num_layers(self):
@@ -46,14 +47,14 @@ class EEGAutoencoder(BaseMLPWrapper):
     def no_weight_decay(self):
         return self.model.no_weight_decay()
 
-    def predict_temporal_output(self, x, input_chans = None):
+    def get_unflattened_output(self, x, input_chans = None):
         """
         Returns the predicted temporal output for the first channel, reshaped to (n_chans, time_points).
         """
-        flat_pred = self.model(x, input_chans, return_patch_tokens=True)
-        print("flat pred shape:", flat_pred.shape)
-        reshaped = flat_pred.unflatten(dim=0, sizes=(self.n_chans, self.model.patch_size))
-        return reshaped[0, :]
+        pred = self.model(x, input_chans, return_patch_tokens=True)
+        if pred.ndim == 2:
+            pred = rearrange(pred, 'B (N T) -> B N T', N=self.n_chans)
+        return pred
 
 
 class EEGSpectralDecoder(BaseMLPWrapper):
@@ -68,7 +69,7 @@ class EEGSpectralDecoder(BaseMLPWrapper):
 
     def forward(self, x, input_chans):
         pred = self.model(x, input_chans, return_patch_tokens=True)
-        print("pred shape:", pred.shape)
+        pred = rearrange(pred, 'B N W -> B (N W)')
         return pred
 
     def get_num_layers(self):
@@ -77,11 +78,11 @@ class EEGSpectralDecoder(BaseMLPWrapper):
     def no_weight_decay(self):
         return self.model.no_weight_decay()
 
-    def predict_spectral_output(self, x, input_chans = None):
+    def get_unflattened_output(self, x, input_chans = None):
         """
         Predicts spectral output for all channels, reshaped to (n_chans, n_freqs, time_points).
         """
-        flat_pred = self.model(x, input_chans, return_patch_tokens=True)
+        pred = self.model(x, input_chans, return_patch_tokens=True)
 
-        reshaped = flat_pred.unflatten(dim=-1, sizes=(self.n_chans, self.n_freqs, self.model.patch_size))
-        return reshaped
+        pred = rearrange(pred, 'B N (F T) -> B N F T', F=self.n_freqs, N=self.n_chans)
+        return pred

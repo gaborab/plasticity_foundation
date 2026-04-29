@@ -96,11 +96,9 @@ def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint["model"])
     with torch.no_grad():
-        reconstruction = model(input, input_chans).squeeze(0) # remove batch dimension
-    if n_freqs is not None:
-        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, n_freqs, window_size))
-    else:
-        recon = reconstruction.unflatten(dim=0, sizes=(n_chans, window_size))
+        recon = model.get_unflattened_output(x=input, input_chans=input_chans, n_chans=n_chans)
+
+
 
     epoch_idx = checkpoint["epoch"]
     return recon, epoch_idx

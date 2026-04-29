@@ -32,18 +32,18 @@ import numpy as np
 
 CHECKPOINT_PATH = settings.CHECKPOINT_DIR / "labram-base.pth"
 
-LR = 1e-3
-MIN_LR = 1e-6
+LR = 1e-4 #
+MIN_LR = 5e-7 #original 1e-6
 WEIGHT_DECAY = 5e-3
-EPOCHS = 60
+EPOCHS = 80
 
-WARMUP_EPOCHS = 5
+WARMUP_EPOCHS = 8
 WARMUP_STEPS = -1  # overloads epochs if set to >0
 WEIGHT_DECAY_END = 2 * WEIGHT_DECAY  # higher end wd helps to lock in learnt features
-LAYER_DECAY = 0.9
+LAYER_DECAY = 0.8 #original 0.9
 CLIP_GRAD = None
-BATCH_SIZE = 8
-UPDATE_FREQ = 8
+BATCH_SIZE = 64
+UPDATE_FREQ = 1
 USE_EMA = False
 SAVE_PLOTS = True
 
