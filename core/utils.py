@@ -88,7 +88,7 @@ def add_prefix_dict_keys(dict, prefix, separator='.'):
 
     return {f"{prefix}{separator}{key}": value for key, value in dict.items()}
 
-def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n_chans, window_size, n_freqs: Optional[int] = None, **kwargs):
+def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, **kwargs):
     """
     Reconstructs the model output from a given checkpoint and input tensor, reshaping it according to `n_chans`, `n_freqs`, and `window_size` parameters.
 
@@ -96,7 +96,7 @@ def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, n
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint["model"])
     with torch.no_grad():
-        recon = model.get_unflattened_output(x=input, input_chans=input_chans, n_chans=n_chans)
+        recon = model.get_unflattened_output(x=input, input_chans=input_chans).squeeze(0)
 
 
 
