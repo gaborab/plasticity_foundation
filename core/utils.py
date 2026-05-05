@@ -121,5 +121,35 @@ def calculate_r2(y_true, y_pred):
     r2 = r2_score(y_true, y_pred)
     return r2
 
+def calculate_bandwise_r2(y_true, y_pred, freqs, freq_bands):
+    """
+    Calculates the R-squared metric for each specified frequency band given the true and predicted values of spectral data.
+    The function expects y_true and y_pred to be 2D arrays with shape (n_freqs, time_points) or 3D arrays with shape (n_chans, n_freqs, time_points), and freqs to be a 1D array of frequency values corresponding to the second dimension of y_true and y_pred.
+    Freq_bands should be a dict of tuples specifying the frequency ranges for each band (e.g., [(1, 4), (4, 8), (8, 12), (12, 30), (30, 50)]).
+    Returns a dictionary mapping each frequency band to its corresponding R-squared value.
+    """
+    if y_true.shape != y_pred.shape:
+        raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
+    if y_true.ndim not in [2, 3] or y_pred.ndim not in [2, 3]:
+        raise ValueError(f"Expected y_true and y_pred to be 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
+    r2_bandwise = {}
+    for name, band in freq_bands.items():
+        low, high = band
+        band_indices = np.where((freqs >= low) & (freqs <= high))[0]
+        if band_indices.size == 0:
+            print(f"WARNING: No frequencies found in band {name} ({low}-{high} Hz). Skipping R2 calculation for this band.")
+            continue
+        if y_true.ndim == 3:
+            band_true = y_true[:, band_indices, :].flatten()
+            band_pred = y_pred[:, band_indices, :].flatten()
+        else:
+            band_true = y_true[band_indices, :].flatten()
+            band_pred = y_pred[band_indices, :].flatten()
+
+        r2 = r2_score(band_true, band_pred)
+        r2_bandwise[name] = r2
+    return r2_bandwise
+
+
 
 

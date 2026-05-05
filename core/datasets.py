@@ -113,7 +113,7 @@ class KFoldSplitter:
             test_subj = folds[i]
             train_val_subj = [s for s in subjects if s not in test_subj]
             rng.shuffle(train_val_subj)
-            split_idx = len(train_val_subj) // 5  # 20% for validation
+            split_idx = len(train_val_subj) // 5
             val_subj = train_val_subj[:split_idx]  # 20% for validation
             train_subj = train_val_subj[split_idx:]  # 80% for training
             train = {subject: self.all_data[subject] for subject in train_subj}

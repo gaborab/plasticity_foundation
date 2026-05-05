@@ -31,6 +31,14 @@ CHORDER_STANDARD = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'E
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
 N_CHANNELS = len(CHORDER_STANDARD)
 
+FREQ_BANDS = {
+    'delta (1-4Hz)': (1, 4),
+    'theta (4-8Hz)': (4, 8),
+    'alpha (8-12Hz)': (8, 12),
+    'beta (12-30Hz)': (12, 30),
+    'gamma (30-60Hz)': (30, 60)
+}
+
 SEED = 42  # Set a fixed seed for reproducibility, use for shuffling and sampling training dataset
 
 # Preprocessing parameters
@@ -41,7 +49,7 @@ INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
 RECORDINGS_PER_CONDITION = None
 TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
-EXTENDED_OFFSET = 1
+EXTENDED_OFFSET = 2
 EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
 WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
 
@@ -83,7 +91,7 @@ AUTOENCODER_PARAMS = {
 N_FREQS = 50
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'freq_window': (4, 60),
+    'freq_window': (1, 60),
     'n_freqs': N_FREQS,
     'target_dim': N_FREQS*WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
