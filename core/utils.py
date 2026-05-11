@@ -4,6 +4,7 @@ import numpy as np
 import pywt
 import torch
 from sklearn.metrics import r2_score
+from einops import rearrange
 
 
 def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, **kwargs):
@@ -87,6 +88,15 @@ def add_prefix_dict_keys(dict, prefix, separator='.'):
     """
 
     return {f"{prefix}{separator}{key}": value for key, value in dict.items()}
+
+def format_model_input(trial, device):
+    """
+    Formats single trial tensor input for model inference by adding a batch dimension, rearranging to match the expected input shape of (batch_size, n_chans, n_areas, time_points), and normalizing the values by dividing by 100.
+    """
+    test_input = trial.unsqueeze(0)
+    test_input = rearrange(test_input, 'B N (A T) -> B N A T', T=200)
+    test_input = test_input.float().to(device, non_blocking=True) / 100
+    return test_input
 
 def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, **kwargs):
     """
