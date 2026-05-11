@@ -157,14 +157,16 @@ def avg_metrics_over_folds(model_data: Dict[str, List[Dict]], metrics: List[str]
     Returns the average value of the specified metric across all folds.
     """
     averaged_metrics = {}
-    for metric in metrics_list:
+    for metric in metrics:
         metric_values = []
         for fold, fold_data in model_data.items():
+            fold_values = []
             for entry in fold_data:
                 if metric in entry:
-                    metric_values.append(entry[metric])
+                    fold_values.append(entry[metric])
+            metric_values.append(fold_values)
         if len(metric_values) > 0:
-            averaged_metrics[metric] = np.mean(metric_values)
+            averaged_metrics[metric] = np.mean(metric_values, axis=0)
         else:
             print(f"WARNING: No values found for metric {metric} across folds.")
             averaged_metrics[metric] = None

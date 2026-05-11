@@ -74,6 +74,7 @@ PATCH_WAVELET_DIR = PATCH_DIR / WAVELET_DIR_NAME
 
 FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
 PLOT_DIR = BASE_DIR / "outputs" / "plots"
+PLOT_MACRO = PLOT_DIR / "macro_plots"
 CHECKPOINT_DIR = BASE_DIR / "libs" / "labram" / "checkpoints"
 
 # Model
