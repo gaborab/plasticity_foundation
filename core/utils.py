@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, List
 import numpy as np
 import pywt
 import torch
@@ -149,6 +149,27 @@ def calculate_bandwise_r2(y_true, y_pred, freqs, freq_bands):
         r2 = r2_score(band_true, band_pred)
         r2_bandwise[name] = r2
     return r2_bandwise
+
+
+def avg_metrics_over_folds(model_data: Dict[str, List[Dict]], metrics: List[str]):
+    """
+    Averages specified metrics over multiple folds of cross-validation. Expects a list of dictionaries containing the metrics for each fold, and the name of the metrics to average.
+    Returns the average value of the specified metric across all folds.
+    """
+    averaged_metrics = {}
+    for metric in metrics_list:
+        metric_values = []
+        for fold, fold_data in model_data.items():
+            for entry in fold_data:
+                if metric in entry:
+                    metric_values.append(entry[metric])
+        if len(metric_values) > 0:
+            averaged_metrics[metric] = np.mean(metric_values)
+        else:
+            print(f"WARNING: No values found for metric {metric} across folds.")
+            averaged_metrics[metric] = None
+    return averaged_metrics
+
 
 
 

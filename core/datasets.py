@@ -6,7 +6,7 @@ import random
 from pathlib import Path
 
 from core import utils
-from core.epoch_io import EpochIO
+from core.io import EpochIO
 from typing import Dict, List, Any, Optional
 import torch
 

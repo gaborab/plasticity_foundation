@@ -12,7 +12,7 @@ import argparse
 import mne
 import torch
 
-from core.epoch_io import EpochIO
+from core.io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
 from core import settings
 from core import utils

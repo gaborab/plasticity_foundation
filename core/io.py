@@ -2,6 +2,7 @@
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import torch
+import json
 
 from core import utils
 
@@ -79,3 +80,48 @@ class EpochIO:
     def load_subject(self, directory: Path, subject: str) -> Optional[Dict[str, List[Any]]]:
         all_epochs = self.load_all_epochs(directory)
         return all_epochs.get(subject)
+
+
+def load_model_log_data(directory: Path, model_name: str, folds=None) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Loads the log data for a given model and list of folds from the specified directory.
+    Expects a folder named `model_name` to exist and contain subfolders for each fold
+    with one log file each named log.txt.
+    """
+
+    if folds is None:
+        folds = []
+    all_logs = {}
+    model_folder = directory / model_name
+
+    if not model_folder.exists():
+        print(f"WARNING: Model folder not found for model name: {model_name} in directory: {directory}")
+        return all_logs
+
+    # Determine which folds to process
+    keep_all = len(folds) == 0
+
+    for fold_dir in model_folder.iterdir():
+        if not fold_dir.is_dir():
+            continue
+
+        if not keep_all and fold_dir.name not in folds:
+            continue
+
+        log_file = fold_dir / "log.txt"
+        if not log_file.exists():
+            print(f"WARNING: Log file not found in {fold_dir.name}")
+            continue
+
+        fold_data = []
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        fold_data.append(json.loads(line))
+            all_logs[fold_dir.name] = fold_data
+        except Exception as e:
+            print(f"WARNING: Failed to parse log file in {fold_dir.name}: {e}")
+
+    return all_logs
+
