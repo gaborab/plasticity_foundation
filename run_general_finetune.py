@@ -35,7 +35,7 @@ CHECKPOINT_PATH = settings.CHECKPOINT_DIR / "labram-base.pth"
 LR = 5e-4
 MIN_LR = 5e-7 #original 1e-6
 WEIGHT_DECAY = 5e-3
-EPOCHS = 10
+EPOCHS = 120
 
 WARMUP_EPOCHS = 8
 WARMUP_STEPS = -1  # overloads epochs if set to >0
@@ -174,12 +174,10 @@ def main(opts):
 
         train_sampler = torch.utils.data.RandomSampler(train_dataset)
         val_sampler = torch.utils.data.SequentialSampler(val_dataset)
-        test_sampler = torch.utils.data.SequentialSampler(test_dataset)
         # initialize dataloaders
         print("Initializing dataloaders...")
         train_loader = torch.utils.data.DataLoader(train_dataset, sampler=train_sampler, batch_size=BATCH_SIZE)
         val_loader = torch.utils.data.DataLoader(val_dataset, sampler=val_sampler, batch_size=BATCH_SIZE)
-        test_loader = torch.utils.data.DataLoader(test_dataset, sampler=test_sampler, batch_size=BATCH_SIZE)
 
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
         num_layers = model.get_num_layers()
@@ -219,7 +217,6 @@ def main(opts):
         log_writer = utils.TensorboardLogger(log_dir=log_dir)
         start_time = time.time()
         max_r2 = 0.0
-        max_r2_test = 0.0
         max_r2_val_epoch = 0
         # --------- TRAINING LOOP ----------
         print(f"Training for {EPOCHS} epochs")
@@ -238,29 +235,26 @@ def main(opts):
             )
             print("train statistics: ", train_stats)
             print(f"Saving model to {output_dir}")
-            utils.save_model(
-                args=argparse.Namespace(**{"output_dir": output_dir}),
-                model=model,
-                model_without_ddp=model,
-                optimizer=optimizer,
-                loss_scaler=loss_scaler,
-                epoch=epoch,
-                model_ema=model_ema
-            )
+            if epoch % 10 == 0:
+                utils.save_model(
+                    args=argparse.Namespace(**{"output_dir": output_dir}),
+                    model=model,
+                    model_without_ddp=model,
+                    optimizer=optimizer,
+                    loss_scaler=loss_scaler,
+                    epoch=epoch,
+                    model_ema=model_ema
+                )
 
             val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
                                  is_binary=False)
             print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
-            test_stats = evaluate(test_loader, model, device, header='Test:', ch_names=ch_names, metrics=metrics,
-                                  is_binary=False)
-            print(f"R2 of the network on the {len(test_dataset)} test EEG: {test_stats['r2']:.2f}")
 
-            print(f"Logging val and test stats to {log_dir}")
-            write_stat_logs(log_writer, val_stats, test_stats, epoch)
+            print(f"Logging val stats to {log_dir}")
+            write_stat_logs(log_writer, val_stats, epoch)
 
             log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                          **{f'val_{k}': v for k, v in val_stats.items()},
-                         **{f'test_{k}': v for k, v in test_stats.items()},
                          'epoch': epoch,
                          'n_parameters': n_parameters}
 
@@ -281,23 +275,10 @@ def main(opts):
                     epoch="best_val",
                     model_ema=model_ema
                 )
-            if test_stats['r2'] > max_r2_test:
-                max_r2_test = test_stats['r2']
 
-                print(f"New best R2 on test: {max_r2_test:.4f}. Saving model.")
-                utils.save_model(
-                    args=argparse.Namespace(**{"output_dir": output_dir}),
-                    model=model,
-                    model_without_ddp=model,
-                    optimizer=optimizer,
-                    loss_scaler=loss_scaler,
-                    epoch="best_test",
-                    model_ema=model_ema
-                )
-        # save max r2 for val and test
+        # save max r2 for val
         stats = {
             "val": max_r2,
-            "test": max_r2_test,
         }
         max_r2s.append(stats)
         max_r2_val_epochs.append(max_r2_val_epoch)
@@ -309,21 +290,18 @@ def main(opts):
         i += 1
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print("=" * 30)
-    print(f"Training finished for {i} folds.")
+    print(f"Training finished for {i-1} folds.")
     print("Results:")
     for i, fold_res in enumerate(max_r2s):
         print(f"      {i}", fold_res)
     print("")
     print("Average results: ")
     mean_val_r2 = np.mean([fold_res['val'] for fold_res in max_r2s])
-    mean_test_r2 = np.mean([fold_res['test'] for fold_res in max_r2s])
     print("     validation r2: ", mean_val_r2)
-    print("     test r2: ", mean_test_r2)
 
     run_metadata["results"] = {
         "r2_per_fold": max_r2s,
         "mean_val_r2": float(mean_val_r2),
-        "mean_test_r2": float(mean_test_r2),
         "max_r2_val_epochs": max_r2_val_epochs,
     }
 
@@ -335,7 +313,7 @@ def main(opts):
         json.dump(run_metadata, f)
 
 
-def write_stat_logs(log_writer, val_stats, test_stats, epoch):
+def write_stat_logs(log_writer, val_stats, epoch):
     for key, value in val_stats.items():
         if key == 'accuracy':
             log_writer.update(accuracy=value, head="val", step=epoch)
@@ -351,27 +329,6 @@ def write_stat_logs(log_writer, val_stats, test_stats, epoch):
             log_writer.update(cohen_kappa=value, head="val", step=epoch)
         elif key == 'loss':
             log_writer.update(loss=value, head="val", step=epoch)
-        elif key == 'mse':
-            log_writer.update(mse=value, head="val", step=epoch)
-        elif key == 'mae':
-            log_writer.update(mae=value, head="val", step=epoch)
-        elif key == 'r2':
-            log_writer.update(r2=value, head="val", step=epoch)
-    for key, value in test_stats.items():
-        if key == 'accuracy':
-            log_writer.update(accuracy=value, head="test", step=epoch)
-        elif key == 'balanced_accuracy':
-            log_writer.update(balanced_accuracy=value, head="test", step=epoch)
-        elif key == 'f1_weighted':
-            log_writer.update(f1_weighted=value, head="test", step=epoch)
-        elif key == 'pr_auc':
-            log_writer.update(pr_auc=value, head="test", step=epoch)
-        elif key == 'roc_auc':
-            log_writer.update(roc_auc=value, head="test", step=epoch)
-        elif key == 'cohen_kappa':
-            log_writer.update(cohen_kappa=value, head="test", step=epoch)
-        elif key == 'loss':
-            log_writer.update(loss=value, head="test", step=epoch)
         elif key == 'mse':
             log_writer.update(mse=value, head="val", step=epoch)
         elif key == 'mae':
