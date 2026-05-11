@@ -32,15 +32,15 @@ import numpy as np
 
 CHECKPOINT_PATH = settings.CHECKPOINT_DIR / "labram-base.pth"
 
-LR = 1e-4 #
+LR = 5e-4
 MIN_LR = 5e-7 #original 1e-6
 WEIGHT_DECAY = 5e-3
-EPOCHS = 80
+EPOCHS = 10
 
 WARMUP_EPOCHS = 8
 WARMUP_STEPS = -1  # overloads epochs if set to >0
 WEIGHT_DECAY_END = 2 * WEIGHT_DECAY  # higher end wd helps to lock in learnt features
-LAYER_DECAY = 0.8 #original 0.9
+LAYER_DECAY = 0.7 #original 0.9
 CLIP_GRAD = None
 BATCH_SIZE = 64
 UPDATE_FREQ = 1
@@ -120,7 +120,7 @@ def main(opts):
 
     total_time = 0
     max_r2s = []
-    max_r2_test_epochs = []
+    max_r2_val_epochs = []
     i = 1
     # ----------- CROSS-VALIDATION LOOP ------------
     for fold in folds:
@@ -220,7 +220,7 @@ def main(opts):
         start_time = time.time()
         max_r2 = 0.0
         max_r2_test = 0.0
-        max_r2_test_epoch = 0
+        max_r2_val_epoch = 0
         # --------- TRAINING LOOP ----------
         print(f"Training for {EPOCHS} epochs")
         for epoch in range(EPOCHS):
@@ -270,6 +270,7 @@ def main(opts):
 
             if val_stats['r2'] > max_r2:
                 max_r2 = val_stats['r2']
+                max_r2_val_epoch = epoch
                 print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
                 utils.save_model(
                     args=argparse.Namespace(**{"output_dir": output_dir}),
@@ -282,7 +283,6 @@ def main(opts):
                 )
             if test_stats['r2'] > max_r2_test:
                 max_r2_test = test_stats['r2']
-                max_r2_test_epoch = epoch
 
                 print(f"New best R2 on test: {max_r2_test:.4f}. Saving model.")
                 utils.save_model(
@@ -300,7 +300,7 @@ def main(opts):
             "test": max_r2_test,
         }
         max_r2s.append(stats)
-        max_r2_test_epochs.append(max_r2_test_epoch)
+        max_r2_val_epochs.append(max_r2_val_epoch)
 
         fold_time = time.time() - start_time
         fold_time_str = str(datetime.timedelta(seconds=int(fold_time)))
@@ -324,7 +324,7 @@ def main(opts):
         "r2_per_fold": max_r2s,
         "mean_val_r2": float(mean_val_r2),
         "mean_test_r2": float(mean_test_r2),
-        "max_r2_test_epochs": max_r2_test_epochs,
+        "max_r2_val_epochs": max_r2_val_epochs,
     }
 
     run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS
