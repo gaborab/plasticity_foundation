@@ -12,7 +12,7 @@ from libs.labram import utils
 from libs.labram.engine_for_finetuning import train_one_epoch, evaluate
 from libs.labram.optim_factory import create_optimizer, LayerDecayValueAssigner
 from libs.labram.utils import NativeScalerWithGradNormCount
-from timm.utils import ModelEma
+from timm.utils import ModelEmaV2 as ModelEma
 import argparse
 import os
 import json
@@ -32,39 +32,18 @@ import numpy as np
 
 CHECKPOINT_PATH = settings.CHECKPOINT_DIR / "labram-base.pth"
 
-LR = 5e-4
-MIN_LR = 5e-7 #original 1e-6
-WEIGHT_DECAY = 5e-3
-EPOCHS = 120
 
 WARMUP_EPOCHS = 8
 WARMUP_STEPS = -1  # overloads epochs if set to >0
-WEIGHT_DECAY_END = 2 * WEIGHT_DECAY  # higher end wd helps to lock in learnt features
-LAYER_DECAY = 0.7 #original 0.9
+LAYER_DECAY = 0.9 #original 0.9
+MIN_LR = 1e-6
 CLIP_GRAD = None
 BATCH_SIZE = 64
 UPDATE_FREQ = 1
 USE_EMA = False
 SAVE_PLOTS = True
 
-OPTIMIZER_ARGS = {
-    "opt": "adamw",
-    "lr": LR,
-    "weight_decay": WEIGHT_DECAY,
-    "opt_eps": 1e-8,
-    "opt_betas": None
-}
 
-run_metadata = {
-    "hyperparameters": {
-        "batch_size": BATCH_SIZE,
-        "epochs": EPOCHS,
-        "warmup_steps": WARMUP_EPOCHS,
-        "warmup_steps_end": WARMUP_EPOCHS,
-        "weight_decay": WEIGHT_DECAY,
-        "lr": LR,
-    },
-}
 
 
 def get_args():
@@ -72,6 +51,11 @@ def get_args():
     parser.add_argument('--model_name', type=str)
     parser.add_argument('--target_mode', type=str, default='wavelet')
     parser.add_argument('--k_folds', type=int, default=6)
+
+    parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--weight_decay', type=float, default=5e-3)
+    parser.add_argument('--epochs', type=int, default=120)
+    parser.add_argument('--no_pretrained', action='store_true', default=False)
 
     return parser.parse_args()
 
@@ -92,31 +76,57 @@ def main(opts):
         print("Please specify model name")
         return
 
+    LR = opts.lr
+    WEIGHT_DECAY = opts.weight_decay
+    WEIGHT_DECAY_END = 2 * WEIGHT_DECAY  # higher end wd helps to lock in learnt features
+    EPOCHS = opts.epochs
+    USE_PRETRAINED = not opts.no_pretrained
+
+    OPTIMIZER_ARGS = {
+        "opt": "adamw",
+        "lr": LR,
+        "weight_decay": WEIGHT_DECAY,
+        "opt_eps": 1e-8,
+        "opt_betas": None
+    }
+
+    run_metadata = {
+        "hyperparameters": {
+            "batch_size": BATCH_SIZE,
+            "epochs": EPOCHS,
+            "warmup_steps": WARMUP_EPOCHS,
+            "warmup_steps_end": WARMUP_EPOCHS,
+            "weight_decay": WEIGHT_DECAY,
+            "lr": LR,
+            "pretrained": USE_PRETRAINED,
+        },
+    }
+
     output_dir_base = settings.FINETUNE_OUTPUT_DIR / opts.model_name
     output_dir_base.mkdir(parents=True, exist_ok=True)
+    if USE_PRETRAINED:
+        # Handle loading state_dict from pretrained checkpoint
+        print("Load ckpt from %s" % CHECKPOINT_PATH)
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
+        checkpoint_model = None
+        for model_key in ["model", "module"]:
+            if model_key in checkpoint:
+                checkpoint_model = checkpoint[model_key]
+                print("Load state_dict by model_key = %s" % model_key)
+                break
+        if checkpoint_model is None:
+            checkpoint_model = checkpoint
+        if checkpoint_model is not None:
+            all_keys = list(checkpoint_model.keys())
+            new_dict = OrderedDict()
+            for key in all_keys:
+                if key.startswith('student.'):
+                    new_dict[key[8:]] = checkpoint_model[key]
+                else:
+                    pass
+            checkpoint_model = new_dict
 
-    # Handle loading state_dict from pretrained checkpoint
-    print("Load ckpt from %s" % CHECKPOINT_PATH)
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
-    checkpoint_model = None
-    for model_key in ["model", "module"]:
-        if model_key in checkpoint:
-            checkpoint_model = checkpoint[model_key]
-            print("Load state_dict by model_key = %s" % model_key)
-            break
-    if checkpoint_model is None:
-        checkpoint_model = checkpoint
-    if checkpoint_model is not None:
-        all_keys = list(checkpoint_model.keys())
-        new_dict = OrderedDict()
-        for key in all_keys:
-            if key.startswith('student.'):
-                new_dict[key[8:]] = checkpoint_model[key]
-            else:
-                pass
-        checkpoint_model = new_dict
-
-    checkpoint_model = core_utils.add_prefix_dict_keys(checkpoint_model, prefix='model')
+        checkpoint_model = core_utils.add_prefix_dict_keys(checkpoint_model, prefix='model')
 
     total_time = 0
     max_r2s = []
@@ -135,32 +145,35 @@ def main(opts):
         log_dir = output_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        print("Initializing model with autoencoder head...")
+        print(f"Initializing model with {opts.target_mode} head...")
         # initialize LaBraM
         model = None
         if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet':
-            model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS)
+            model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS, pretrained=USE_PRETRAINED)
         elif opts.target_mode == 'autoencoder':
-            model = EEGAutoencoder(**settings.AUTOENCODER_PARAMS)
+            model = EEGAutoencoder(**settings.AUTOENCODER_PARAMS, pretrained=USE_PRETRAINED)
         else:
             raise ValueError(
                 f"Invalid target mode: {opts.target_mode}. Must be 'wavelet', 'superlet' or 'autoencoder'.")
 
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         device = torch.device(dev)
-        print("Setting pretrained weights from checkpoint...")
-        state_dict = model.state_dict()
-        for k in ['head.weight', 'head.bias']:
-            if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
 
-        all_keys = list(checkpoint_model.keys())
-        for key in all_keys:
-            if "relative_position_index" in key:
-                checkpoint_model.pop(key)
 
-        utils.load_state_dict(model, checkpoint_model, prefix='')
+        if USE_PRETRAINED:
+            print("Setting pretrained weights from checkpoint...")
+            state_dict = model.state_dict()
+            for k in ['head.weight', 'head.bias']:
+                if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+                    print(f"Removing key {k} from pretrained checkpoint")
+                    del checkpoint_model[k]
+
+            all_keys = list(checkpoint_model.keys())
+            for key in all_keys:
+                if "relative_position_index" in key:
+                    checkpoint_model.pop(key)
+
+            utils.load_state_dict(model, checkpoint_model, prefix='')
 
         model.to(device)
 

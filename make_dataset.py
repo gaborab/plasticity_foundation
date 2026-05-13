@@ -162,9 +162,9 @@ def main(opts):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('Preprocessing pipeline', add_help=False)
-    parser.add_argument('--save_superlet', type=bool, default=False, #TODO
+    parser.add_argument('--save_superlet', action='store_true', default=False,
                         help='Whether to save superlet targets for spectral prediction')
-    parser.add_argument('--save_wavelet', type=bool, default=True,
+    parser.add_argument('--save_wavelet', action='store_true', default=True,
                         help='Whether to save wavelet targets for spectral prediction')
 
     args = parser.parse_args()

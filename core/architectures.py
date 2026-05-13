@@ -7,10 +7,10 @@ class BaseMLPWrapper(nn.Module):
     """
     Parent class for models with an MLP head.
     """
-    def __init__(self, target_dim, hidden_dim, model_version='labram_base_patch200_200'):
+    def __init__(self, target_dim, hidden_dim, model_version='labram_base_patch200_200', pretrained=True):
         super().__init__()
 
-        self.model = create_model(model_version, pretrained=True)
+        self.model = create_model(model_version, pretrained=pretrained)
 
         input_dim = self.model.embed_dim
         self.model.head = nn.Sequential(
@@ -32,8 +32,8 @@ class EEGAutoencoder(BaseMLPWrapper):
     Inherits from BaseMLPWrapper to construct a model with an MLP head.
     The head is designed for autoencoding, where the target is the original input EEG epoch tensor.
     """
-    def __init__(self, n_chans, target_dim, model_version='labram_base_patch200_200', **kwargs):
-        super(EEGAutoencoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=512)
+    def __init__(self, n_chans, target_dim, model_version='labram_base_patch200_200', pretrained=True, **kwargs):
+        super(EEGAutoencoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=512, pretrained=pretrained)
         self.n_chans = n_chans
 
     def forward(self, x, input_chans):
@@ -62,8 +62,8 @@ class EEGSpectralDecoder(BaseMLPWrapper):
     Inherits from BaseMLPWrapper to construct a model with an MLP head.
     The head is designed for spectral decoding, where the target is a spectral representation of the input EEG epoch tensor (e.g., wavelet coefficients).
     """
-    def __init__(self, n_chans, n_freqs, target_dim, model_version='labram_base_patch200_200', **kwargs):
-        super(EEGSpectralDecoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=1024)
+    def __init__(self, n_chans, n_freqs, target_dim, model_version='labram_base_patch200_200', pretrained=True, **kwargs):
+        super(EEGSpectralDecoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=1024, pretrained=pretrained)
         self.n_chans = n_chans
         self.n_freqs = n_freqs
 

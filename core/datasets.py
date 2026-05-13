@@ -44,6 +44,9 @@ class FinetuneDataset(torch.utils.data.Dataset):
                             continue
                         mags_data = mags.clone().detach()
                         mags_data = utils.cut_to_size(mags_data, window_size)
+                        # log scale wavelet magnitudes
+                        mags_data = 20*torch.log10(mags_data + 1e-7) # add small value to avoid log(0)
+                        #mags_data = (mags_data - mags_data.mean()) / mags_data.std()
                         self.samples.append((epoch_data, mags_data))
 
 

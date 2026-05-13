@@ -30,7 +30,9 @@ except ImportError:
 
 
 def get_num_layer_for_vit(var_name, num_max_layer):
-    if var_name in ("cls_token", "mask_token", "pos_embed"):
+    if var_name.startswith('model.'):
+        var_name = var_name.replace('model.', '')
+    if var_name in ("cls_token", "mask_token", "pos_embed", "time_embed"):
         return 0
     elif var_name.startswith("patch_embed"):
         return 0
