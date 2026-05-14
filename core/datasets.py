@@ -17,7 +17,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
     Expects input dictionaries in the format: {subject: {condition: [epoch_tensor1, epoch_tensor2, ...]}}
     """
 
-    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], window_size: int, target_mode='wavelet', wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None):
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], window_size: int, target_mode='wavelet', wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None, log: bool = True, normalize: bool = True):
         self.samples = []
         self.subjects = list(epochs_dict.keys())
         for subj, conds in epochs_dict.items():
@@ -45,8 +45,8 @@ class FinetuneDataset(torch.utils.data.Dataset):
                         mags_data = mags.clone().detach()
                         mags_data = utils.cut_to_size(mags_data, window_size)
                         # log scale wavelet magnitudes
-                        mags_data = 20*torch.log10(mags_data + 1e-7) # add small value to avoid log(0)
-                        #mags_data = (mags_data - mags_data.mean()) / mags_data.std()
+                        if log: mags_data = 20*torch.log10(mags_data + 1e-7) # add small value to avoid log(0)
+                        if normalize: mags_data = (mags_data - mags_data.mean()) / mags_data.std()
                         self.samples.append((epoch_data, mags_data))
 
 
@@ -75,10 +75,10 @@ class FinetuneSplits:
         self.validation_epochs = validation_dict
         self.testing_epochs = testing_dict
 
-    def initialize_datasets(self, target_mode='wavelet', window_size: int = 200, wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None):
+    def initialize_datasets(self, target_mode='wavelet', window_size: int = 200, wavelet_dir: Optional[Path] = None, superlet_dir: Optional[Path] = None, log=True, normalize=True):
         training_dataset = FinetuneDataset(self.training_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size = window_size)
         validation_dataset = FinetuneDataset(self.validation_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size = window_size)
-        testing_dataset = FinetuneDataset(self.testing_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size=window_size)
+        testing_dataset = FinetuneDataset(self.testing_epochs, target_mode=target_mode, wavelet_dir=wavelet_dir, superlet_dir=superlet_dir, window_size=window_size, log=log, normalize=normalize)
 
         return training_dataset, validation_dataset, testing_dataset
 

@@ -848,6 +848,11 @@ def autoencoder_metrics_fn(y_true, y_pred, metrics=None):
     if "mae" in metrics:
         results["mae"] = mean_absolute_error(y_true, y_pred)
     if "r2" in metrics:
-        results["r2"] = r2_score(y_true, y_pred)
-
+        results["r2"] = r2_score(y_true.flatten(), y_pred.flatten())
+        bandwise_r2 = []
+        # for i in range(y_true.shape[0]):
+        #     print(f"shape of band {y_true[:, i].shape}")
+        #     r2 = r2_score(y_true[:, i], y_pred[:, i])
+        #     bandwise_r2.append(r2)
+        # results["bandwise_r2"] = bandwise_r2
     return results

@@ -93,7 +93,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         output_np = output.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
         mse = torch.nn.functional.mse_loss(output.detach(), targets).item()
-        r2 = r2_score(targets_np, output_np) if targets_np.shape[0] > 1 else 0.0
+        r2 = r2_score(targets_np.flatten(), output_np.flatten()) if targets_np.shape[0] > 1 else 0.0
             
         metric_logger.update(loss=loss_value)
         metric_logger.update(mse=mse)
