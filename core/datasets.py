@@ -23,13 +23,19 @@ class FinetuneDataset(torch.utils.data.Dataset):
         for subj, conds in epochs_dict.items():
             for cond, epoch_list in conds.items():
                 for idx, epoch in epoch_list:
+                    metadata = {
+                        "subject": subj,
+                        "condition": cond,
+                        "id": idx
+                    }
+
                     # tensor_data = torch.tensor(epoch, dtype=torch.float32)
                     epoch_data = epoch.clone().detach()
                     # cut last time point for matching LaBraM expectations
                     epoch_data = utils.cut_to_size(epoch_data, window_size)
 
                     if target_mode == 'autoencoder':
-                        self.samples.append((epoch_data, epoch_data))
+                        self.samples.append((epoch_data, epoch_data, metadata))
 
                     if target_mode == 'wavelet':
                         if wavelet_dir is None:
@@ -47,7 +53,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
                         # log scale wavelet magnitudes
                         if log: mags_data = 20*torch.log10(mags_data + 1e-7) # add small value to avoid log(0)
                         if normalize: mags_data = (mags_data - mags_data.mean()) / mags_data.std()
-                        self.samples.append((epoch_data, mags_data))
+                        self.samples.append((epoch_data, mags_data, metadata))
 
 
     @property
@@ -90,10 +96,14 @@ class KFoldSplitter:
     and `settings.FINETUNE_DIR`.
     """
 
-    def __init__(self, data_dir: Path, seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6):
+    def __init__(self, data_dir: Optional[Path], seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6):
         if all_data is None:
             io_handler = EpochIO(ext='.pt')
             # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
+            if data_dir is None:
+                print("WARNING: data_dir not provided, unable to load epochs for KFoldSplitter.")
+                self.all_data = {}
+
             all_data = io_handler.load_all_epochs(data_dir)
         self.all_data = all_data
         self.k_folds = k_folds

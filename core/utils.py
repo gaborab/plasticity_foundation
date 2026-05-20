@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Tuple, Optional, Dict, List
+from typing import Tuple, Optional, Dict, List, Any
 import numpy as np
 import pywt
 import torch
@@ -120,10 +120,10 @@ def calculate_r2(y_true, y_pred):
     """
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
-    if y_true.ndim > 2 or y_pred.ndim > 2:
-        raise ValueError(f"Expected y_true and y_pred to be 1D or 2D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
+    if y_true.ndim > 3 or y_pred.ndim > 3:
+        raise ValueError(f"Expected y_true and y_pred to be 1D or 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
 
-    if y_true.ndim == 2:
+    if y_true.ndim >= 2:
         # Flatten the arrays if they are 2D (e.g., for wavelet targets)
         y_true = y_true.flatten()
         y_pred = y_pred.flatten()
@@ -131,34 +131,67 @@ def calculate_r2(y_true, y_pred):
     r2 = r2_score(y_true, y_pred)
     return r2
 
-def calculate_bandwise_r2(y_true, y_pred, freqs, freq_bands):
-    """
-    Calculates the R-squared metric for each specified frequency band given the true and predicted values of spectral data.
-    The function expects y_true and y_pred to be 2D arrays with shape (n_freqs, time_points) or 3D arrays with shape (n_chans, n_freqs, time_points), and freqs to be a 1D array of frequency values corresponding to the second dimension of y_true and y_pred.
-    Freq_bands should be a dict of tuples specifying the frequency ranges for each band (e.g., [(1, 4), (4, 8), (8, 12), (12, 30), (30, 50)]).
-    Returns a dictionary mapping each frequency band to its corresponding R-squared value.
-    """
+def calculate_bandwise_metrics(y_true, y_pred, freqs, freq_bands):
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
     if y_true.ndim not in [2, 3] or y_pred.ndim not in [2, 3]:
         raise ValueError(f"Expected y_true and y_pred to be 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
     r2_bandwise = {}
+    mae_bandwise = {}
     for name, band in freq_bands.items():
         low, high = band
         band_indices = np.where((freqs >= low) & (freqs <= high))[0]
         if band_indices.size == 0:
-            print(f"WARNING: No frequencies found in band {name} ({low}-{high} Hz). Skipping R2 calculation for this band.")
+            print(
+                f"WARNING: No frequencies found in band {name} ({low}-{high} Hz). Skipping R2 calculation for this band.")
             continue
-        if y_true.ndim == 3:
+        elif y_true.ndim == 2:
+            band_true = y_true[band_indices, :].flatten()
+            band_pred = y_pred[band_indices, :].flatten()
+        elif y_true.ndim == 3:
             band_true = y_true[:, band_indices, :].flatten()
             band_pred = y_pred[:, band_indices, :].flatten()
         else:
-            band_true = y_true[band_indices, :].flatten()
-            band_pred = y_pred[band_indices, :].flatten()
-
+            print("WARNING: Expected 2D or 3D arrays for y_true and y_pred when calculating bandwise metrics, but got arrays with shape:", y_true.shape)
+            return {}, {}
         r2 = r2_score(band_true, band_pred)
+        mae = np.mean(np.abs(band_true - band_pred))
         r2_bandwise[name] = r2
-    return r2_bandwise
+        mae_bandwise[name] = mae
+    return r2_bandwise, mae_bandwise
+
+
+def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = None, freq_bands: Optional[Any]= None, ch_prefix: str = 'ch_'):
+    """
+    Calculates inference metrics (e.g., R-squared, MAE) for a single trial's output and target data. Expects trial_output and trial_target to be 3D arrays, where the last dimension corresponds to time points.
+    Returns a dictionary containing the calculated metrics.
+    """
+    metrics = {}
+    # global r2  and MAE
+    global_r2 = calculate_r2(trial_target, trial_output)
+    global_mae = np.mean(np.abs(trial_target - trial_output))
+    metrics['r2'] = global_r2
+    metrics['mae'] = global_mae
+
+    # global bandwise r2 and MAE
+    if freqs is not None and freq_bands is not None:
+        metrics['r2_bandwise'], metrics['mae_bandwise'] = calculate_bandwise_metrics(trial_target, trial_output, freqs=freqs, freq_bands=freq_bands)
+
+
+    # channel-wise r2 and MAE
+    for i in range(trial_target.shape[0]):
+        ch_key = f'{ch_prefix}{i}'
+        metrics[ch_key] = {}
+        channel_r2 = calculate_r2(trial_target[i], trial_output[i])
+        channel_mae = np.mean(np.abs(trial_target[i] - trial_output[i]))
+        metrics[ch_key]['r2'] = channel_r2
+        metrics[ch_key]['mae'] = channel_mae
+
+        # bandwise r2 and MAE for spectral data
+        if freqs is not None and freq_bands is not None:
+            metrics[ch_key]['r2_bandwise'], metrics[ch_key]['mae_bandwise'] = calculate_bandwise_metrics(trial_target[i], trial_output[i], freqs=freqs, freq_bands=freq_bands)
+
+    return metrics
 
 
 def avg_metrics_over_folds(model_data: Dict[str, List[Dict]], metrics: List[str]):
