@@ -1,17 +1,18 @@
 import argparse
-
+import time
+import datetime
+import h5py
 import numpy as np
 import torch
 from torch import utils as torch_utils
 
 from core.architectures import EEGAutoencoder, EEGSpectralDecoder
 from core.datasets import KFoldSplitter, FinetuneDataset
-from core.io import EpochIO
+from core.io import EpochIO, save_dict_to_hdf, save_inference_trial_hdf
 from core import settings
 from libs.labram import utils
 from einops import rearrange
 from core import utils as core_utils
-import h5py
 
 def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None, freq_bands=None):
     sampler = torch_utils.data.SequentialSampler(dataset)
@@ -21,48 +22,32 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None
         with torch.no_grad():
             input_chans = utils.get_input_chans(ch_names)
             for i, batch in enumerate(loader):
+                print(f"Reconstructing trials in batch {i} (batch size: {loader.batch_size})")
                 EEG  = batch[0]
                 target = batch[1]
                 metadata = batch[2] if len(batch) > 2 else None
+                subjects = metadata['subject']
+                conditions = metadata['condition']
+                ids = metadata['id']
                 EEG = EEG.float().to(device, non_blocking=True) / 100
                 EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
-                target = target.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
+                target = target.to(device, dtype=torch.float32, non_blocking=True)
 
                 with torch.cuda.amp.autocast():
-                    output = model(EEG, input_chans=input_chans)
+                    output = model.get_unflattened_output(EEG, input_chans=input_chans)
 
-                output_np = output.detach().cpu().numpy()
-                target_np = target.detach().cpu().numpy()
+                output_np = output.detach().float().cpu().numpy()
+                target_np = target.detach().float().cpu().numpy()
                 # calculate MAE, bandwise MAE, bandwise R2 and R2 metrics for each trial and save to disk
+                print(f"Saving trial outputs and metrics to disk...")
                 for j in range(output_np.shape[0]):
                     trial_output = output_np[j]
                     trial_target = target_np[j]
-                    trial_metadata = metadata[j]
-                    subject, condition, idx = trial_metadata["subject"], trial_metadata["condition"], trial_metadata["id"]
+                    subject, condition, idx = subjects[j], conditions[j], ids[j]
+                    metrics = core_utils.get_inference_metrics(trial_output, trial_target, freqs=freqs,
+                                                               freq_bands=freq_bands)
+                    save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, metrics)
 
-                    trial_path = f"{subject}/{condition}/{idx}"
-                    trial_group = h5file.create_group(trial_path)
-                    trial_group.create_dataset("target", data = trial_target, compression="gzip")
-                    trial_group.create_dataset("output", data = trial_output, compression="gzip")
-
-                    ch_prefix = "ch_"
-                    metrics = core_utils.get_inference_metrics(trial_output, trial_target, freqs=freqs, freq_bands=freq_bands, ch_prefix=ch_prefix)
-
-                    metrics_group = trial_group.create_group("metrics")
-                    for key, value in metrics.items(): # ch2 -> {r2, mae, r2_bandwise, mae_bandwise}
-                        if not ch_prefix in key:
-                            metrics_group.create_dataset(key, data = value, compression="gzip")
-                        else:
-                            # for channel-wise metrics, save each channel as a separate dataset
-                            for ch_metric, ch_value in value.items():
-                                channel_group = metrics_group.create_group(key)
-                                channel_group.create_dataset(ch_metric, data = ch_value, compression="gzip")
-
-
-
-                    print(f"Saved reconstruction and metrics for trial {trial_path} to disk.")
-                    print("Structure of saved trial group:")
-                    trial_group.visititems(lambda name, obj: print(name))  # print the structure of the saved group for verification
 
 
 def get_args():
@@ -73,10 +58,15 @@ def get_args():
     return parser.parse_args()
 
 def main(opts):
+    print(f"Running inference with {opts.model_name} model, postpatch mode: {opts.postpatch}")
+    total_time = 0
     io_handler = EpochIO(ext='.pt')
     # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
+    print("Loading baseline data...")
     finetune_all_data = io_handler.load_all_epochs(settings.FINETUNE_EPOCHS_DIR)
-    postpatch_all_data = io_handler.load_all_epochs(settings.PATCH_EPOCHS_DIR)
+    if opts.postpatch:
+        print("Loading postpatch data...")
+        postpatch_all_data = io_handler.load_all_epochs(settings.PATCH_EPOCHS_DIR)
 
     splitter = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, all_data=finetune_all_data, k_folds=6)
     folds = splitter.split_by_subject()
@@ -88,14 +78,17 @@ def main(opts):
     freq_window = settings.SPECTRAL_DECODER_PARAMS["freq_window"]
     n_freqs = settings.SPECTRAL_DECODER_PARAMS["n_freqs"]
     freqs = np.geomspace(freq_window[0], freq_window[1], n_freqs) if opts.target_mode in ["wavelet", "superlet"] else None
-    bands = settings.SPECTRAL_DECODER_PARAMS["bands"] if opts.target_mode in ["wavelet", "superlet"] else None
+    bands = settings.FREQ_BANDS if opts.target_mode in ["wavelet", "superlet"] else None
 
     for i, fold in enumerate(folds):
+        start_time = time.time()
+        print("="*30)
         print(f"Running inference for fold {i + 1}/{len(folds)}")
         testing_ids = list(fold.testing_epochs.keys())
         print("Testing subjects for this fold:", testing_ids)
         _, _, testing_dataset = fold.initialize_datasets(target_mode=opts.target_mode, wavelet_dir=settings.FINETUNE_WAVELET_DIR, log=True, normalize=True)
 
+        print("Setting up model with target mode:", opts.target_mode)
         if opts.target_mode == "autoencoder":
             model_params = settings.AUTOENCODER_PARAMS
             model = EEGAutoencoder(**model_params)
@@ -121,15 +114,24 @@ def main(opts):
         output_path = settings.INFERENCE_DIR / opts.model_name / str(i + 1)
         baseline_file = output_path / "baseline_reconstruction.h5"
         output_path.mkdir(parents=True, exist_ok=True)
+        print("Running baseline reconstruction...")
         run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, freqs, bands)
+        print("Baseline reconstruction finished.")
 
         if opts.postpatch:
+
             postpatch_file = output_path / "postpatch_reconstruction.h5"
+
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
             postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.WINDOW_SIZE, log=True, normalize=True)
+            print("Running post-patch reconstruction...")
             run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, freqs, bands)
-
-
+            print("Post-patch reconstruction finished.")
+        fold_time = time.time() - start_time
+        print(f"Fold time: {str(datetime.timedelta(seconds=int(fold_time)))}")
+        total_time += fold_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print(f"Inference finished for model {opts.model_name}. Elapsed time: {total_time_str}")
 
 
 
