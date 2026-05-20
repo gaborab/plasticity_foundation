@@ -13,11 +13,11 @@ from einops import rearrange
 from core import utils as core_utils
 import h5py
 
-def run_reconstruction(model, dataset, ch_names, device, output_path, freqs=None, freq_bands=None):
+def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None, freq_bands=None):
     sampler = torch_utils.data.SequentialSampler(dataset)
     loader = torch_utils.data.DataLoader(dataset, sampler=sampler, batch_size=256)
 
-    with h5py.File(output_path / "reconstruction_results.h5", "w") as h5file:
+    with h5py.File(output_file, "w") as h5file:
         with torch.no_grad():
             input_chans = utils.get_input_chans(ch_names)
             for i, batch in enumerate(loader):
@@ -63,9 +63,6 @@ def run_reconstruction(model, dataset, ch_names, device, output_path, freqs=None
                     print(f"Saved reconstruction and metrics for trial {trial_path} to disk.")
                     print("Structure of saved trial group:")
                     trial_group.visititems(lambda name, obj: print(name))  # print the structure of the saved group for verification
-                    # save metrics to disk
-
-                    # save reconstructed output and target to disk for later analysis
 
 
 def get_args():
@@ -122,13 +119,15 @@ def main(opts):
         model.eval()
 
         output_path = settings.INFERENCE_DIR / opts.model_name / str(i + 1)
+        baseline_file = output_path / "baseline_reconstruction.h5"
         output_path.mkdir(parents=True, exist_ok=True)
-        run_reconstruction(model, testing_dataset, ch_names, device, output_path, freqs, bands)
+        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, freqs, bands)
 
         if opts.postpatch:
+            postpatch_file = output_path / "postpatch_reconstruction.h5"
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
             postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.WINDOW_SIZE, log=True, normalize=True)
-
+            run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, freqs, bands)
 
 
 
