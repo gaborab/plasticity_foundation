@@ -39,6 +39,8 @@ FREQ_BANDS = {
     'gamma (30-60Hz)': (30, 60)
 }
 
+EPS = 1e-6  # Small constant to avoid division by zero in normalization and log calculations
+
 SEED = 42  # Set a fixed seed for reproducibility, use for shuffling and sampling training dataset
 
 # Preprocessing parameters
@@ -76,6 +78,7 @@ FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
 PLOT_DIR = BASE_DIR / "outputs" / "plots"
 INFERENCE_DIR = BASE_DIR / "outputs" / "inference_outputs"
 PLOT_MACRO = PLOT_DIR / "macro_plots"
+PLOT_INFERENCE = PLOT_DIR / "inference_plots"
 CHECKPOINT_DIR = BASE_DIR / "libs" / "labram" / "checkpoints"
 
 # Model

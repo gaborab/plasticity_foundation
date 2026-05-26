@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import json
 import h5py
+from sklearn import metrics
 
 from core import utils
 
@@ -155,3 +156,58 @@ def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.Fil
 
     metrics_group = trial_group.create_group("metrics")
     save_dict_to_hdf(metrics, metrics_group)
+
+def load_inference_data(h5file_path: Path, channel_mode: bool, subjects: str = None, conditions: str = None, idxs = None, results: List[str]=None, metrics: List[str]=None, channels: List[str]=None, bands: List[str] = None) -> Any:
+
+    try:
+        data = h5py.File(h5file_path, "r")
+    except:
+        print(f"ERROR: Failed to open HDF file at path: {h5file_path}")
+        return None
+
+    # assuming file structure is {subject}/{condition}/{idx}/ with datasets "target", "output", and group "metrics" containing the metrics as datasets
+    if results is not None and "metrics" not in results:
+        results.append("metrics")
+
+    master_keys_channel = [subjects, conditions, idxs, results, channels, metrics, bands]
+    master_keys_global = [subjects, conditions, idxs, results, metrics, bands]
+
+    master_keys = master_keys_channel if channel_mode else master_keys_global
+    loaded_data = {}
+    loaded_data = extract_data(data, loaded_data, master_keys, depth=0, channel_mode=channel_mode)
+
+    data.close()
+
+    return loaded_data
+
+
+
+def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]], depth, channel_mode: bool) -> Dict:
+    if depth >= len(get):
+        print("WARNING: Depth exceeds length of get list, returning current data")
+        return ret
+    level_keys = get[depth]
+
+    if level_keys is None:
+        level_keys = list(group.keys())
+        # in case of metrics, decide whether to collect channel-wise metrics or global metrics based on channel_mode
+        if group.name.split("/")[-1] == "metrics":
+            if channel_mode:
+                level_keys = [key for key in level_keys if "ch_" in key]
+            else:
+                level_keys = [key for key in level_keys if "ch_" not in key]
+
+    for key in level_keys:
+        if key not in group:
+            print(f"WARNING: Key {key} not found in group {group.name}")
+            continue
+        item = group[key]
+
+        # recurse if group, otherwise save data
+        if isinstance(item, h5py.Group):
+            if depth + 1 < len(get):
+                extract_data(item, ret, get, depth + 1, channel_mode=channel_mode)
+        elif isinstance(item, h5py.Dataset):
+            ret[item.name] = item[()]
+    return ret
+
