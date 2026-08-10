@@ -5,7 +5,7 @@ import pywt
 import torch
 from sklearn.metrics import r2_score
 from einops import rearrange
-
+from core.io_models import *
 
 def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, **kwargs):
     """
@@ -21,40 +21,7 @@ def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, **kwargs):
     mag = np.abs(coeffs)
     return mag, freqs
 
-def calc_superlet(tensor_data, fs, freq_window, n_freqs, n_cycles, **kwargs):
-    """
-    Placeholder function for calculating superlet coefficients. The actual implementation would depend on the specific superlet algorithm being used.
-    """
 
-def vars_from_filename(stem, marker):
-    """
-    Extracts the numeric ID from a filename based on a specified marker. For example, if the filename is "subject_condition_epoch5.pt" and the marker is "_epoch", this function will return 5.
-    """
-
-    # Extract epoch ID
-    pos = stem.rfind(marker)
-    if pos == -1:
-        print("WARNING: marker not found in filename:", stem)
-    id = stem[pos + len(marker):]  # part after "_epoch"
-    if not id.isdigit():
-        print("WARNING: epoch id non numeric in filename:", stem)
-    id = int(id)
-
-    # Extract subject and condition from filename
-    prefix = stem[:pos]  # part before "_epoch"
-    parts = prefix.split('_', 1)
-    if len(parts) < 2:
-        print("WARNING: unexpected filename:", stem)
-    subject, condition = parts[0], parts[1]
-
-    return pos, id, subject, condition
-
-def vars_to_filename(subject, condition, id, marker, ext):
-    """
-    Constructs a filename from the given subject, condition, ID, marker, and extension. For example, if subject is "subject1", condition is "conditionA", id is 5, marker is "_epoch", and ext is ".pt", this function will return "subject1_conditionA_epoch5.pt".
-    """
-    filename = f"{subject}_{condition}_{marker}{str(id)}{ext}"
-    return filename
 
 def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tuple[int, int], fs:int):
     """
@@ -124,20 +91,28 @@ def calculate_r2(y_true, y_pred):
         raise ValueError(f"Expected y_true and y_pred to be 1D or 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
 
     if y_true.ndim >= 2:
-        # Flatten the arrays if they are 2D (e.g., for wavelet targets)
+        # Flatten the arrays if they are 2D
         y_true = y_true.flatten()
         y_pred = y_pred.flatten()
 
     r2 = r2_score(y_true, y_pred)
     return r2
 
-def calculate_bandwise_metrics(y_true, y_pred, freqs, freq_bands):
+
+def calculate_bandwise_metrics(y_true, y_pred, freq_stds, freqs, freq_bands, eps: float = 1e-8):
+    """
+    Calculates R-squared, MAE, STD and NMAE metrics for each frequency band defined in freq_bands by indexing into the frequency dimension of y_true and y_pred.
+    Expects y_true and y_pred to be 2D or 3D arrays, where the last dimension corresponds to time points and the second-to-last dimension corresponds to frequencies.
+    Expects freq_stds to be a 1D array of standard deviations for each frequency.
+    """
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
     if y_true.ndim not in [2, 3] or y_pred.ndim not in [2, 3]:
         raise ValueError(f"Expected y_true and y_pred to be 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
     r2_bandwise = {}
     mae_bandwise = {}
+    std_bandwise = {}
+    nmae_bandwise = {}
     for name, band in freq_bands.items():
         low, high = band
         band_indices = np.where((freqs >= low) & (freqs <= high))[0]
@@ -145,7 +120,7 @@ def calculate_bandwise_metrics(y_true, y_pred, freqs, freq_bands):
             print(
                 f"WARNING: No frequencies found in band {name} ({low}-{high} Hz). Skipping R2 calculation for this band.")
             continue
-        elif y_true.ndim == 2:
+        if y_true.ndim == 2:
             band_true = y_true[band_indices, :].flatten()
             band_pred = y_pred[band_indices, :].flatten()
         elif y_true.ndim == 3:
@@ -158,40 +133,62 @@ def calculate_bandwise_metrics(y_true, y_pred, freqs, freq_bands):
         mae = np.mean(np.abs(band_true - band_pred))
         r2_bandwise[name] = r2
         mae_bandwise[name] = mae
-    return r2_bandwise, mae_bandwise
+        std_bandwise[name] = np.mean(freq_stds[band_indices])
+        nmae_bandwise[name] = mae / std_bandwise[name] + eps
+
+    return r2_bandwise, mae_bandwise, std_bandwise, nmae_bandwise
 
 
-def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = None, freq_bands: Optional[Any]= None, ch_prefix: str = 'ch_'):
+def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = None, freq_bands: Optional[Any]= None, ch_prefix: str = 'ch_', eps: float = 1e-8) -> Tuple[Dict, Dict[str, Dict]]:
     """
     Calculates inference metrics (e.g., R-squared, MAE) for a single trial's output and target data. Expects trial_output and trial_target to be 3D arrays, where the last dimension corresponds to time points.
     Returns a dictionary containing the calculated metrics.
     """
-    metrics = {}
-    # global r2  and MAE
-    global_r2 = calculate_r2(trial_target, trial_output)
-    global_mae = np.mean(np.abs(trial_target - trial_output))
-    metrics['r2'] = global_r2
-    metrics['mae'] = global_mae
+    spectral = freqs is not None and freq_bands is not None
 
-    # global bandwise r2 and MAE
-    if freqs is not None and freq_bands is not None:
-        metrics['r2_bandwise'], metrics['mae_bandwise'] = calculate_bandwise_metrics(trial_target, trial_output, freqs=freqs, freq_bands=freq_bands)
+    stds = np.std(trial_target, axis=-1)
+    global_std = np.mean(stds)
 
 
-    # channel-wise r2 and MAE
+    print("debug: std shape: ", stds.shape) # TODO remove debug
+
+    # global metrics
+    g_metrics = Metrics()
+    g_metrics.r2 = calculate_r2(trial_target, trial_output)
+    g_metrics.mae = np.mean(np.abs(trial_target - trial_output))
+    g_metrics.nmae = g_metrics.mae / global_std + eps
+    g_metrics.std = global_std
+
+    # global band-wise metrics
+    if spectral:
+        freq_stds = np.mean(stds, axis=0)
+        g_metrics.r2_bandwise, g_metrics.mae_bandwise, g_metrics.std_bandwise, g_metrics.nmae_bandwise = (
+            calculate_bandwise_metrics(trial_target, trial_output, freq_stds, freqs=freqs, freq_bands=freq_bands, eps=eps)
+        )
+    g_metrics = g_metrics.to_dict()
+
+    ch_metrics_dict = {}
+    channel_stds = np.mean(stds, axis=1) if spectral else stds
+    # channel-wise metrics
     for i in range(trial_target.shape[0]):
         ch_key = f'{ch_prefix}{i}'
-        metrics[ch_key] = {}
-        channel_r2 = calculate_r2(trial_target[i], trial_output[i])
-        channel_mae = np.mean(np.abs(trial_target[i] - trial_output[i]))
-        metrics[ch_key]['r2'] = channel_r2
-        metrics[ch_key]['mae'] = channel_mae
+        ch_metrics = Metrics()
+        ch_metrics.r2 = calculate_r2(trial_target[i], trial_output[i])
+        ch_metrics.mae = np.mean(np.abs(trial_target[i] - trial_output[i]))
 
-        # bandwise r2 and MAE for spectral data
-        if freqs is not None and freq_bands is not None:
-            metrics[ch_key]['r2_bandwise'], metrics[ch_key]['mae_bandwise'] = calculate_bandwise_metrics(trial_target[i], trial_output[i], freqs=freqs, freq_bands=freq_bands)
+        ch_metrics.std = channel_stds[i]
+        ch_metrics.nmae = ch_metrics.mae / channel_stds[i]
 
-    return metrics
+
+        # channel-wise band-wise metrics
+        if spectral:
+            channel_freq_stds = stds[i, :]
+            ch_metrics.r2_bandwise, ch_metrics.mae_bandwise, ch_metrics.std_bandwise, ch_metrics.nmae_bandwise = (
+                calculate_bandwise_metrics(trial_target[i], trial_output[i], channel_freq_stds, freqs=freqs, freq_bands=freq_bands, eps=eps)
+            )
+
+        ch_metrics_dict[ch_key] = ch_metrics.to_dict()
+    return g_metrics, ch_metrics_dict
 
 
 def avg_metrics_over_folds(model_data: Dict[str, List[Dict]], metrics: List[str]):

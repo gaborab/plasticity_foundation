@@ -167,19 +167,19 @@ def show_reconstructions(datasets: List[Dict[str, Any]], suptitle, plot_title, t
 
                 # Column 1: True
                 ax1 = fig.add_subplot(gs[i, 0])
-                im1 = ax1.pcolormesh(time, freqs, channel_true, vmin=v_min, vmax=v_max)
+                im1 = ax1.pcolormesh(time, freqs, channel_true, vmin=-v_max, vmax=v_max)
                 ax1.set_title(f"True | {row_label}", pad=10)
                 set_heatmap_formatting(ax1, target_mode, im1)
 
                 # Column 2: Recon
                 ax2 = fig.add_subplot(gs[i, 1])
-                im2 = ax2.pcolormesh(time, freqs, channel_recon, shading="gouraud", vmin=v_min, vmax=v_max)
+                im2 = ax2.pcolormesh(time, freqs, channel_recon, shading="gouraud", vmin=-v_max, vmax=v_max)
                 ax2.set_title(f"Reconstructed | {row_label}", pad=10)
                 set_heatmap_formatting(ax2, target_mode, im2)
 
                 # Column 3: Error
                 ax3 = fig.add_subplot(gs[i, 2])
-                im3 = ax3.pcolormesh(time, freqs, channel_true - channel_recon, shading="gouraud", vmin=v_min,
+                im3 = ax3.pcolormesh(time, freqs, channel_true - channel_recon, shading="gouraud", vmin=-v_max,
                                      vmax=v_max)
                 ax3.set_title(f"Error (True - Recon) | {row_label}", pad=10)
                 set_heatmap_formatting(ax3, target_mode, im3)

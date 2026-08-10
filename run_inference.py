@@ -44,9 +44,9 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None
                     trial_output = output_np[j]
                     trial_target = target_np[j]
                     subject, condition, idx = subjects[j], conditions[j], ids[j]
-                    metrics = core_utils.get_inference_metrics(trial_output, trial_target, freqs=freqs,
-                                                               freq_bands=freq_bands)
-                    save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, metrics)
+                    metrics, ch_metrics = core_utils.get_inference_metrics(trial_output, trial_target, freqs=freqs,
+                                                               freq_bands=freq_bands, eps=settings.EPS)
+                    save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, metrics, ch_metrics)
 
 
 
@@ -118,6 +118,7 @@ def main(opts):
         run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, freqs, bands)
         print("Baseline reconstruction finished.")
 
+        # run reconstruction on postpatch data if enabled (on the same subjects as the baseline reconstruction)
         if opts.postpatch:
 
             postpatch_file = output_path / "postpatch_reconstruction.h5"

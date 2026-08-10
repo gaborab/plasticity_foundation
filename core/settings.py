@@ -39,7 +39,7 @@ FREQ_BANDS = {
     'gamma (30-60Hz)': (30, 60)
 }
 
-EPS = 1e-6  # Small constant to avoid division by zero in normalization and log calculations
+EPS = 1e-8  # Small constant to avoid division by zero in normalization and log calculations
 
 SEED = 42  # Set a fixed seed for reproducibility, use for shuffling and sampling training dataset
 

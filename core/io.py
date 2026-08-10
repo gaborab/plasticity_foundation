@@ -1,14 +1,12 @@
 # python
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-
+from core import io_utils
+from core.io_models import Trial, Metrics
 import numpy as np
 import torch
 import json
 import h5py
-from sklearn import metrics
-
-from core import utils
 
 
 class EpochIO:
@@ -24,7 +22,7 @@ class EpochIO:
 
     def save(self, tensor_data: Any, directory: Path, subject: str, condition: str, epoch_id: int, saved_type = 'epoch') -> Path:
         directory.mkdir(parents=True, exist_ok=True)
-        filename = utils.vars_to_filename(subject, condition, epoch_id, saved_type, self.ext)
+        filename = io_utils.vars_to_filename(subject, condition, epoch_id, saved_type, self.ext)
         target = directory / filename
         torch.save(tensor_data, target)
         return target
@@ -33,7 +31,7 @@ class EpochIO:
         """
         Load all epoch files in `directory` for a specific `subject`, `cond`, `marker` and `id` matching the filename convention.
         """
-        filename = utils.vars_to_filename(subject, cond, idx, marker=marker, ext=self.ext)
+        filename = io_utils.vars_to_filename(subject, cond, idx, marker=marker, ext=self.ext)
         # find matching file in directory
         file = next(directory.glob(filename), None)
 
@@ -59,7 +57,7 @@ class EpochIO:
             return epochs
 
         for file in directory.glob(f"*{self.ext}"):
-            pos, id, subject, condition = utils.vars_from_filename(file.stem, marker="_epoch")
+            pos, id, subject, condition = io_utils.vars_from_filename(file.stem, marker="_epoch")
 
             # load tensor
             try:
@@ -137,7 +135,7 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
             save_dict_to_hdf(value, subgroup)
         elif isinstance(value, np.ndarray):
             group.create_dataset(key, data=value, compression="gzip")
-        elif not hasattr(value, "__len__"):
+        elif not hasattr(value, "__len__") and not isinstance(value, str):
             value = float(value)
             group.create_dataset(key, data=value)
         else:
@@ -148,14 +146,18 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
 
 
 
-def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, metrics):
+def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, metrics, ch_metrics):
     trial_path = f"{subject}/{condition}/{idx}"
     trial_group = h5file.create_group(trial_path)
     trial_group.create_dataset("target", data=trial_target, compression="gzip")
     trial_group.create_dataset("output", data=trial_output, compression="gzip")
 
     metrics_group = trial_group.create_group("metrics")
+    ch_metrics_group = trial_group.create_group("channel_metrics")
     save_dict_to_hdf(metrics, metrics_group)
+    save_dict_to_hdf(ch_metrics, ch_metrics_group)
+    print("debug: saved file tree: ", )
+    h5file.visit(print) # todo remove debug
 
 def load_inference_data(h5file_path: Path, channel_mode: bool, subjects: str = None, conditions: str = None, idxs = None, results: List[str]=None, metrics: List[str]=None, channels: List[str]=None, bands: List[str] = None) -> Any:
 
@@ -210,4 +212,30 @@ def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]],
         elif isinstance(item, h5py.Dataset):
             ret[item.name] = item[()]
     return ret
+
+def load_inference_trials(h5file_path: Path,):
+    try:
+        data = h5py.File(h5file_path, "r")
+    except:
+        print(f"ERROR: Failed to open HDF file at path: {h5file_path}")
+        return None
+
+    all_trials = []
+    for subject, subj_group in data.items():
+        for condition, cond_group in subj_group.items():
+            for idx, trial_group in cond_group.items():
+                trial = Trial(trial_group, subject, condition, idx)
+                all_trials.append(trial)
+    return all_trials
+
+
+
+
+
+
+
+
+# NEXT STEPS: megoldani hogy pl mae bandwise ne groupként töltődjön be nem is értem hogy az hogy történik, NMAE és metrics channelwise_metrics szétválasztás
+
+
 
