@@ -149,9 +149,6 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
     stds = np.std(trial_target, axis=-1)
     global_std = np.mean(stds)
 
-
-    print("debug: std shape: ", stds.shape) # TODO remove debug
-
     # global metrics
     g_metrics = Metrics()
     g_metrics.r2 = calculate_r2(trial_target, trial_output)
