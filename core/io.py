@@ -8,6 +8,19 @@ import torch
 import json
 import h5py
 
+import json
+import numpy as np
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 class EpochIO:
     """
@@ -141,7 +154,7 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
         else:
             print(f"Found unexpected type {type(value)} for {key}")
             print("WARNING: value is not a numpy ndarray or dict, converting to JSON as fallback")
-            value_str = json.dumps(value)
+            value_str = json.dumps(value, cls=NumpyEncoder)
             group.create_dataset(key, data=value_str)
 
 
@@ -152,11 +165,8 @@ def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.Fil
     trial_group.create_dataset("target", data=trial_target, compression="gzip")
     trial_group.create_dataset("output", data=trial_output, compression="gzip")
 
-    metrics_group = trial_group.create_group("metrics")
-    ch_metrics_group = trial_group.create_group("channel_metrics")
-    metrics_json = json.dumps(metrics)
-    ch_metrics_json = json.dumps(ch_metrics)
-
+    metrics_json = json.dumps(metrics, cls=NumpyEncoder)
+    ch_metrics_json = json.dumps(ch_metrics, cls=NumpyEncoder)
     trial_group.attrs["metrics_json"] = metrics_json
     trial_group.attrs["channel_metrics_json"] = ch_metrics_json
 

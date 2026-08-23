@@ -716,7 +716,6 @@ def get_input_chans(ch_names):
     input_chans = [0] # for cls token
     for ch_name in ch_names:
         input_chans.append(standard_1020.index(ch_name) + 1)
-        print(ch_name, standard_1020.index(ch_name)+1)
     return input_chans
 
 
