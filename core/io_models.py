@@ -4,6 +4,7 @@ from typing import Dict, Any
 from core.io_utils import nested_group_to_dict
 import h5py
 import numpy as np
+import json
 
 @dataclass
 class Metrics:
@@ -41,14 +42,15 @@ class Trial:
         return self.trial_data["output"][()]
     @cached_property
     def channel_metrics(self) -> Dict[str, Metrics]:
-        ch_group = self.trial_data["channel_metrics"]
+        ch_json = self.trial_data.attrs["channel_metrics_json"]
+        raw_dict = json.loads(ch_json)
         ret_metrics = {}
-        for ch_name, metrics_data in ch_group.items():
+        for ch_name, metrics_data in raw_dict.items():
             metrics_dict = nested_group_to_dict(metrics_data)
             ret_metrics[ch_name] = Metrics.from_dict(metrics_dict)
         return ret_metrics
     @cached_property
     def metrics(self) -> Metrics:
-        m = self.trial_data["metrics"]
-        metrics_dict = nested_group_to_dict(m)
-        return Metrics.from_dict(metrics_dict)
+        m_json = self.trial_data.attrs["metrics_json"]
+        raw_dict = json.loads(m_json)
+        return Metrics.from_dict(raw_dict)

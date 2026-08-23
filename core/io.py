@@ -154,8 +154,11 @@ def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.Fil
 
     metrics_group = trial_group.create_group("metrics")
     ch_metrics_group = trial_group.create_group("channel_metrics")
-    save_dict_to_hdf(metrics, metrics_group)
-    save_dict_to_hdf(ch_metrics, ch_metrics_group)
+    metrics_json = json.dumps(metrics)
+    ch_metrics_json = json.dumps(ch_metrics)
+
+    trial_group.attrs["metrics_json"] = metrics_json
+    trial_group.attrs["channel_metrics_json"] = ch_metrics_json
 
 def load_inference_data(h5file_path: Path, channel_mode: bool, subjects: str = None, conditions: str = None, idxs = None, results: List[str]=None, metrics: List[str]=None, channels: List[str]=None, bands: List[str] = None) -> Any:
 

@@ -64,6 +64,7 @@ def main(opts):
     # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
     print("Loading baseline data...")
     finetune_all_data = io_handler.load_all_epochs(settings.FINETUNE_EPOCHS_DIR)
+    postpatch_all_data = None
     if opts.postpatch:
         print("Loading postpatch data...")
         postpatch_all_data = io_handler.load_all_epochs(settings.PATCH_EPOCHS_DIR)
