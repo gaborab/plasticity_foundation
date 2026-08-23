@@ -8,12 +8,13 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from core import settings
+from core.io_models import Trial
 
 
-def single_channel_viewer(datasets: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, bands=None):
+def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, bands=None):
     # 1. Setup UI Elements
     sample_slider = widgets.IntSlider(
-        min=0, max=min(len(ds) for ds in datasets) - 1, step=1, value=0,
+        min=0, max=min(len(ds) for ds in dataset_data) - 1, step=1, value=0,
         description="Sample: ", layout=widgets.Layout(width="100%")
     )
     channel_slider = widgets.IntSlider(
@@ -26,20 +27,30 @@ def single_channel_viewer(datasets: List[List[Dict[str, Any]]], n_chans, styling
     # 2. The Plotting Callback
     def update_plot(sample_idx, channel_idx):
         try:
-            datasets_channel_data = [ds[sample_idx][channel_idx] for ds in datasets]
 
-            # Note: Ensure that 'suptitle' and 'target_mode' exist in styling_params!
+            ds_trials = [ds[sample_idx] for ds in dataset_data]
+            trial_data_dict = [
+                {
+                    "output": selected_trial.recon_data[channel_idx],
+                    "target": selected_trial.target_data[channel_idx],
+                }
+                for selected_trial in ds_trials
+            ]
+            ds_metrics = [ds_metrics[sample_idx][channel_idx] for ds_metrics in dataset_metrics]
+
+
             show_reconstructions(
-                datasets=datasets_channel_data,
+                datasets=trial_data_dict,
+                metrics=ds_metrics,
                 plot_title=f"Channel {channel_idx}, Sample {sample_idx}",
                 bands=bands,
-                rows=len(datasets),
+                rows=len(dataset_metrics),
                 **styling_params
             )
         except Exception as e:
             # If a TypeError or IndexError happens, print it directly to the screen!
             import traceback
-            print(f"CRITICAL ERROR IN PLOTTING:\n{traceback.format_exc()}")
+            print(f"ERROR: {traceback.format_exc()}")
 
     # 3. Create a dedicated "Screen" for the plot output
     plot_output = widgets.interactive_output(
@@ -50,7 +61,7 @@ def single_channel_viewer(datasets: List[List[Dict[str, Any]]], n_chans, styling
     # 4. The Save Callback
     def on_save_clicked(b):
         filepath = save_dir / f"sample_{sample_slider.value}_ch_{channel_slider.value}.png"
-        current_sample_channels = [ds[sample_slider.value][channel_slider.value] for ds in datasets]
+        current_sample_channels = [ds[sample_slider.value][channel_slider.value] for ds in dataset_metrics]
         with save_message:
             # Clear previous save messages
             save_message.clear_output()
@@ -62,7 +73,7 @@ def single_channel_viewer(datasets: List[List[Dict[str, Any]]], n_chans, styling
                 save_filename=filepath,
                 plot_title=f"Channel {channel_slider.value}, Sample {sample_slider.value}",
                 bands=bands,
-                rows=len(datasets),
+                rows=len(dataset_metrics),
                 **styling_params
             )
             print("Save complete!")
@@ -108,30 +119,33 @@ def set_heatmap_formatting(ax, target_mode, im=None):
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
         ax.yaxis.set_minor_locator(ticker.NullLocator())
 
-def show_reconstructions(datasets: List[Dict[str, Any]], suptitle, plot_title, target_mode,
+def show_reconstructions(data: List[Dict[str, Any]], metrics: List[Dict[str, Any]], suptitle, plot_title, target_mode,
                          save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="", **kwargs):
     # 1. Height Adjustment & Constrained Layout (Fixes stretching and overlapping)
     total_rows = rows + 1 if target_mode in ["wavelet", "superlet"] else rows
     fig = plt.figure(figsize=(16, 4 * total_rows), layout="constrained")
-    fig.suptitle(suptitle + f"\n{param_text}", fontweight="bold", fontsize=16)
+
 
     # 2. Unified GridSpec (3 columns for Wavelets, 1 column for Autoencoder)
     ncols = 3 if target_mode in ["wavelet", "superlet"] else 1
     gs = fig.add_gridspec(nrows=total_rows, ncols=ncols)
 
     all_bandwise_data = []
-    v_max = max([max(channel_data["output"].max(), channel_data["target"].max()) for channel_data in datasets])
-    v_min = min([min(channel_data["output"].min(), channel_data["target"].min()) for channel_data in datasets])
-    for i, channel_data in enumerate(datasets):
+    v_max = max([max(channel_data["output"].max(), channel_data["target"].max()) for channel_data in data])
+    v_min = min([min(channel_data["output"].min(), channel_data["target"].min()) for channel_data in data])
+    for i in range(len(data)):
         try:
+            channel_data = data[i]
+            channel_metrics = metrics[i]
             channel_recon = channel_data["output"]
             channel_true = channel_data["target"]
-            metrics = channel_data["metrics"]
-            meta = channel_data["metadata"]
+            metrics = channel_metrics["metrics"]
+            meta = channel_metrics["metadata"]
+            fig.suptitle(suptitle + meta["condition"] + f"\n{param_text}", fontweight="bold", fontsize=16)
 
             subj = meta.get("subject", "unknown")
             idx = meta.get("idx", "unknown")
-            row_label = f"({subj}, {idx})"  # We will use this in the individual plot titles!
+            row_label = f"({subj}, {idx})"
 
             bandwise_nmae = metrics.get("bandwise_nmae", [])
             nmae = metrics.get("nmae", 0.0)

@@ -211,17 +211,27 @@ def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]],
             ret[item.name] = item[()]
     return ret
 
-def load_inference_trials(h5file_path: Path,):
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] = None) -> List[Trial]:
+    print("Loading inference trials...")
     try:
         data = h5py.File(h5file_path, "r")
     except:
         print(f"ERROR: Failed to open HDF file at path: {h5file_path}")
-        return None
+        return []
 
+    print(f"Filtering for subjects: {', '.join(subjects) if subjects is not None else 'all'}")
+    print(f"Filtering for conditions: {', '.join(conditions) if conditions is not None else 'all'}")
+    print(f"Filtering for idxs: {', '.join(map(str,idxs)) if idxs is not None else 'all'}")
     all_trials = []
     for subject, subj_group in data.items():
+        if subjects is not None and subject not in subjects:
+            continue
         for condition, cond_group in subj_group.items():
+            if conditions is not None and condition not in conditions:
+                continue
             for idx, trial_group in cond_group.items():
+                if idxs is not None and idx not in idxs:
+                    continue
                 trial = Trial(trial_group, subject, condition, idx)
                 all_trials.append(trial)
     return all_trials

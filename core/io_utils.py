@@ -44,7 +44,7 @@ def nested_group_to_dict(group: h5py.Group) -> Dict[str, Any]:
         if isinstance(value, h5py.Group):
             ret_dict[key] = nested_group_to_dict(value)
         else:
-            if ret_dict[key] is not None:
+            if key in ret_dict:
                 print(f"WARNING: key {key} already exists in nested group, overriding value: {ret_dict[key]}")
             ret_dict[key] = value[()]
     return ret_dict

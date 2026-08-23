@@ -1,4 +1,5 @@
 from dataclasses import dataclass, fields, asdict
+from functools import cached_property
 from typing import Dict, Any
 from core.io_utils import nested_group_to_dict
 import h5py
@@ -9,7 +10,7 @@ class Metrics:
     @classmethod
     def from_dict(cls, dict: Dict) -> 'Metrics':
         metrics_keys = {f.name for f in fields(Metrics)}
-        filtered_dict = {k: v for k, v in dict if k in metrics_keys}
+        filtered_dict = {k: v for k, v in dict.items() if k in metrics_keys}
         return cls(**filtered_dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -38,7 +39,7 @@ class Trial:
     @property
     def recon_data(self) -> np.ndarray:
         return self.trial_data["output"][()]
-    @property
+    @cached_property
     def channel_metrics(self) -> Dict[str, Metrics]:
         ch_group = self.trial_data["channel_metrics"]
         ret_metrics = {}
@@ -46,7 +47,7 @@ class Trial:
             metrics_dict = nested_group_to_dict(metrics_data)
             ret_metrics[ch_name] = Metrics.from_dict(metrics_dict)
         return ret_metrics
-    @property
+    @cached_property
     def metrics(self) -> Metrics:
         m = self.trial_data["metrics"]
         metrics_dict = nested_group_to_dict(m)
