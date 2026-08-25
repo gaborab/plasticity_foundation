@@ -4,6 +4,32 @@ from core.io_models import Trial, Metrics
 from scipy.stats import sem
 from numpy import mean
 
+def rename_chans_to_mne(ch_names: List[str]):
+    for i, name in enumerate(ch_names):
+        mod_name = name.split(' ')[-1].split('-')[0]
+        if mod_name == "T1":
+            ch_names[i] = "FT9"
+            continue
+        if mod_name == "T2":
+            ch_names[i] = "FT10"
+            continue
+        if mod_name[1].isdigit():
+            ch_names[i] = mod_name
+            continue
+        mod_name = mod_name[0] + mod_name[1].lower() + mod_name[2:]
+        ch_names[i] = mod_name
+
+def order_to_channel_viewer_format(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], sample_idx, channel_idx) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ds_trials = [ds[sample_idx] for ds in dataset_data]  # select sample across all datasets
+    trial_data_dict = [
+        {
+            "output": selected_trial.recon_data[channel_idx],
+            "target": selected_trial.target_data[channel_idx],
+        }
+        for selected_trial in ds_trials
+    ]  # select channel across all datasets
+    ds_metrics = [ds_metrics[sample_idx][channel_idx] for ds_metrics in dataset_metrics]
+    return trial_data_dict, ds_metrics
 
 def get_channel_viewer_metrics(trial_list: List[Trial], metric_names: List[str], ch_prefix: str= 'ch_') -> List[List[Dict[str, Any]]]:
     ret = []

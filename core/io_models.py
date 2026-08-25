@@ -46,8 +46,7 @@ class Trial:
         raw_dict = json.loads(ch_json)
         ret_metrics = {}
         for ch_name, metrics_data in raw_dict.items():
-            metrics_dict = nested_group_to_dict(metrics_data)
-            ret_metrics[ch_name] = Metrics.from_dict(metrics_dict)
+            ret_metrics[ch_name] = Metrics.from_dict(metrics_data)
         return ret_metrics
     @cached_property
     def metrics(self) -> Metrics:

@@ -7,11 +7,23 @@ from ipywidgets import interact
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from core import settings
+from core import settings, io_utils
 from core.io_models import Trial
+from core.plot_data_processing import order_to_channel_viewer_format
 
 
 def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, bands=None):
+    """
+    Interactive viewer for visualizing single-channel reconstructions across multiple datasets.
+    Allows users to select a sample and channel, and view the corresponding reconstruction and metrics.
+    Provides a button to save the current figure to a specified directory.
+    Params:
+        - dataset_data: List of the datasets (usually pre and post patch) containing Trial objects.
+        - dataset_metrics: List of the datasets containing metrics for each Trial.
+    """
+
+    if len(dataset_data) != len(dataset_metrics):
+        raise ValueError("dataset_data and dataset_metrics must have the same length.")
     # 1. Setup UI Elements
     sample_slider = widgets.IntSlider(
         min=0, max=min(len(ds) for ds in dataset_data) - 1, step=1, value=0,
@@ -28,23 +40,15 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
     def update_plot(sample_idx, channel_idx):
         try:
 
-            ds_trials = [ds[sample_idx] for ds in dataset_data]
-            trial_data_dict = [
-                {
-                    "output": selected_trial.recon_data[channel_idx],
-                    "target": selected_trial.target_data[channel_idx],
-                }
-                for selected_trial in ds_trials
-            ]
-            ds_metrics = [ds_metrics[sample_idx][channel_idx] for ds_metrics in dataset_metrics]
-
+            trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_idx, channel_idx)
 
             show_reconstructions(
-                datasets=trial_data_dict,
-                metrics=ds_metrics,
+                data=trial_data_dict,
+                metrics_data=ds_metrics,
                 plot_title=f"Channel {channel_idx}, Sample {sample_idx}",
                 bands=bands,
                 rows=len(dataset_metrics),
+
                 **styling_params
             )
         except Exception as e:
@@ -60,14 +64,16 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
 
     # 4. The Save Callback
     def on_save_clicked(b):
+        trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_slider.value,
+                                                                     channel_slider.value)
         filepath = save_dir / f"sample_{sample_slider.value}_ch_{channel_slider.value}.png"
-        current_sample_channels = [ds[sample_slider.value][channel_slider.value] for ds in dataset_metrics]
         with save_message:
             # Clear previous save messages
             save_message.clear_output()
             print(f"Saving figure to: {filepath} ...")
             show_reconstructions(
-                datasets=current_sample_channels,
+                data=trial_data_dict,
+                metrics_data=ds_metrics,
                 save=True,
                 show=False,
                 save_filename=filepath,
@@ -119,7 +125,7 @@ def set_heatmap_formatting(ax, target_mode, im=None):
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
         ax.yaxis.set_minor_locator(ticker.NullLocator())
 
-def show_reconstructions(data: List[Dict[str, Any]], metrics: List[Dict[str, Any]], suptitle, plot_title, target_mode,
+def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title, target_mode,
                          save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="", **kwargs):
     # 1. Height Adjustment & Constrained Layout (Fixes stretching and overlapping)
     total_rows = rows + 1 if target_mode in ["wavelet", "superlet"] else rows
@@ -136,7 +142,7 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics: List[Dict[str, Any
     for i in range(len(data)):
         try:
             channel_data = data[i]
-            channel_metrics = metrics[i]
+            channel_metrics = metrics_data[i]
             channel_recon = channel_data["output"]
             channel_true = channel_data["target"]
             metrics = channel_metrics["metrics"]
@@ -144,10 +150,10 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics: List[Dict[str, Any
             fig.suptitle(suptitle + meta["condition"] + f"\n{param_text}", fontweight="bold", fontsize=16)
 
             subj = meta.get("subject", "unknown")
-            idx = meta.get("idx", "unknown")
+            idx = meta.get("id", "unknown")
             row_label = f"({subj}, {idx})"
 
-            bandwise_nmae = metrics.get("bandwise_nmae", [])
+            bandwise_nmae = metrics.get("nmae_bandwise", [])
             nmae = metrics.get("nmae", 0.0)
 
 
@@ -212,12 +218,12 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics: List[Dict[str, Any
         comp_ax = fig.add_subplot(gs[rows, :])
 
         # Give them clean labels (Baseline vs PostPatch)
-        dataset_labels = ["Baseline", "Post-Patch"] if len(datasets) == 2 else [f"Source {i}" for i in
-                                                                                range(len(datasets))]
+        dataset_labels = ["Baseline", "Post-Patch"] if len(data) == 2 else [f"Source {i}" for i in
+                                                                                range(len(data))]
 
         plot_grouped_bar(
             x_text=bands,
-            width=0.8/len(datasets),
+            width=0.8/len(data),
             means=all_bandwise_data,
             labels=dataset_labels,
             title="Comparison of Band-wise NMAE",
@@ -280,16 +286,7 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
     def on_save_clicked(b):
         with output_comp:
             output_comp.clear_output()
-            filename = name_input.value.strip() or default_name
-            if not filename.endswith(".png"):
-                filename += ".png"
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            try:
-                save_path = save_dir / filename
-                fig.savefig(save_path, dpi=300, bbox_inches='tight')
-                print(f"Figure saved to: {save_path}")
-            except Exception as e:
-                print(f"Error saving figure: {e}")
+            print("on_save entry")
+            io_utils.save_figure(name_input=name_input.value , save_dir=save_dir, fig=fig, default_name=default_name)
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
