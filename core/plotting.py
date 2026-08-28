@@ -286,7 +286,6 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
     def on_save_clicked(b):
         with output_comp:
             output_comp.clear_output()
-            print("on_save entry")
             io_utils.save_figure(name_input=name_input.value , save_dir=save_dir, fig=fig, default_name=default_name)
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))

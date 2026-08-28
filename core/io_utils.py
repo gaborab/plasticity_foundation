@@ -52,7 +52,6 @@ def nested_group_to_dict(group: h5py.Group) -> Dict[str, Any]:
     return ret_dict
 
 def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
-    print("save fig entry")
     filename = name_input.strip() or default_name
     if not filename.endswith(".png"):
         filename += ".png"
