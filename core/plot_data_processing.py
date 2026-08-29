@@ -1,8 +1,31 @@
 from typing import List, Dict, Any, Tuple
 
+import numpy as np
+
+from core import settings
 from core.io_models import Trial, Metrics
 from scipy.stats import sem
 from numpy import mean, std
+
+
+def calc_bandwise_ampl_mean(trial_list: List[Trial], bands: Dict[str, Any], freqs) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Calculates the mean power for each frequency band across all trials in trial_list.
+    Returns a dictionary with band names as keys and mean power values as values.
+    """
+    bandwise_power = {b: [] for b in bands.keys()}
+    bandwise_power["global"] = []
+    for trial in trial_list:
+        bandwise_power["global"].append(mean(std(trial.target_data, axis=2, ddof=0)))
+        for band_name, band in settings.FREQ_BANDS.items():
+            low, high = band
+            band_indices = np.where((freqs >= low) & (freqs <= high))[0]
+            b_target_band_power = mean(std(trial.target_data[:, band_indices], axis=2, ddof=0))
+            bandwise_power[band_name].append(b_target_band_power)
+
+    return {b: mean(vals) for b, vals in bandwise_power.items()}, {b: sem(vals, ddof=0) for b, vals in bandwise_power.items()}
+
+
 
 def calc_channel_glass_delta(ch_nmaes_b: Dict[str, float], ch_nmaes_p: Dict[str, float], ch_stds: Dict[str, float]) -> List[float]:
     """

@@ -1,6 +1,8 @@
 # This file contains the settings for the STMD EEG data analysis project.
 from pathlib import Path
 
+import numpy as np
+
 # LUTs for mapping and reordering EGI channel names to standard 10-20 system names
 EGI_TO_1020_MAP = {
     "EEG 10": "EEG FP1-REF",
@@ -31,13 +33,6 @@ CHORDER_STANDARD = ['EEG FP1-REF', 'EEG FP2-REF', 'EEG F3-REF', 'EEG F4-REF', 'E
                     'EEG F8-REF', 'EEG T3-REF', 'EEG T4-REF', 'EEG T5-REF', 'EEG T6-REF', 'EEG A1-REF', 'EEG A2-REF', 'EEG FZ-REF', 'EEG CZ-REF', 'EEG PZ-REF', 'EEG T1-REF', 'EEG T2-REF']
 N_CHANNELS = len(CHORDER_STANDARD)
 
-FREQ_BANDS = {
-    'delta (1-4Hz)': (1, 4),
-    'theta (4-8Hz)': (4, 8),
-    'alpha (8-12Hz)': (8, 12),
-    'beta (12-30Hz)': (12, 30),
-    'gamma (30-60Hz)': (30, 60)
-}
 
 EPS = 1e-8  # Small constant to avoid division by zero in normalization and log calculations
 
@@ -102,4 +97,14 @@ SPECTRAL_DECODER_PARAMS = {
     'model_version': LABRAM_VERSION,
     'loss_type': 'mse',
     'wavelet': 'cmor1.5-1.0'
+}
+
+FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
+
+FREQ_BANDS = {
+    'delta (1-4Hz)': (1, 4),
+    'theta (4-8Hz)': (4, 8),
+    'alpha (8-12Hz)': (8, 12),
+    'beta (12-30Hz)': (12, 30),
+    'gamma (30-60Hz)': (30, 60)
 }

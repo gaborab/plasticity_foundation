@@ -76,9 +76,6 @@ def main(opts):
     # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
     ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
 
-    freq_window = settings.SPECTRAL_DECODER_PARAMS["freq_window"]
-    n_freqs = settings.SPECTRAL_DECODER_PARAMS["n_freqs"]
-    freqs = np.geomspace(freq_window[0], freq_window[1], n_freqs) if opts.target_mode in ["wavelet", "superlet"] else None
     bands = settings.FREQ_BANDS if opts.target_mode in ["wavelet", "superlet"] else None
 
     for i, fold in enumerate(folds):
@@ -116,7 +113,7 @@ def main(opts):
         baseline_file = output_path / "baseline_reconstruction.h5"
         output_path.mkdir(parents=True, exist_ok=True)
         print("Running baseline reconstruction...")
-        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, freqs, bands)
+        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, settings.FREQS, bands)
         print("Baseline reconstruction finished.")
 
         # run reconstruction on postpatch data if enabled (on the same subjects as the baseline reconstruction)
@@ -127,7 +124,7 @@ def main(opts):
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
             postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.WINDOW_SIZE, log=True, normalize=True)
             print("Running post-patch reconstruction...")
-            run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, freqs, bands)
+            run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, settings.FREQS, bands)
             print("Post-patch reconstruction finished.")
         fold_time = time.time() - start_time
         print(f"Fold time: {str(datetime.timedelta(seconds=int(fold_time)))}")
