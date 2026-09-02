@@ -22,10 +22,17 @@ class Metrics:
     r2_bandwise: Dict[str, float] = None
     mae: float = None
     mae_bandwise: Dict[str, float] = None
-    std: float = None
-    std_bandwise: Dict[str, float] = None
+    signal_volatility: float = None
+    signal_volatility_bandwise: Dict[str, float] = None
     nmae: float = None
     nmae_bandwise: Dict[str, float] = None
+    signal_mean: float = None
+    signal_mean_bandwise: Dict[str, float] = None
+    recon_mean: float = None
+    recon_mean_bandwise: Dict[str, float] = None
+    recon_volatility: float = None
+    recon_volatility_bandwise: Dict[str, float] = None
+
 
 @dataclass
 class Trial:

@@ -45,23 +45,6 @@ def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], met
 
     return subjectwise_nmae, subjectwise_sem
 
-def calc_bandwise_ampl_mean(trial_list: List[Trial], bands: Dict[str, Any], freqs) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """
-    Calculates the mean power for each frequency band across all trials in trial_list.
-    Returns a dictionary with band names as keys and mean power values as values.
-    """
-    bandwise_power = {b: [] for b in bands.keys()}
-    bandwise_power["global"] = []
-    for trial in trial_list:
-        bandwise_power["global"].append(mean(std(trial.target_data, axis=2, ddof=0)))
-        for band_name, band in bands.items():
-            low, high = band
-            band_indices = np.where((freqs >= low) & (freqs <= high))[0]
-            b_target_band_power = mean(std(trial.target_data[:, band_indices], axis=2, ddof=0))
-            bandwise_power[band_name].append(b_target_band_power)
-
-    return {b: mean(vals) for b, vals in bandwise_power.items()}, {b: sem(vals, ddof=0) for b, vals in bandwise_power.items()}
-
 
 def calc_channel_glass_delta(ch_nmaes_b: Dict[str, float], ch_nmaes_p: Dict[str, float], ch_stds: Dict[str, float]) -> List[float]:
     """
@@ -189,7 +172,7 @@ def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str,
 
 
 def get_metric_stats(trial_list: List[Trial], metric_name: str) -> Tuple[float, float, float]:
-    values = _extract_metric(trial_list, metric_name)
+    values = extract_metric(trial_list, metric_name)
     return mean(values), sem(values, ddof=0), std(values, ddof=0)
 
 
@@ -197,7 +180,7 @@ def get_bandwise_metric_stats(trial_list: List[Trial], metric_name: str, bands: 
     if 'bandwise' not in metric_name:
         metric_name += '_bandwise'
 
-    bandwise_values = _extract_metric(trial_list, metric_name, bands=bands, bandwise=True)
+    bandwise_values = extract_metric(trial_list, metric_name, bands=bands, bandwise=True)
 
     means = {}
     sems = {}
@@ -241,11 +224,11 @@ def _extract_channel_metric(trial_list: List[Trial], metric_name: str, ch_names:
                 continue
     return ret_dict
 
-def _extract_metric(trial_list: List[Trial], metric_name: str, bands: List[str]=None, bandwise: bool=False) -> List[Any] | Dict[str, List[Any]]:
+def extract_metric(trial_list: List[Trial], metric_name: str, bands: List[str]=None, bandwise: bool=False) -> List[Any] | Dict[str, List[Any]]:
     """
     Internal helper function to extract global metric values from a list of Trial objects.
     If bands is provided, only band-wise metrics for those bands will be extracted.
-    Returns a list of metric values.
+    Returns a list of metric values if bandwise is False, or a dictionary with band names as keys and lists of metric values as values if bandwise is True.
     """
     ret = {b: [] for b in bands} if bandwise else []
     for trial in trial_list:

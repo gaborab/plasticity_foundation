@@ -11,6 +11,66 @@ from core import settings, io_utils
 from core.io_models import Trial
 from core.plot_data_processing import order_to_channel_viewer_format
 
+def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabel: str, ylabel: str, title: str, save_dir: Path, save_name: str):
+    if not len(x) == len(y):
+        raise ValueError("x and y must have the same length.")
+    n_bands = len(x)
+
+    fig, ax = plt.subplots(n_bands, 1, figsize=(10, 5 * n_bands), sharex=True)
+    ax = np.atleast_1d(ax)  # Ensure ax is always an array for consistent indexing
+
+    for i, band in enumerate(x.keys()):
+        ax[i].scatter(x[band], y[band], alpha=0.6, color='steelblue', edgecolor='black', zorder=2)
+        ax[i].set_xlabel(xlabel, fontsize=12)
+        ax[i].set_ylabel(ylabel, fontsize=12)
+        ax[i].yaxis.grid(True, linestyle='--', alpha=0.7, zorder=0)
+        ax[i].set_axisbelow(True)
+        ax[i].set_title(f'Correlation for {band}', fontsize=14, fontweight='bold')
+
+    plt.suptitle(title, y=1.02)
+    save_button(fig, save_dir=save_dir,
+                         default_name=save_name)
+    plt.tight_layout()
+    plt.show()
+
+def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str, List[float]], title: str, save_dir: Path, save_name: str):
+    if not len(pre_nmaes) == len(post_nmaes):
+        raise ValueError("pre_nmaes and post_nmaes must have the same length.")
+    n_bands = len(pre_nmaes)
+
+    fig, ax = plt.subplots(n_bands, 1, figsize=(10, 5 * n_bands), sharex=True)
+    ax = np.atleast_1d(ax)  # Ensure ax is always an array for consistent indexing
+
+    bins = 40
+
+    for i, band in enumerate(pre_nmaes.keys()):
+        mean_pre = np.mean(pre_nmaes[band])
+        mean_post = np.mean(post_nmaes[band])
+        band_pre = pre_nmaes[band]
+        band_post = post_nmaes[band]
+
+        ax[i].hist(band_pre, bins=bins, alpha=0.6, color='steelblue',
+                edgecolor='black', label='Baseline', zorder=2)
+        ax[i].hist(band_post, bins=bins, alpha=0.6, color='darkorange',
+                edgecolor='black', label='Post-Patch', zorder=2)
+
+        ax[i].axvline(mean_pre, color='red', linestyle='--', linewidth=2.5,
+                   label=f'Baseline Mean: {mean_pre:.4f}', zorder=3)
+        ax[i].axvline(mean_post, color='darkred', linestyle='-', linewidth=2.5,
+                   label=f'Post-Patch Mean: {mean_post:.4f}', zorder=3)
+
+        ax[i].set_xlabel('Normalized MAE (NMAE)', fontsize=12)
+        ax[i].set_ylabel('# Trials', fontsize=12)
+        ax[i].yaxis.grid(True, linestyle='--', alpha=0.7, zorder=0)
+        ax[i].set_axisbelow(True)
+        ax[i].legend(fontsize=10, loc='upper right')
+        ax[i].set_title(f'Distribution of NMAE for {band}', fontsize=14, fontweight='bold')
+
+    plt.suptitle(title, y=1.02)
+    save_button(fig, save_dir=save_dir,
+                         default_name=save_name)
+    plt.tight_layout()
+    plt.show()
 
 def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, bands=None):
     """
