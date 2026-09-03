@@ -7,6 +7,8 @@ from ipywidgets import interact
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+from scipy import stats
+
 from core import settings, io_utils
 from core.io_models import Trial
 from core.plot_data_processing import order_to_channel_viewer_format
@@ -16,7 +18,7 @@ def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabe
         raise ValueError("x and y must have the same length.")
     n_bands = len(x)
 
-    fig, ax = plt.subplots(n_bands, 1, figsize=(10, 5 * n_bands), sharex=True)
+    fig, ax = plt.subplots(n_bands, 1, figsize=(10, 5 * n_bands), sharex=True, sharey=True)
     ax = np.atleast_1d(ax)  # Ensure ax is always an array for consistent indexing
 
     for i, band in enumerate(x.keys()):
@@ -26,6 +28,11 @@ def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabe
         ax[i].yaxis.grid(True, linestyle='--', alpha=0.7, zorder=0)
         ax[i].set_axisbelow(True)
         ax[i].set_title(f'Correlation for {band}', fontsize=14, fontweight='bold')
+        m, b = np.polyfit(x[band], y[band], 1)
+        ax[i].plot(x[band], m * np.array(x[band]) + b, color='black', linestyle='--')
+        corr, p_val = stats.pearsonr(x[band], y[band])
+        ax[i].text(0.95, 0.05, f"r: {corr:.4f}, m: {m:.4f}", transform=ax[i].transAxes, ha='right', va='top', fontsize=10,)
+
 
     plt.suptitle(title, y=1.02)
     save_button(fig, save_dir=save_dir,
