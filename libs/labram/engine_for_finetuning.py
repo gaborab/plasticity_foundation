@@ -138,7 +138,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
     if ch_names is not None:
         input_chans = utils.get_input_chans(ch_names)
 
-    criterion = torch.nn.MSELoss()
+    criterion = torch.nn.SmoothL1Loss(beta=0.1)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     #header = 'Test:'

@@ -207,7 +207,7 @@ def main(opts):
             print("Using EMA with decay = %.8f" % 0.9999)
         # initialize optimizer, learning rate and weight decay schedules, and loss function
         print("Initializing parameters and utils...")
-        criterion = nn.MSELoss()
+        criterion = nn.SmoothL1Loss(beta=0.1)
         total_batch_size = BATCH_SIZE * UPDATE_FREQ
         num_training_steps_per_epoch = len(train_dataset) // total_batch_size
         assigner = LayerDecayValueAssigner(

@@ -115,4 +115,6 @@ _HIGH_FREQS = np.geomspace(FREQ_BANDS["beta (12-30Hz)"][0], SPECTRAL_DECODER_PAR
 
 FREQS = np.concatenate([_LOW_FREQS, _HIGH_FREQS])
 
+LEGACY_FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
+
 
