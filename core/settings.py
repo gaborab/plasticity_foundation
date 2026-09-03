@@ -88,7 +88,10 @@ AUTOENCODER_PARAMS = {
     'loss_type': 'mse', # TODO change loss
 }
 
-N_FREQS = 50
+N_LOW = 20
+N_HIGH = 30
+N_FREQS = N_LOW + N_HIGH
+
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'freq_window': (1, 60),
@@ -99,8 +102,6 @@ SPECTRAL_DECODER_PARAMS = {
     'wavelet': 'cmor1.5-1.0'
 }
 
-FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
-
 FREQ_BANDS = {
     'delta (1-4Hz)': (1, 4),
     'theta (4-8Hz)': (4, 8),
@@ -108,3 +109,10 @@ FREQ_BANDS = {
     'beta (12-30Hz)': (12, 30),
     'gamma (30-60Hz)': (30, 60)
 }
+
+_LOW_FREQS = np.linspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], FREQ_BANDS["alpha (8-12Hz)"][1], N_LOW, endpoint=False)
+_HIGH_FREQS = np.geomspace(FREQ_BANDS["beta (12-30Hz)"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_HIGH)
+
+FREQS = np.concatenate([_LOW_FREQS, _HIGH_FREQS])
+
+

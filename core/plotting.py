@@ -79,7 +79,7 @@ def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str,
     plt.tight_layout()
     plt.show()
 
-def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, bands=None):
+def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, freqs, bands=None):
     """
     Interactive viewer for visualizing single-channel reconstructions across multiple datasets.
     Allows users to select a sample and channel, and view the corresponding reconstruction and metrics.
@@ -114,6 +114,7 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
                 metrics_data=ds_metrics,
                 plot_title=f"Channel {channel_idx}, Sample {sample_idx}",
                 bands=bands,
+                freqs=freqs,
                 rows=len(dataset_metrics),
 
                 **styling_params
@@ -146,6 +147,7 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
                 save_filename=filepath,
                 plot_title=f"Channel {channel_slider.value}, Sample {sample_slider.value}",
                 bands=bands,
+                freqs=freqs,
                 rows=len(dataset_metrics),
                 **styling_params
             )
@@ -192,7 +194,7 @@ def set_heatmap_formatting(ax, target_mode, im=None):
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
         ax.yaxis.set_minor_locator(ticker.NullLocator())
 
-def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title, target_mode,
+def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title, target_mode, freqs,
                          save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="", **kwargs):
     # 1. Height Adjustment & Constrained Layout (Fixes stretching and overlapping)
     total_rows = rows + 1 if target_mode in ["wavelet", "superlet"] else rows
@@ -250,7 +252,7 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
 
                 freq_window = settings.SPECTRAL_DECODER_PARAMS["freq_window"]
                 n_freqs = settings.SPECTRAL_DECODER_PARAMS["n_freqs"]
-                freqs = np.geomspace(freq_window[0], freq_window[1], n_freqs)
+
 
                 # Column 1: True
                 ax1 = fig.add_subplot(gs[i, 0])

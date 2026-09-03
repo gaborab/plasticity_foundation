@@ -7,11 +7,10 @@ from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
 
-def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, **kwargs):
+def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, **kwargs):
     """
     Calculates the wavelet coefficients for a given EEG epoch tensor and returns the magnitude of the coefficients along with the corresponding frequencies in a geometric scale within the specified frequency window.
     """
-    freqs = np.geomspace(freq_window[0], freq_window[1], n_freqs)
     # normalize frequencies by sampling frequency
     freqs_norm = freqs / fs
 
