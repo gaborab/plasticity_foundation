@@ -312,7 +312,8 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
         plt.close(fig)
 
 
-def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], title: str, single_channel=False, ax=None, sems: Optional[List[List[Any]]]=None):
+def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], title: str, single_channel=False, ax=None, fig=None, sems: Optional[List[List[Any]]]=None, y_label="Normalized MAE (NMAE)"):
+
     x = np.arange(len(x_text))
     is_standalone = ax is None
     if is_standalone:
@@ -325,8 +326,8 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
         if not single_channel:
             group_sems = sems[i]
             label = labels[i]
-            full_labels = [f"{label} - band {x_text[j]}" for j in range(len(x_text))]
-            ax.bar(offset, group_means, width=width, yerr=group_sems, label=full_labels[i], color=colors[i],
+
+            ax.bar(offset, group_means, width=width, yerr=group_sems, label=label, color=colors[i],
                ecolor='black', capsize=6)
         else:
             ax.bar(offset, group_means, width=width, label=labels[i], color=colors[i])
@@ -337,14 +338,14 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
     ax.set_xticklabels(x_text)
 
     # Formatting
-    ax.set_ylabel('Normalized MAE (NMAE)')
+    ax.set_ylabel(y_label)
     ax.set_title(title)
     ax.legend()
 
     if is_standalone:
         plt.tight_layout()
         plt.show()
-    return ax
+    return fig, ax
 
 
 def save_button(fig, save_dir: Path, default_name="untitled"):
