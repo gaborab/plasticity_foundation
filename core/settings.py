@@ -98,7 +98,6 @@ SPECTRAL_DECODER_PARAMS = {
     'n_freqs': N_FREQS,
     'target_dim': N_FREQS*WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
-    'loss_type': 'mse',
     'wavelet': 'cmor1.5-1.0'
 }
 

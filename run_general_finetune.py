@@ -55,7 +55,9 @@ def get_args():
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--weight_decay', type=float, default=5e-3)
     parser.add_argument('--epochs', type=int, default=120)
+    parser.add_argument('--huber_beta', type=float, default=0.1)
     parser.add_argument('--no_pretrained', action='store_true', default=False)
+    parser.add_argument('--mse', action='store_true', default=False)
 
     return parser.parse_args()
 
@@ -207,7 +209,7 @@ def main(opts):
             print("Using EMA with decay = %.8f" % 0.9999)
         # initialize optimizer, learning rate and weight decay schedules, and loss function
         print("Initializing parameters and utils...")
-        criterion = nn.SmoothL1Loss(beta=0.1)
+        criterion = nn.SmoothL1Loss(beta=opts.huber_beta)
         total_batch_size = BATCH_SIZE * UPDATE_FREQ
         num_training_steps_per_epoch = len(train_dataset) // total_batch_size
         assigner = LayerDecayValueAssigner(
@@ -260,7 +262,7 @@ def main(opts):
                 )
 
             val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
-                                 is_binary=False)
+                                 is_binary=False, criterion=criterion)
             print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
 
             print(f"Logging val stats to {log_dir}")
@@ -319,6 +321,7 @@ def main(opts):
     }
 
     run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS
+    run_metadata["model_params"]["loss_type"] = "mse" if opts.mse else f"huber_{opts.huber_beta}"
 
     print(f"Total training time: {total_time_str}")
 
