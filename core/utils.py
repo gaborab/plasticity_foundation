@@ -162,8 +162,8 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
     g_metrics.mae = np.mean(np.abs(trial_target - trial_output))
     g_metrics.nmae = g_metrics.mae / global_std + eps
     g_metrics.signal_volatility = global_std
-    g_metrics.signal_mean = np.mean(trial_target)
-    g_metrics.recon_mean = np.mean(trial_output)
+    g_metrics.signal_mean = np.mean(trial_target).item()
+    g_metrics.recon_mean = np.mean(trial_output).item()
     g_metrics.recon_volatility = recon_std
 
     # global band-wise metrics
@@ -186,11 +186,11 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
         ch_metrics.mae = np.mean(np.abs(trial_target[i] - trial_output[i]))
 
         ch_metrics.signal_volatility = signal_channel_stds[i]
-        g_metrics.recon_volatility = recon_channel_stds[i]
+        ch_metrics.recon_volatility = recon_channel_stds[i]
         ch_metrics.nmae = ch_metrics.mae / signal_channel_stds[i]
 
-        g_metrics.signal_mean = np.mean(trial_target)
-        g_metrics.recon_mean = np.mean(trial_output)
+        ch_metrics.signal_mean = np.mean(trial_target).item()
+        ch_metrics.recon_mean = np.mean(trial_output).item()
 
 
 

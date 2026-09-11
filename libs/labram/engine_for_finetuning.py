@@ -133,12 +133,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=['acc'], is_binary=True):
+def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=['acc'], criterion=torch.nn.SmoothL1Loss(beta=0.1), is_binary=True):
     input_chans = None
     if ch_names is not None:
         input_chans = utils.get_input_chans(ch_names)
 
-    criterion = torch.nn.SmoothL1Loss(beta=0.1)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     #header = 'Test:'
@@ -148,7 +147,6 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
     pred = []
     true = []
     for step, batch in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        print("batch shape: ", batch.shape) # TODO
         EEG = batch[0]
         target = batch[1]
         metadata = batch[2] if len(batch) > 2 else None
