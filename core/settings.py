@@ -92,7 +92,7 @@ AUTOENCODER_PARAMS = {
 N_FREQS = 50
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'freq_window': (1, 60),
+    'freq_window': (2, 60),
     'n_freqs': N_FREQS,
     'target_dim': N_FREQS*WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
@@ -102,7 +102,7 @@ SPECTRAL_DECODER_PARAMS = {
 FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
 
 FREQ_BANDS = {
-    'delta (1-4Hz)': (1, 4),
+    'delta (2-4Hz)': (2, 4),
     'theta (4-8Hz)': (4, 8),
     'alpha (8-12Hz)': (8, 12),
     'beta (12-30Hz)': (12, 30),
