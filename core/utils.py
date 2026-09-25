@@ -7,7 +7,7 @@ from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
 
-def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, **kwargs):
+def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, pad, **kwargs):
     """
     Calculates the wavelet coefficients for a given EEG epoch tensor and returns the magnitude of the coefficients along with the corresponding frequencies in a geometric scale within the specified frequency window.
     """
@@ -15,9 +15,14 @@ def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, **kwargs
     freqs_norm = freqs / fs
 
     scales = pywt.frequency2scale(wavelet, freqs_norm)
-
-    coeffs, _ = pywt.cwt(tensor_data.numpy(), scales, wavelet)
+    np_data = tensor_data.numpy()
+    # Pad the data to avoid edge effects in the wavelet transform
+    np_data = np.pad(np_data, pad_width=((0, 0), (pad, pad)), mode='reflect')
+    coeffs, _ = pywt.cwt(np_data, scales, wavelet)
     mag = np.abs(coeffs)
+    # Remove the padding from the magnitude array
+    mag = mag[:, :, pad:-pad]
+    print("mag shape after padding removal:", mag.shape)
     return mag, freqs
 
 

@@ -79,7 +79,7 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
                         pass
                     if save_wavelet:
                         print(f"Computing wavelet transform for epoch {id} for {subj} {cond}")
-                        mag, freqs = utils.calc_wavelet(tensor_data, fs=settings.RSFREQ, freqs=settings.FREQS, **settings.SPECTRAL_DECODER_PARAMS)
+                        mag, freqs = utils.calc_wavelet(tensor_data, fs=settings.RSFREQ, freqs=settings.FREQS, pad=settings.PADDING, **settings.SPECTRAL_DECODER_PARAMS)
                         wavelet_tensor = torch.tensor(mag, dtype=torch.float32)
                         wavelet_tensor = wavelet_tensor.permute(1, 0, 2) # reorder to (channels, freqs, time) for LaBraM compatibility
                         print(f"Original wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")

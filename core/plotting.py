@@ -13,7 +13,9 @@ from core import settings, io_utils
 from core.io_models import Trial
 from core.plot_data_processing import order_to_channel_viewer_format
 
-def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabel: str, ylabel: str, title: str, save_dir: Path, save_name: str):
+
+def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabel: str, ylabel: str, title: str,
+                     save_dir: Path, save_name: str):
     if not len(x) == len(y):
         raise ValueError("x and y must have the same length.")
     n_bands = len(x)
@@ -31,16 +33,18 @@ def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabe
         m, b = np.polyfit(x[band], y[band], 1)
         ax[i].plot(x[band], m * np.array(x[band]) + b, color='black', linestyle='--')
         corr, p_val = stats.pearsonr(x[band], y[band])
-        ax[i].text(0.95, 0.05, f"r: {corr:.4f}, m: {m:.4f}", transform=ax[i].transAxes, ha='right', va='top', fontsize=10,)
-
+        ax[i].text(0.95, 0.05, f"r: {corr:.4f}, m: {m:.4f}", transform=ax[i].transAxes, ha='right', va='top',
+                   fontsize=10, )
 
     plt.suptitle(title, y=1.02)
     save_button(fig, save_dir=save_dir,
-                         default_name=save_name)
+                default_name=save_name)
     plt.tight_layout()
     plt.show()
 
-def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str, List[float]], title: str, save_dir: Path, save_name: str):
+
+def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str, List[float]], title: str,
+                        save_dir: Path, save_name: str):
     if not len(pre_nmaes) == len(post_nmaes):
         raise ValueError("pre_nmaes and post_nmaes must have the same length.")
     n_bands = len(pre_nmaes)
@@ -57,14 +61,14 @@ def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str,
         band_post = post_nmaes[band]
 
         ax[i].hist(band_pre, bins=bins, alpha=0.6, color='steelblue',
-                edgecolor='black', label='Baseline', zorder=2)
+                   edgecolor='black', label='Baseline', zorder=2)
         ax[i].hist(band_post, bins=bins, alpha=0.6, color='darkorange',
-                edgecolor='black', label='Post-Patch', zorder=2)
+                   edgecolor='black', label='Post-Patch', zorder=2)
 
         ax[i].axvline(mean_pre, color='red', linestyle='--', linewidth=2.5,
-                   label=f'Baseline Mean: {mean_pre:.4f}', zorder=3)
+                      label=f'Baseline Mean: {mean_pre:.4f}', zorder=3)
         ax[i].axvline(mean_post, color='darkred', linestyle='-', linewidth=2.5,
-                   label=f'Post-Patch Mean: {mean_post:.4f}', zorder=3)
+                      label=f'Post-Patch Mean: {mean_post:.4f}', zorder=3)
 
         ax[i].set_xlabel('Normalized MAE (NMAE)', fontsize=12)
         ax[i].set_ylabel('# Trials', fontsize=12)
@@ -75,11 +79,13 @@ def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str,
 
     plt.suptitle(title, y=1.02)
     save_button(fig, save_dir=save_dir,
-                         default_name=save_name)
+                default_name=save_name)
     plt.tight_layout()
     plt.show()
 
-def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans, styling_params, save_dir: Path, freqs, bands=None):
+
+def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans,
+                          styling_params, save_dir: Path, freqs, bands=None):
     """
     Interactive viewer for visualizing single-channel reconstructions across multiple datasets.
     Allows users to select a sample and channel, and view the corresponding reconstruction and metrics.
@@ -107,7 +113,8 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
     def update_plot(sample_idx, channel_idx):
         try:
 
-            trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_idx, channel_idx)
+            trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_idx,
+                                                                         channel_idx)
 
             show_reconstructions(
                 data=trial_data_dict,
@@ -194,12 +201,14 @@ def set_heatmap_formatting(ax, target_mode, im=None):
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
         ax.yaxis.set_minor_locator(ticker.NullLocator())
 
-def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title, target_mode, freqs,
-                         save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="", **kwargs):
+
+def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title,
+                         target_mode, freqs,
+                         save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="",
+                         **kwargs):
     # 1. Height Adjustment & Constrained Layout (Fixes stretching and overlapping)
     total_rows = rows + 1 if target_mode in ["wavelet", "superlet"] else rows
     fig = plt.figure(figsize=(16, 4 * total_rows), layout="constrained")
-
 
     # 2. Unified GridSpec (3 columns for Wavelets, 1 column for Autoencoder)
     ncols = 3 if target_mode in ["wavelet", "superlet"] else 1
@@ -224,7 +233,6 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
 
             bandwise_nmae = metrics.get("nmae_bandwise", [])
             nmae = metrics.get("nmae", 0.0)
-
 
             if bandwise_nmae:
                 if isinstance(bandwise_nmae, dict) and bands is not None:
@@ -253,7 +261,6 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
                 freq_window = settings.SPECTRAL_DECODER_PARAMS["freq_window"]
                 n_freqs = settings.SPECTRAL_DECODER_PARAMS["n_freqs"]
 
-
                 # Column 1: True
                 ax1 = fig.add_subplot(gs[i, 0])
                 im1 = ax1.pcolormesh(time, freqs, channel_true, vmin=-v_max, vmax=v_max)
@@ -281,18 +288,17 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
             import traceback
             print(f"Error plotting reconstruction for channel {i}:\n{traceback.format_exc()}")
 
-
     if target_mode in ["wavelet", "superlet"] and all_bandwise_data:
         # gs[rows, :] means "put this in the last row, and span ALL columns"
         comp_ax = fig.add_subplot(gs[rows, :])
 
         # Give them clean labels (Baseline vs PostPatch)
         dataset_labels = ["Baseline", "Post-Patch"] if len(data) == 2 else [f"Source {i}" for i in
-                                                                                range(len(data))]
+                                                                            range(len(data))]
 
         plot_grouped_bar(
             x_text=bands,
-            width=0.8/len(data),
+            width=0.8 / len(data),
             means=all_bandwise_data,
             labels=dataset_labels,
             title="Comparison of Band-wise NMAE",
@@ -312,8 +318,9 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
         plt.close(fig)
 
 
-def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], title: str, single_channel=False, ax=None, fig=None, sems: Optional[List[List[Any]]]=None, y_label="Normalized MAE (NMAE)"):
-
+def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], title: str, single_channel=False,
+                     ax=None, fig=None, sems: Optional[List[List[Any]]] = None, y_label="Normalized MAE (NMAE)",
+                     ylim=None):
     x = np.arange(len(x_text))
     is_standalone = ax is None
     if is_standalone:
@@ -322,23 +329,26 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
     colors = ['skyblue', 'salmon', 'lightgreen', 'plum', 'lightcoral']  # Add more colors if needed
     for i in range(n):
         group_means = means[i]
-        offset = x - width/2 + i*width/(n-1) if n > 1 else x
+        offset = x - width / 2 + i * width / (n - 1) if n > 1 else x
         if not single_channel:
             group_sems = sems[i]
             label = labels[i]
 
             ax.bar(offset, group_means, width=width, yerr=group_sems, label=label, color=colors[i],
-               ecolor='black', capsize=6)
+                   ecolor='black', capsize=6)
         else:
             ax.bar(offset, group_means, width=width, label=labels[i], color=colors[i])
             for j in range(len(x)):
-                ax.text(offset[j], group_means[j], f"{group_means[j]:.3f}", ha='center', va='bottom', fontsize=9, color="black")
+                ax.text(offset[j], group_means[j], f"{group_means[j]:.3f}", ha='center', va='bottom', fontsize=9,
+                        color="black")
 
     ax.set_xticks(x)
     ax.set_xticklabels(x_text)
 
     # Formatting
     ax.set_ylabel(y_label)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     ax.set_title(title)
     ax.legend()
 
@@ -353,9 +363,11 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
 
     save_button_comp = widgets.Button(description="Save Figure")
     output_comp = widgets.Output()
+
     def on_save_clicked(b):
         with output_comp:
             output_comp.clear_output()
-            io_utils.save_figure(name_input=name_input.value , save_dir=save_dir, fig=fig, default_name=default_name)
+            io_utils.save_figure(name_input=name_input.value, save_dir=save_dir, fig=fig, default_name=default_name)
+
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))

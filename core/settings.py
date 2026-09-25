@@ -46,7 +46,9 @@ INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
 RECORDINGS_PER_CONDITION = None
 TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
-EXTENDED_OFFSET = 2
+EXTENDED_OFFSET = 1.5
+PAD_TIME = 1.5
+PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targets
 EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
 WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
 
@@ -85,11 +87,9 @@ AUTOENCODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'target_dim': WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
-    'loss_type': 'mse', # TODO change loss
 }
 
-N_FREQS = 60
-
+N_FREQS = 50
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'freq_window': (1, 60),
@@ -99,6 +99,8 @@ SPECTRAL_DECODER_PARAMS = {
     'wavelet': 'cmor1.5-1.0'
 }
 
+FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
+
 FREQ_BANDS = {
     'delta (1-4Hz)': (1, 4),
     'theta (4-8Hz)': (4, 8),
@@ -106,8 +108,3 @@ FREQ_BANDS = {
     'beta (12-30Hz)': (12, 30),
     'gamma (30-60Hz)': (30, 60)
 }
-
-
-FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
-
-
