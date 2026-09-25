@@ -371,3 +371,24 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
 
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
+
+# functions for saving signal waveforms (for debugging purposes)
+def save_heatmap(channel_data, save_dir: Path, title="Wavelet transform heatmap", xlabel="Time (ms)", ylabel="Frequency (bins)"):
+    plt.figure(figsize=(10, 6))
+    plt.imshow(channel_data, aspect='auto', origin='lower', cmap='viridis')
+    plt.colorbar(label='Amplitude')
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.savefig(save_dir, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def save_line_plot(channel_data, save_dir: Path, title="Epoch waveform", xlabel="Time (samples)", ylabel="Amplitude [uV]"):
+    plt.figure(figsize=(12, 6))
+    plt.plot(channel_data)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.savefig(save_dir, dpi=300, bbox_inches='tight')
+    plt.close()
