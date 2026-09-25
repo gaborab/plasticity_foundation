@@ -85,7 +85,7 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
                         print(f"Original wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
                         wavelet_tensor = utils.cut_to_timewindow(wavelet_tensor, settings.EXTENDED_TIME_WINDOW, settings.TIME_WINDOW, settings.RSFREQ)
                         print(f"Cut wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
-                        # todo check if theres substantial noise at around 50 hz
+
                         io_handler.save(tensor_data=wavelet_tensor, directory=wavelet_path, subject=subj, condition=cond,
                                         epoch_id=id, saved_type='wavelet')
                         print(f"Saved wavelet target for epoch {id} for {subj} {cond} to {wavelet_path}")
