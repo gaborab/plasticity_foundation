@@ -19,9 +19,11 @@ The pipeline covers preprocessing, subject-wise k-fold fine-tuning, inference wi
 
 ```mermaid
 flowchart LR
-    RAW[("data/raw/STMD_data<br/>EDF + NPZ triggers")] --> MD["make_dataset.py<br/>preprocess · epoch · CWT"]
-    MD --> PRE[("data/processed/pre_patching<br/>epochs + wavelet_targets")]
-    MD --> POST[("data/processed/post_patching<br/>epochs + wavelet_targets")]
+    RAW[("data/raw/STMD_data<br/>EDF + NPZ triggers")] --> MD["make_dataset.py<br/>preprocess · clean · epoch · CWT"]
+    MD --> QC[("outputs/qc<br/>bad channels · ICA · autoreject reports")]
+    MD <--> CACHE[("data/processed/cache/ica<br/>fitted ICAs + ICLabel scores")]
+    MD --> PRE[("data/processed/pre_patching<br/>epochs + wavelet_targets + manifest")]
+    MD --> POST[("data/processed/post_patching<br/>epochs + wavelet_targets + manifest")]
     PRE --> FT["run_general_finetune.py<br/>6-fold subject-wise CV"]
     FT --> CKPT[("outputs/finetune_outputs/{model}/{fold}<br/>checkpoints · logs · metadata")]
     CKPT --> INF["run_inference.py"]
@@ -30,6 +32,7 @@ flowchart LR
     INF --> H5[("outputs/inference_outputs/{model}/{fold}<br/>baseline / postpatch *.h5")]
     CKPT --> NB1["micro_evaluation.ipynb<br/>macro_evaluation.ipynb"]
     H5 --> NB2["plasticity_plotting.ipynb"]
+    QC --> NB3["preproc_plotting.ipynb"]
 ```
 
 ---
@@ -40,7 +43,7 @@ flowchart LR
 # 1. environment (Python >= 3.10, PyTorch 2.0.1 + CUDA 11.8 wheels, resolved by uv)
 uv sync
 
-# 2. preprocess raw EEG -> epoch tensors + wavelet targets
+# 2. preprocess raw EEG -> cleaned epoch tensors + wavelet targets + QC reports
 uv run python make_dataset.py
 
 # 3. fine-tune one model per fold (6 folds by default)
@@ -52,6 +55,12 @@ uv run python run_inference.py --model_name my_model --target_mode wavelet --pos
 
 Then open the notebooks in `notebooks/` (see [Analysis notebooks](#4-analysis-notebooks)).
 
+**Before re-running `make_dataset.py`:**
+- **Delete `data/processed/pre_patching` and `data/processed/post_patching`.** Autoreject drops epochs and the file numbering restarts at 1, so old files with higher numbers would otherwise survive and mix into the new dataset.
+- **Keep `data/processed/cache`.** It holds the fitted ICAs, and without it every recording is refitted.
+
+The first run fits one ICA per recording (about 15 s each, roughly 40 min in total). Later runs load them from the cache. Build the final dataset from a run that loads the cached ICAs; see [Reproducibility](#reproducibility).
+
 **Run everything from the repository root.** All paths in `core/settings.py` are relative to `BASE_DIR = Path(".")`, and the scripts import `core` / `libs` as top-level packages. The notebooks `chdir` to the root on their own, but they import `core` in their first cell. The project root therefore has to be on `PYTHONPATH` when the kernel starts. PyCharm does this automatically. Otherwise start Jupyter with `PYTHONPATH=<repo root>`.
 
 ### Dependencies
@@ -62,7 +71,11 @@ Declared in `pyproject.toml` and locked in `uv.lock`. The important pins:
 - `timm==0.4.12`, which LaBraM requires.
 - `numpy<2`.
 
-Other key libraries: `mne`, `pywavelets`, `h5py`, `einops`, `ipywidgets`, `tensorboardX`, `autoreject`, `pyhealth==1.1.4`. `scikit-learn` comes in transitively. Training assumes a CUDA GPU.
+Other key libraries: `mne`, `pywavelets`, `h5py`, `einops`, `ipywidgets`, `tensorboardX`, `pyhealth==1.1.4`. `scikit-learn` comes in transitively. Training assumes a CUDA GPU.
+
+For preprocessing:
+- `autoreject` (0.4.3) handles local epoch cleaning.
+- `mne-icalabel` (≥ 0.9) classifies ICA components automatically. It runs on the installed torch.
 
 ---
 
@@ -91,14 +104,18 @@ Other key libraries: `mne`, `pywavelets`, `h5py`, `einops`, `ipywidgets`, `tenso
 ├── notebooks/
 │   ├── micro_evaluation.ipynb   # Per-sample reconstruction viewer straight from checkpoints
 │   ├── macro_evaluation.ipynb   # Fold-averaged learning curves, model comparison
-│   └── plasticity_plotting.ipynb   # Baseline vs post-patching analysis on inference outputs
+│   ├── plasticity_plotting.ipynb   # Baseline vs post-patching analysis on inference outputs
+│   └── preproc_plotting.ipynb   # Plots of the preprocessing QC reports (e.g. ICA removals per session)
 │
 ├── libs/
 │   ├── labram/                  # Vendored LaBraM (modified for regression), incl. checkpoints/labram-base.pth
-│   └── unscrambly/              # Vendored in-house EEG preprocessing library (DataPreprocessor)
+│   └── unscrambly/              # Vendored in-house EEG preprocessing library (DataPreprocessor), extended for this project
+│       └── preprocessing/auto_bad_channels.py   # Automatic bad channel detection (added)
 │
-├── data/                        # (not tracked) raw/ and processed/ data
-└── outputs/                     # (not tracked) finetune_outputs/, inference_outputs/, plots/
+├── data/                        # (not tracked)
+│   ├── raw/STMD_data/           # EDF recordings, NPZ triggers, manual bad channel selections
+│   └── processed/               # pre_patching/, post_patching/ (dataset) and cache/ica/ (fitted ICAs)
+└── outputs/                     # (not tracked) finetune_outputs/, inference_outputs/, plots/, qc/, reaction_times/
 ```
 
 ---
@@ -113,6 +130,7 @@ Every script and notebook reads its configuration from this module at import tim
 |---|---|---|
 | `L_FREQ`, `H_FREQ` | 0.1 Hz, 75 Hz | Band-pass (FIR, firwin) |
 | notch | 50 Hz | Set in `make_dataset.py` |
+| `NOTCH_WIDTH` | 3 Hz | Stop-band width of the notch. MNE's default of 0.25 Hz removes only the 50.00 Hz peak and leaves the sidebands of line noise whose amplitude varies over time |
 | `RSFREQ` | 200 Hz | Resampling rate. One LaBraM patch = 200 samples = 1 s |
 | `INCLUDED_CONDITIONS` | `['baseline', 'post-patching']` | Session folders to process (case-insensitive) |
 | `EXCLUDED_SUBJECTS` | `STMD35`, `STMD37`–`STMD45` | Skipped entirely |
@@ -122,21 +140,31 @@ Every script and notebook reads its configuration from this module at import tim
 | `PAD_TIME` → `PADDING` | 1.5 s → 300 samples | Reflect padding added before the CWT |
 | `WINDOW_SIZE` | 200 | Samples per model input |
 | `CHORDER_STANDARD`, `N_CHANNELS` | 23 channels | Channel order used everywhere (see table below) |
-| `SEED` | 42 | `torch.manual_seed` and fold shuffling |
+| `SEED` | 42 | `torch.manual_seed`, fold shuffling, ICA and autoreject |
 | `EPS` | 1e-8 | Numerical guard in metrics |
+
+### Artifact handling
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `AUTO_BAD_CHANNEL_PARAMS` | see [automatic bad channel detection](#automatic-bad-channel-detection) | Clipping > 0.5 % of samples, flat < 1 µV, noisy > 10× median. Line-noise criterion off |
+| `ICA_PARAMS` | 15 components, extended infomax, `random_state=SEED` | ICA fitted per recording for ICLabel |
+| `ICLABEL_THRESHOLDS` | eye ≥ 0.7 · heart, line noise, channel noise ≥ 0.8 · muscle ≥ 0.9 | A component is removed if ICLabel's probability for any of these classes reaches its threshold. Brain and "other" are never removed |
+| `AUTOREJECT_WINDOW` | `TIME_WINDOW` ± `AUTOREJECT_MARGIN` (0.4 s) = (−0.6, 1.2) s | Part of each epoch on which autoreject judges artifacts |
+| `AUTOREJECT_PARAMS` | `random_state=SEED`, `n_jobs=4`, `n_interpolate=[1, 2, 4, 8]` | Local autoreject. At most 8 channels are interpolated per epoch. `n_jobs` changes the result, so keep it fixed |
 
 ### Model / targets
 
 | Setting | Value | Meaning |
 |---|---|---|
 | `LABRAM_VERSION` | `labram_base_patch200_200` | 12 blocks, embed dim 200, 10 heads, patch size 200 |
-| `SPECTRAL_DECODER_PARAMS['freq_window']` | (1, 60) Hz | Wavelet frequency range |
+| `SPECTRAL_DECODER_PARAMS['freq_window']` | (2, 60) Hz | Wavelet frequency range |
 | `N_FREQS` | 50 | Number of wavelet frequencies |
-| `FREQS` | `np.geomspace(1, 60, 50)` | Log-spaced frequency axis |
+| `FREQS` | `np.geomspace(2, 60, 50)` | Log-spaced frequency axis |
 | `SPECTRAL_DECODER_PARAMS['wavelet']` | `cmor1.5-1.0` | Complex Morlet, bandwidth 1.5, centre frequency 1.0 |
 | `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 200 = 10 000 | Head output size per channel token |
 | `AUTOENCODER_PARAMS['target_dim']` | 200 | Head output size per channel token (raw-signal mode) |
-| `FREQ_BANDS` | δ 1–4, θ 4–8, α 8–12, β 12–30, γ 30–60 Hz | Bands used for band-wise metrics (edges inclusive) |
+| `FREQ_BANDS` | δ 2–4, θ 4–8, α 8–12, β 12–30, γ 30–60 Hz | Bands used for band-wise metrics (edges inclusive). The 3 Hz notch lowers power at about 48.5–51.5 Hz inside the γ band, identically in both sessions |
 
 ### Paths
 
@@ -145,6 +173,8 @@ Every script and notebook reads its configuration from this module at import tim
 | `DATA_ROOT` | `data/raw/STMD_data` |
 | `FINETUNE_DIR` (baseline) | `data/processed/pre_patching/{epochs, wavelet_targets, superlet_targets}` |
 | `PATCH_DIR` (post-patching) | `data/processed/post_patching/{epochs, wavelet_targets, superlet_targets}` |
+| `CACHE_DIR` | `data/processed/cache` (fitted ICAs in `ica/`) |
+| `QC_DIR` | `outputs/qc` (preprocessing reports) |
 | `FINETUNE_OUTPUT_DIR` | `outputs/finetune_outputs` |
 | `INFERENCE_DIR` | `outputs/inference_outputs` |
 | `PLOT_DIR`, `PLOT_MACRO`, `PLOT_INFERENCE` | `outputs/plots`, `…/macro_plots`, `…/inference_plots` |
@@ -181,13 +211,14 @@ In the code, channel names look like `EEG FP1-REF`. The scripts strip them to `F
 
 - **Session**: `baseline` (pre-patching) or `post-patching`. The session is encoded by the **directory** a file lives in (`pre_patching/` vs `post_patching/`), not by the filename.
 - **Condition / stimulus type**: the epoch category *within* a session, named `{side}_{eccentricity}` for local mismatch stimuli plus `global`. The current data contains `left_1–3`, `center_2–3`, `right_1–3` and `global`. In `FinetuneDataset` metadata, in the inference HDF5 paths and in the notebooks' `conditions` filter, "condition" means this stimulus type.
-- **Trial / epoch id**: 1-based running index of the epoch within a subject × stimulus type.
+- **Trial / epoch id**: 1-based running index of the epoch within a subject × stimulus type, counted **after** autoreject. The `epochs_manifest.csv` links each id to its recording, onset and interpolated channels.
+- **Recording**: one EDF file (one recording folder). A session consists of several recordings, usually 4.
 
 ---
 
 ### 1. Dataset creation: `make_dataset.py`
 
-Converts raw EDF recordings into per-epoch PyTorch tensors, one file for the EEG epoch and one for its wavelet target.
+Converts raw EDF recordings into cleaned, per-epoch PyTorch tensors: one file for the EEG epoch and one for its wavelet target. It also writes QC reports and a manifest that records the origin and interpolated channels of every saved epoch.
 
 **Expected input layout**
 
@@ -199,57 +230,119 @@ data/raw/STMD_data/
     │   │   ├── *.edf                   # raw EEG
     │   │   ├── *-timestamps.npz        # trigger codes/times + eccentricity (ChkEEG format)
     │   │   ├── bad_ch_selection.pkl    # cached manual bad-channel selection
-    │   │   └── ica_selection.pkl       # cached manual ICA component selection
+    │   │   └── ica_selection.pkl       # legacy manual ICA selection (only used with ica_method='manual')
     │   └── 09_09/ …
     └── Post-patching/ …
 ```
 
-If any selected recording has no cached `bad_ch_selection.pkl` / `ica_selection.pkl`, `unscrambly` opens its **interactive** bad-channel / ICA selection for that session.
+If a selected recording has no `bad_ch_selection.pkl`, `unscrambly` opens its **interactive** bad-channel selection for that session. ICA components are chosen automatically by ICLabel (`ica_method='iclabel'`). The stored manual ICA selections are no longer used, because the pipeline refitted ICA differently from the selection tool, so the stored component indices didn't refer to the same components.
 
 **Processing steps, in execution order**
 
+Per EDF recording (`unscrambly` `preprocess_dir`):
+
+| # | Step | Details |
+|---|---|---|
+| 1 | Load + montage | `mne.io.read_raw_edf`, montage `GSN-HydroCel-65_1.0` |
+| 2 | Automatic bad channel detection | `auto_bad_channels.detect_bad_channels` on the untouched raw recording (see below) |
+| 3 | Bad channel interpolation | Manual selection + automatic flags are **interpolated** (`interpolate_bads`) for the whole recording. The list is kept in `interpolation_log[edf stem]` |
+| 4 | Re-reference | **Average reference** over all 65 channels, after interpolation so a bad channel can't leak into the average |
+| 5 | ICA fit + ICLabel | Fitted on a **copy** band-passed to 1–100 Hz and notched at 50/100 Hz (3 Hz wide): extended infomax, 15 components, seed 42. ICLabel labels every component, and components above `ICLABEL_THRESHOLDS` are excluded. The fitted ICA and its probabilities are cached (see below) |
+| 6 | Filtering | Band-pass 0.1–75 Hz (FIR, firwin), then 50 Hz notch with a **3 Hz** stop band (`NOTCH_WIDTH`) |
+| 7 | Apply ICA | The excluded components are removed from the real 0.1–75 Hz data. ICA is a spatial projection, so fitting on the 1–100 Hz copy and applying to the real data is equivalent, and it keeps the 0.1–1 Hz content |
+| 8 | Triggers | EDF annotations are replaced with NPZ triggers named `DIN21/rec_<edf stem>/ecc_3`, which carry the stimulus code, the source recording and the eccentricity |
+
+Per subject × session:
+
 | # | Step | Where | Details |
 |---|---|---|---|
-| 1 | Load + montage | `unscrambly` `preprocess_dir` | `mne.io.read_raw_edf`, montage `GSN-HydroCel-65_1.0` |
-| 2 | ICA | 〃 | 15 components fitted per recording. Manually selected components are removed |
-| 3 | Bad channels | 〃 | Manually selected channels plus **automatically detected** ones (`auto_bad_channels.py`, see below) are **interpolated** (`interpolate_bads`). Detection runs on the raw recording before ICA |
-| 4 | Re-reference | 〃 | **Average reference**, computed over all 65 channels, before channel reduction |
-| 5 | Filtering | 〃 | Band-pass 0.1–75 Hz (FIR, firwin), then 50 Hz notch |
-| 6 | Triggers | 〃 | EDF annotations are replaced with NPZ triggers. Eccentricity is encoded as `DIN21/ecc_3` etc. |
-| 7 | Concatenate | `process_subjects` | All recording folders of a subject × session are concatenated |
-| 8 | Resample | `make_dataset.main` | 200 Hz on the continuous data |
-| 9 | Channel match & order | `match_and_order` | Drops channels not in `EGI_TO_1020_MAP`, renames them to 10-20 names and reorders them to `CHORDER_STANDARD` (23 ch) |
-| 10 | Epoching | `create_subject_epochs` | **Onset** triggers: DIN21 left, DIN31 center, DIN41 right, DIN51 global. Window `EXTENDED_TIME_WINDOW` (−1.7, 2.3) s. MNE baseline correction over (−0.2, 0) s. No amplitude rejection, no autoreject. `split_by='both'` gives keys `{side}_{ecc}` (eccentricity 0 excluded) and `global` |
-| 11 | Unit conversion | `rescale_to_uv` | V → **µV** (×1e6), as LaBraM expects |
-| 12 | Wavelet target | `save_dataset` → `utils.calc_wavelet` | CWT of the **full extended epoch** (801 samples). Reflect-padded by 300 samples per side first, magnitude `abs(coeffs)`, padding removed. Permuted to (channels, freqs, time), then cropped to `TIME_WINDOW` → **(23, 50, 200)** |
-| 13 | EEG epoch | `save_dataset` | Cropped to `TIME_WINDOW` (samples 300:500 of the extended epoch) → **(23, 200)** µV |
+| 9 | Concatenate | `process_subjects` | All recording folders of the session |
+| 10 | Resample | `make_dataset.main` | 200 Hz on the continuous data |
+| 11 | Epoching | `_epoch_by_side` | **All onset triggers together** (DIN21 left, DIN31 center, DIN41 right, DIN51 global) in one `mne.Epochs`. Window `EXTENDED_TIME_WINDOW` (−1.7, 2.3) s, MNE baseline (−0.2, 0) s |
+| 12 | Local autoreject | `_epoch_by_side` | Once per session on the pooled epochs (see below). Bad channels are interpolated per epoch, and epochs that can't be repaired are dropped |
+| 13 | Metadata + split | `_attach_trial_metadata`, `_split_by_both` | Per epoch: `eccentricity`, `recording`, `onset_s`, `rec_interpolated`, `ar_interpolated`. Then split into `{side}_{ecc}` (eccentricity 0 excluded) and `global` |
+| 14 | Channel match & order | `match_and_order` | On the epochs, **after** autoreject, so autoreject interpolates from all 65 channels. Keeps the 23 mapped channels, renamed to 10-20 names and ordered as `CHORDER_STANDARD` |
+| 15 | Unit conversion | `rescale_to_uv` | V → **µV** (×1e6), as LaBraM expects |
+| 16 | Wavelet target | `save_dataset` → `utils.calc_wavelet` | CWT of the **full extended epoch** (801 samples), reflect-padded by 300 samples per side, magnitude, padding removed, cropped to `TIME_WINDOW` → **(23, 50, 200)** |
+| 17 | EEG epoch | `save_dataset` | Cropped to `TIME_WINDOW` (samples 300:500 of the extended epoch) → **(23, 200)** µV |
 
-**Automatic bad channel detection** (`libs/unscrambly/preprocessing/auto_bad_channels.py`, parameters in `settings.AUTO_BAD_CHANNEL_PARAMS`). It runs on each raw recording and adds its flags to the manual selection:
+The extended window and the extra padding give the low-frequency wavelets enough context. At 2 Hz, the `cmor1.5-1.0` wavelet reaches about ±0.87 s. Without them, edge effects would contaminate the 1 s analysis window.
 
-| Criterion | Computed on | Default |
+#### Automatic bad channel detection
+
+`libs/unscrambly/preprocessing/auto_bad_channels.py`, with parameters in `settings.AUTO_BAD_CHANNEL_PARAMS`. It checks all 64 channels except the reference `EEG VREF` (Cz), which is flat in the raw file:
+
+| Criterion | Computed on | Flags if |
 |---|---|---|
-| Clipping | Raw data. Fraction of samples at the channel's own max \|x\| (the ±5000 µV rail), ignoring samples where ≥ 25 % of channels saturate together (whole-cap events at recording start/end) | > 0.5 % |
+| Clipping | Raw data. The share of samples where the channel sits at its own maximum \|x\| (the ±5000 µV amplifier rail). Samples where ≥ 25 % of channels saturate together (whole-cap events at recording start/end) are ignored | > 0.5 % |
 | Flat | Raw data, 1–40 Hz std | < 1 µV |
-| Noisy | Average reference to the still-good channels (iterated), 1–40 Hz std relative to the channel median | > 10× |
-| Line noise | Average reference, 49–51 Hz vs 44–47/53–56 Hz power | **off** |
+| Noisy | 1–40 Hz std after average-referencing to the still-good channels, relative to the channel median. Iterated up to 3 times | > 10× |
+| Line noise | 49–51 Hz vs 44–47 / 53–56 Hz power after average referencing | **off** |
 
-- **Calibration.** The defaults were calibrated with `qc_bad_channels.py`. They flag about 2.4 % of channels, close to the 2.6 % selected manually. T4 (E52) is the model channel flagged most often.
-- **Noisy threshold.** It is high on purpose: the check runs before ICA, so periocular and facial channels carry blinks and muscle activity.
-- **Line noise is not a channel criterion.** Line noise is systematic on some electrodes (E34 = Pz in about 80 % of recordings), so flagging it would interpolate Pz almost everywhere. The notch filter should remove it instead.
-- **Report.** `make_dataset.py` writes the per-channel detection report to `outputs/qc/auto_bad_channels_make_dataset.csv`.
+- **Calibration.** The defaults were calibrated with `qc_bad_channels.py` against the manual selections.
+- **Noisy threshold.** It's high on purpose: the check runs before ICA, so periocular and facial channels carry blinks and muscle activity.
+- **Line noise is not a channel criterion.** It's systematic on some electrodes (E34 = Pz in about 80 % of recordings) and is handled by the wider notch instead.
+- **Results.** 234 of 9 728 channel checks were flagged (2.4 %; 226 clipping, 8 noisy). 152 of those weren't in the manual selection (1.56 %). Only **35 new flags fall on the 23 model channels** (1.05 %), 28 of them on **T4 (E52)**.
 
-The extended window and the extra padding give the low-frequency wavelets (≈1 Hz atoms span several seconds) enough context. Without them, edge effects would contaminate the 1 s analysis window.
+#### ICA with ICLabel and its cache
+
+- **ICLabel** ([Pion-Tonachini et al., 2019](https://doi.org/10.1016/j.neuroimage.2019.05.026)) estimates for each component the probability of *brain, muscle artifact, eye blink, heart beat, line noise, channel noise, other*. It expects extended infomax on average-referenced 1–100 Hz data, which is why ICA is fitted on that copy. The 50/100 Hz notch on the copy keeps line noise from taking over components.
+- **Cache.** Each fitted ICA is saved as `data/processed/cache/ica/{edf stem}_{key}-ica.fif` plus `…-iclabel.npy` (the 7-class probabilities). The key is a hash of the ICA's inputs: EDF path, size and modification time, interpolated channels, reference, notch width, fitting band, `ICA_PARAMS`, and the `mne` / `mne-icalabel` versions.
+  - A change to any of these changes the filename, so a new ICA is fitted and the old file is simply no longer used. Nothing is deleted automatically.
+  - The thresholds are applied when the ICA is loaded, so changing `ICLABEL_THRESHOLDS` needs no refit.
+- **Inspecting a recording.** `mne.preprocessing.read_ica(path)` and `plot_components()` / `plot_sources()` / `plot_overlay()` show what was removed.
+- **Results.** Every recording had 1–6 components removed (mean 2.4): 321 eye, 33 muscle, 6 channel noise and 1 heart.
+
+#### Local autoreject
+
+[Autoreject](https://autoreject.github.io/) learns a peak-to-peak threshold per channel by cross-validation. Its decisions work like this:
+- In each epoch, channels above their threshold count as bad.
+- If an epoch has at most ρ (`n_interpolate`) bad channels, they're all interpolated. If it has more, only the ρ worst are.
+- If at least κ (`consensus`) × the number of channels are bad, the whole epoch is dropped.
+- ρ is chosen from `AUTOREJECT_PARAMS['n_interpolate']` = `[1, 2, 4, 8]`, and κ from 0, 0.1, …, 1, by cross-validation **per session**.
+
+Implementation details:
+- **Fitted on a 1 Hz high-passed copy.** The copy is epoched identically, then cropped to `AUTOREJECT_WINDOW` (−0.6, 1.2) s. Slow drifts below 1 Hz would otherwise inflate peak-to-peak amplitude on many channels at once and cause drops that aren't artifacts. The decisions (`reject_log`) are then applied to the real full-length epochs with `ar.transform(epochs, reject_log=...)`.
+- **Pooled per session.** All stimulus types are cleaned together, because 20 global epochs per session would be too few for cross-validation.
+- **At most 8 of 65 channels are interpolated per epoch.** The default search range would allow up to 32.
+
+Results:
+- **Drops.** 490 of 6 840 epochs were dropped (7.2 %). Per session the median is 5.6 %, and 28 of 38 sessions drop ≤ 10 %.
+- **Dropped epochs are whole-cap artifacts.** A dropped epoch has a median of 24–56 of 65 channels over threshold, and it's large before the stimulus too.
+- **Responses aren't being removed.** Dropped global epochs don't have a larger post- than pre-stimulus amplitude than kept ones (posterior ratio 1.00 vs 1.01).
+- **One outlier.** STMD34 post-patching drops 53 of 180, and 32 of those come from its first recording (tunnel1), which is about 20–25 % noisier than the other three across the whole cap.
 
 **Output** (baseline → `FINETUNE_DIR`, post-patching → `PATCH_DIR`), written through `EpochIO.save`:
 
 ```text
 data/processed/{pre_patching|post_patching}/
-├── epochs/            {subject}_{stimulus}_epoch{id}.pt     e.g. STMD11_center_2_epoch1.pt    (23, 200) float32, µV
-├── wavelet_targets/   {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 200) float32, linear magnitude
-└── superlet_targets/  (created, but superlets are not implemented)
+├── epochs/              {subject}_{stimulus}_epoch{id}.pt     e.g. STMD11_center_2_epoch1.pt    (23, 200) float32, µV
+├── wavelet_targets/     {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 200) float32, linear magnitude
+├── superlet_targets/    (created, but superlets are not implemented)
+└── epochs_manifest.csv  one row per saved epoch (see below)
 ```
 
-Filenames are parsed back by splitting at the *first* underscore (subject) and the *last* marker (`_epoch`). Subject names must therefore not contain underscores.
+Filenames are parsed back by splitting at the *first* underscore (subject) and the *last* marker (`_epoch`). Subject names must therefore not contain underscores. The `id` is a running number per subject × stimulus **after** autoreject, so it doesn't identify the original trial. The manifest does.
+
+**`epochs_manifest.csv`**: one row per saved file.
+
+| Column | Content |
+|---|---|
+| `subject`, `stimulus`, `id` | Identify the files `{subject}_{stimulus}_epoch{id}.pt` / `…_wavelet{id}.pt`, and the inference HDF5 path `{subject}/{stimulus}/{id}` |
+| `recording` | EDF stem the epoch came from |
+| `onset_s` | Onset within the concatenated session (s) |
+| `rec_interpolated` | Model channel indices (`ch_i`) interpolated for the **whole recording** (manual + automatic), `;`-separated |
+| `ar_interpolated` | Model channel indices interpolated **in this epoch** by autoreject, `;`-separated |
+
+Use the two interpolation columns to mask interpolated channels in channel-level analyses (topomaps, channel-wise statistics), and `recording` to leave out single recordings in sensitivity analyses.
+
+**QC reports** (`outputs/qc/`, written by `make_dataset.py` with `core.io.save_report`):
+
+| File | One row per | Content |
+|---|---|---|
+| `auto_bad_chans.csv` | channel × recording | Detector metrics (`clip_fraction`, `raw_std_uv`, `noise_ratio`, `line_db`, …) and `reasons` (empty = good) |
+| `ica_report.csv` | ICA component × recording | ICLabel probabilities for the 7 classes and `excluded` |
+| `autoreject_report.csv` | session | `n_epochs`, `n_dropped`, `mean_interp_per_kept_epoch`, `max_interp_per_kept_epoch`, the chosen `n_interpolate` / `consensus`, subject and session |
 
 **CLI**
 
@@ -258,7 +351,26 @@ Filenames are parsed back by splitting at the *first* underscore (subject) and t
 | `--save_wavelet` | `True` | Compute and save wavelet targets (currently cannot be switched off from the CLI) |
 | `--save_superlet` | `False` | Placeholder, does nothing |
 
-> ⚠️ The current working copy of `make_dataset.py` is in a **debugging state**. See [Known issues](#known-issues--caveats).
+#### Reproducibility
+
+- **Seeds.** ICA and autoreject use `SEED`, and autoreject uses a fixed `n_jobs=4`. With the same inputs and settings, separate runs give identical results. With a different `n_jobs` they don't (e.g. 78 vs 79 dropped epochs).
+- **Fresh vs cached ICA.** A freshly fitted ICA and the same ICA loaded from the cache differ by floating-point rounding (≈ 1e-17 V). That can flip an epoch that sits exactly on an autoreject threshold. **Build the final dataset from a run that loads the cached ICAs**, i.e. run once to fill the cache, then again. Every later run is then reproducible bit for bit.
+- **Machines.** Bit-identical results across machines (other BLAS/CPU) aren't guaranteed.
+
+#### Preprocessing QC summary
+
+Baseline vs post-patching, per subject (19 subjects, paired Wilcoxon):
+
+| Step | Baseline | Post-patching | p |
+|---|---|---|---|
+| ICA components removed per recording | 2.16 | 2.59 | 0.066 |
+| New automatic interpolations on model channels per recording | 0.14 | 0.32 | 0.041 (sign test 0.125; 7 subjects affected, mostly T4) |
+| Epochs dropped by autoreject | 6.3 % | 7.9 % | 0.22 |
+
+Post-patching data receives slightly more cleaning throughout, though no step shows a robust difference. Report this and check that the main results hold:
+- with interpolated channels masked (via the manifest);
+- without STMD34 tunnel1;
+- without STMD12/STMD13, which drive the ICA difference.
 
 ---
 
@@ -508,6 +620,10 @@ Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` li
 | Volatility ↔ NMAE correlation | Scatter per band + global, with a linear fit and Pearson *r*, for baseline and post-patching separately | `correlation_plots/` |
 | Scratch cells (end) | Load/plot a single wavelet target or epoch file. Wavelet sanity check on a synthetic 2 Hz sine | — |
 
+#### `preproc_plotting.ipynb`: preprocessing QC plots
+
+Reads the QC reports in `outputs/qc/`. It currently plots the distribution of ICLabel removals per recording, baseline vs post-patching, with session means. Extract subject, session and recording from the `recording` path (`…/<subject>/<session>/<recording folder>/<file>.edf`), and **always group by all three**. Recording folders are named by clock time (e.g. `08_56`), and several subjects share the same folder names.
+
 ---
 
 ## `core` package reference
@@ -518,9 +634,9 @@ Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` li
 | `architectures.py` | `BaseMLPWrapper` (LaBraM + MLP head, exposes `get_num_layers` / `no_weight_decay` for the optimiser). `EEGSpectralDecoder` and `EEGAutoencoder` with `forward` (flattened output) and `get_unflattened_output` (per-channel shaped output) |
 | `datasets.py` | `FinetuneDataset` (loads samples, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter` (subject-wise k-fold split) |
 | `utils.py` | `calc_wavelet` (padded CWT magnitude), `cut_to_timewindow` (crop by seconds), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
-| `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `load_inference_trials`. `NumpyEncoder` for JSON. Legacy `save_dict_to_hdf` / `load_inference_data` / `extract_data` |
+| `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `load_inference_trials`. `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` / `load_inference_data` / `extract_data` |
 | `io_models.py` | `Metrics` dataclass (all metric fields, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`, cached `metrics`, `channel_metrics`) |
-| `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure` |
+| `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
 | `plot_data_processing.py` | Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM, SD, all with `ddof=0`). `calc_subjectwise_metric_stats` and `calc_subjectwise_channel_metric_stats`. `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta`. `rename_chans_to_mne`. Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
 | `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `save_button`, `save_heatmap`, `save_line_plot` |
 
@@ -550,9 +666,38 @@ Code from the original LaBraM repository (Jiang et al., *Large Brain Model for L
 
 Trigger codes are defined in `preprocessing/trigger_mapping.yaml`. See `libs/unscrambly/preprocessing/README.md` for the full API.
 
+Project-specific extensions of the vendored copy:
+
+- **`auto_bad_channels.py`** (new): automatic bad channel detection. `DataPreprocessor` takes `auto_bad_channel_params`, and the report is in `auto_bad_channel_report`.
+- **Reordered `preprocess_dir`**: detection → interpolation → average reference → ICA fit → filtering → ICA apply → triggers. The interpolated channels per EDF are stored in `interpolation_log`.
+- **ICLabel ICA** (`ica_method='iclabel'`, `ica_params`, `iclabel_thresholds`, `cache_dir`), including the ICA cache and `ica_report`. `ica_method='manual'` keeps the old behaviour with `ica_selection.pkl`; `None` disables ICA.
+- **Notch width** via `filter_params['notch_width']`.
+- **Trigger names** carry the source recording: `DIN21/rec_<edf stem>/ecc_3`.
+- **`_epoch_by_side`** epochs all triggers together and supports `autoreject_mode='local'` (with `autoreject_params`, `autoreject_window`, the 1 Hz fitting copy and `autoreject_report`) or `'global'`.
+- **`_attach_trial_metadata`** (replaces `_attach_eccentricity_metadata`) attaches `eccentricity`, `recording`, `onset_s`, `rec_interpolated` and `ar_interpolated` per epoch.
+- **`create_subject_epochs`** passes subject and session as `context` to the reports.
+
+A newer upstream version of unscrambly exists. It restructures the code into `TaskPreprocessor` / `RestingPreprocessor`, adds a PREP pipeline, an epoch cache and autoreject. It hasn't been adopted, for three reasons:
+- On STMD recordings, PREP's multitaper line-noise removal left far more 50 Hz residual than the 3 Hz notch, and PREP disables the notch.
+- ICA selection has the same fit mismatch there.
+- Its `channel_groups.yaml` lists E52 (T4) as left and E24 (T3) as right.
+
+Only local autoreject was ported.
+
 ---
 
-## Auxiliary script
+## Auxiliary scripts
+
+**`reaction_times.py`**: button-press reaction times, baseline vs post-patching.
+- **Method.** For every stimulus onset in the NPZ triggers, it takes the first button press (DIN14) before the next onset. It uses the same subjects, sessions and recordings as `make_dataset.py`.
+- **Outputs.** `outputs/reaction_times/reaction_times.csv` (one row per onset), summaries per session, stimulus type and subject, and plots in `outputs/plots/reaction_times/`.
+- **Current results:**
+  - The median press is at about 710 ms in both sessions. Only 0.1–0.2 % of presses fall before 400 ms, and about 68 % before 800 ms.
+  - There's no session difference (Wilcoxon over subject medians, p = 0.84).
+  - Global stimuli get no button presses.
+- **Options.** `--include_all` also analyses eccentricity-0 onsets. `--max_rt_ms` treats later presses as no response.
+
+**`qc_bad_channels.py`**: runs the automatic bad channel detector on every recording without the full preprocessing, and compares it with the manual selections. Outputs are `outputs/qc/auto_bad_channels_metrics.csv` (every channel) and `auto_bad_channels.csv` (flagged channels, with a `manually_flagged` column). Use it to review or retune `AUTO_BAD_CHANNEL_PARAMS`.
 
 **`make_h5dataset_for_pretrain.py`** builds an HDF5 file in LaBraM's pretraining format. The processing is 0.1–75 Hz, 200 Hz resampling, with 21 channels mapped and ordered to 10-20. It is experimental and not part of the main pipeline:
 
@@ -564,9 +709,11 @@ Trigger codes are defined in `preprocessing/trigger_mapping.yaml`. See `libs/uns
 ## Known issues & caveats
 
 **Data preparation**
-- `make_dataset.py` is currently in a **debugging state**:
-  - The `io_handler.save(...)` calls for epochs and wavelet targets are commented out. The first five epochs are dumped as PNG/TXT into `outputs/plots/` instead, so **running it does not write a dataset**.
-  - When re-enabling saving, move the `cut_to_timewindow` crop of the EEG epoch out of the `if j < 5:` block. Otherwise the full 801-sample extended epochs are saved.
+- **Delete `data/processed/pre_patching` and `post_patching` (not `cache/`) before re-running.** Otherwise old epoch files with higher ids survive and mix into the new dataset.
+- **The ICA cache key has no `cache_version` entry.** Changes to the *code* before the ICA fit (e.g. a different fitting filter or step order) don't change the key, so outdated ICAs would still be loaded. Add a version number to the key, or clear `data/processed/cache/ica/`, after such changes.
+- **Loading `bad_ch_selection.pkl` yourself doesn't apply it.** The pkl is keyed by EDF **file name**, but `preprocess_dir` looks it up by **path**. If you pass it directly to `preprocess_dir` (e.g. in test scripts), the manual bad channels are silently not applied, and new ICA cache files are created. `process_subjects` handles this correctly.
+- **Autoreject thresholds are learned per session**, from all of its recordings pooled. A recording that's uniformly noisier than the others loses many epochs (STMD34 post-patching tunnel1: 32 of 45).
+- **Recordings without an NPZ file** fall back to EDF annotations. Those have no eccentricity or recording tag, so their local stimuli are dropped and `recording` is empty in the manifest.
 - Changing `N_FREQS`, `freq_window`, `EXTENDED_OFFSET`, `PAD_TIME`, the wavelet or `TIME_WINDOW` requires regenerating all targets and retraining. Models trained with a different `N_FREQS` cannot be loaded (head shape mismatch).
 - `--save_wavelet` uses `store_true` with `default=True`, so it cannot be disabled from the CLI. Superlet targets (`--save_superlet`, `--target_mode superlet`) are not implemented: a superlet dataset is empty.
 
