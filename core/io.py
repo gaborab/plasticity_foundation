@@ -1,6 +1,9 @@
 # python
 from pathlib import Path
 from typing import Dict, List, Any, Optional
+
+import pandas as pd
+
 from core import io_utils
 from core.io_models import Trial, Metrics
 import numpy as np
@@ -250,13 +253,14 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     return all_trials
 
 
-
-
-
-
-
-
-# NEXT STEPS: megoldani hogy pl mae bandwise ne groupként töltődjön be nem is értem hogy az hogy történik, NMAE és metrics channelwise_metrics szétválasztás
+def save_report(rows, filename: str, save_dir: Path):
+    if not rows:
+        print("No data to save in report.")
+        return
+    path = save_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    print(f"Saved {len(rows)} rows to {path}")
 
 
 

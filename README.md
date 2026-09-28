@@ -73,6 +73,8 @@ Other key libraries: `mne`, `pywavelets`, `h5py`, `einops`, `ipywidgets`, `tenso
 ├── run_general_finetune.py      # Step 2: subject-wise k-fold fine-tuning of LaBraM + regression head
 ├── run_inference.py             # Step 3: reconstruction of held-out trials, per-trial metrics -> HDF5
 ├── make_h5dataset_for_pretrain.py  # Auxiliary/experimental: HDF5 export for LaBraM pretraining (not part of the main pipeline)
+├── qc_bad_channels.py           # QC: runs the automatic bad channel detector on all recordings -> outputs/qc/
+├── reaction_times.py            # Analysis: button-press reaction times, baseline vs post-patching -> outputs/reaction_times/
 ├── pyproject.toml / uv.lock     # Environment definition
 │
 ├── core/                        # Project package
@@ -210,7 +212,7 @@ If any selected recording has no cached `bad_ch_selection.pkl` / `ica_selection.
 |---|---|---|---|
 | 1 | Load + montage | `unscrambly` `preprocess_dir` | `mne.io.read_raw_edf`, montage `GSN-HydroCel-65_1.0` |
 | 2 | ICA | 〃 | 15 components fitted per recording. Manually selected components are removed |
-| 3 | Bad channels | 〃 | Manually selected channels are **interpolated** (`interpolate_bads`) |
+| 3 | Bad channels | 〃 | Manually selected channels plus **automatically detected** ones (`auto_bad_channels.py`, see below) are **interpolated** (`interpolate_bads`). Detection runs on the raw recording before ICA |
 | 4 | Re-reference | 〃 | **Average reference**, computed over all 65 channels, before channel reduction |
 | 5 | Filtering | 〃 | Band-pass 0.1–75 Hz (FIR, firwin), then 50 Hz notch |
 | 6 | Triggers | 〃 | EDF annotations are replaced with NPZ triggers. Eccentricity is encoded as `DIN21/ecc_3` etc. |
@@ -221,6 +223,20 @@ If any selected recording has no cached `bad_ch_selection.pkl` / `ica_selection.
 | 11 | Unit conversion | `rescale_to_uv` | V → **µV** (×1e6), as LaBraM expects |
 | 12 | Wavelet target | `save_dataset` → `utils.calc_wavelet` | CWT of the **full extended epoch** (801 samples). Reflect-padded by 300 samples per side first, magnitude `abs(coeffs)`, padding removed. Permuted to (channels, freqs, time), then cropped to `TIME_WINDOW` → **(23, 50, 200)** |
 | 13 | EEG epoch | `save_dataset` | Cropped to `TIME_WINDOW` (samples 300:500 of the extended epoch) → **(23, 200)** µV |
+
+**Automatic bad channel detection** (`libs/unscrambly/preprocessing/auto_bad_channels.py`, parameters in `settings.AUTO_BAD_CHANNEL_PARAMS`). It runs on each raw recording and adds its flags to the manual selection:
+
+| Criterion | Computed on | Default |
+|---|---|---|
+| Clipping | Raw data. Fraction of samples at the channel's own max \|x\| (the ±5000 µV rail), ignoring samples where ≥ 25 % of channels saturate together (whole-cap events at recording start/end) | > 0.5 % |
+| Flat | Raw data, 1–40 Hz std | < 1 µV |
+| Noisy | Average reference to the still-good channels (iterated), 1–40 Hz std relative to the channel median | > 10× |
+| Line noise | Average reference, 49–51 Hz vs 44–47/53–56 Hz power | **off** |
+
+- **Calibration.** The defaults were calibrated with `qc_bad_channels.py`. They flag about 2.4 % of channels, close to the 2.6 % selected manually. T4 (E52) is the model channel flagged most often.
+- **Noisy threshold.** It is high on purpose: the check runs before ICA, so periocular and facial channels carry blinks and muscle activity.
+- **Line noise is not a channel criterion.** Line noise is systematic on some electrodes (E34 = Pz in about 80 % of recordings), so flagging it would interpolate Pz almost everywhere. The notch filter should remove it instead.
+- **Report.** `make_dataset.py` writes the per-channel detection report to `outputs/qc/auto_bad_channels_make_dataset.csv`.
 
 The extended window and the extra padding give the low-frequency wavelets (≈1 Hz atoms span several seconds) enough context. Without them, edge effects would contaminate the 1 s analysis window.
 

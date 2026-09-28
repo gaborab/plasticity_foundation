@@ -10,11 +10,12 @@ from typing import Optional
 
 import argparse
 import mne
+import pandas as pd
 import torch
 
 from core.io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
-from core import settings
+from core import settings, io
 from core import utils
 from typing import Dict, Any, Tuple
 
@@ -45,6 +46,8 @@ def rescale_to_uv(epochs: Dict[str, Dict[str, Dict[str, Any]]]):
 
 
 
+
+
 def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handler: EpochIO,
                  save_superlet: bool, save_wavelet: bool,
                  scale_to_uv: Optional[bool] = True):
@@ -55,12 +58,17 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
     :param epochs: preprocessed dictionary containing epochs of either baseline or post-patching data separated by subject and condition
     :param path: save folder path
     """
+    egi_to_idx = {egi: settings.CHORDER_STANDARD.index(name) for egi, name in settings.EGI_TO_1020_MAP.items()}
+    to_idx = lambda s: ';'.join(str(egi_to_idx[ch]) for ch in s.split(';') if ch in egi_to_idx) if s else ''
+    manifest = []
+
     path.mkdir(parents=True, exist_ok=True)
     for subj in epochs.keys():
         for cond in epochs[subj].keys():
             epoch_list = epochs[subj][cond].get_data()
+            meta = epochs[subj][cond].metadata.reset_index(drop=True)
+            id = 1
             try:
-                id = 1
                 for epoch in epoch_list:
                     epoch_path = path / settings.EPOCHS_DIR_NAME
                     epoch_path.mkdir(parents=True, exist_ok=True)
@@ -69,10 +77,13 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
                     wavelet_path = path / settings.WAVELET_DIR_NAME
                     wavelet_path.mkdir(parents=True, exist_ok=True)
 
+                    row = meta.iloc[id - 1]
+                    manifest.append({'subject': subj, 'stimulus': cond, 'id': id, 'recording': row.recording,
+                                     'onset_s': row.onset_s,
+                                     'rec_interpolated': to_idx(row.rec_interpolated),
+                                     'ar_interpolated': to_idx(row.ar_interpolated)})
+
                     tensor_data = torch.tensor(epoch, dtype=torch.float32)
-                    # save tensor to path with filename convention: {subject}_{condition}_epoch{index}.pt
-
-
 
                     if save_superlet:
                         # TODO compute superlet target and save to path with filename convention: {subject}_{condition}_superlet{index}.pt
@@ -90,6 +101,7 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
                                         epoch_id=id, saved_type='wavelet')
                         print(f"Saved wavelet target for epoch {id} for {subj} {cond} to {wavelet_path}")
 
+                    # save tensor to path with filename convention: {subject}_{condition}_epoch{index}.pt
                     tensor_data = utils.cut_to_timewindow(tensor_data, settings.EXTENDED_TIME_WINDOW, settings.TIME_WINDOW, settings.RSFREQ)
                     io_handler.save(tensor_data=tensor_data, directory=epoch_path, subject=subj, condition=cond,
                                     epoch_id=id,
@@ -99,6 +111,7 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
 
             except Exception as e:
                 print(f"ERROR: Failed to dump epoch for {subj} {cond}: {e}")
+    io.save_report(manifest, "epochs_manifest.csv", path)
 
 
 def main(opts):
@@ -110,38 +123,54 @@ def main(opts):
     # initialize unscrambly preprocessor, set required filter frequencies
     preprocessor = DataPreprocessor(
         directory=settings.DATA_ROOT,  # Root containing subject folders
-        filter_params={'highpass': settings.L_FREQ, 'lowpass': settings.H_FREQ, 'notch': 50},
-        ica_enabled=True,
+        filter_params={'highpass': settings.L_FREQ, 'lowpass': settings.H_FREQ, 'notch': 50, 'notch_width': settings.NOTCH_WIDTH},
         ica_n_components=15,
+        ica_method='iclabel',
+        ica_params=settings.ICA_PARAMS,
+        iclabel_thresholds=settings.ICLABEL_THRESHOLDS,
         bad_channels='interpolate',
         time_window=settings.EXTENDED_TIME_WINDOW,
         baseline_win=(-0.2, 0),
         split_by='both',
         re_reference='average',
+        auto_bad_channel_params=settings.AUTO_BAD_CHANNEL_PARAMS,
+        qc_dir=settings.QC_DIR,
+        cache_dir=settings.CACHE_DIR,
+        autoreject_mode="local",
+        autoreject_params=settings.AUTOREJECT_PARAMS,
+        autoreject_window=settings.AUTOREJECT_WINDOW,
     )
 
     # preprocess subjects, order into a dict with hierarchy: subject, condition
     preproc_data = preprocessor.process_subjects(included_conditions=settings.INCLUDED_CONDITIONS,
                                                  excluded_subjects=settings.EXCLUDED_SUBJECTS,
                                                  recordings_per_condition=settings.RECORDINGS_PER_CONDITION)
+    io.save_report(preprocessor.auto_bad_channel_report, "auto_bad_chans.csv", settings.QC_DIR)
+    io.save_report(preprocessor.ica_report, "ica_report.csv", settings.QC_DIR)
+
     # resample
     for subject in preproc_data.keys():
         for condition in preproc_data[subject].keys():
             preproc_data[subject][condition].resample(settings.RSFREQ)
     print(f"Resampled to {settings.RSFREQ} Hz for all data")
 
-    # match channels to labram and reorder (for compatibility with electrode localization)
-    for subject in preproc_data.keys():
-        for condition in preproc_data[subject].keys():
-            try:
-                match_and_order(preproc_data[subject][condition])
-            except Exception as e:
-                print(f"ERROR: Failed to reorder channels for {subject}_{condition}: {e}")
-
-    print("Channel reordering to LaBraM representation complete.")
 
     # extract epochs (MNE built-in baselining)
     all_epochs = preprocessor.create_subject_epochs(preproc_data, output_format='epochs', manual_baseline=False)
+    io.save_report(preprocessor.autoreject_report, "autoreject_report.csv", settings.QC_DIR)
+
+    # match channels to labram and reorder (for compatibility with electrode localization)
+    for subj in all_epochs.keys():
+        for cond in all_epochs[subj].keys():
+            for id, epoch in all_epochs[subj][cond].items():
+                try:
+                    match_and_order(epoch)
+                except Exception as e:
+                    print(f"ERROR: Failed to reorder channels for {subj}_{cond}_{id}: {e}")
+
+
+    print("Channel reordering to LaBraM representation complete.")
+
     # rescale to uV
     all_epochs = rescale_to_uv(all_epochs)  # subject - baseline/pp
     print("Created epochs for all subjects.")

@@ -1,5 +1,6 @@
+import json
 from pathlib import Path
-
+import hashlib
 import h5py
 from typing import Dict, Any
 
@@ -64,3 +65,11 @@ def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
     except Exception as e:
         print(f"Error saving figure: {e}")
 
+
+
+def generate_hash(input_dict: dict, return_length: int = 10) -> str:
+    """
+    Generates a SHA256 hash for the given input dictionary.
+    """
+
+    return hashlib.sha256(json.dumps(input_dict).encode()).hexdigest()[:return_length]

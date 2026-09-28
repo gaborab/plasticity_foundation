@@ -42,6 +42,7 @@ SEED = 42  # Set a fixed seed for reproducibility, use for shuffling and samplin
 L_FREQ = 0.1
 H_FREQ = 75.0
 RSFREQ = 200
+NOTCH_WIDTH = 3.0
 INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
 RECORDINGS_PER_CONDITION = None
@@ -52,6 +53,43 @@ PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targ
 EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
 WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
 
+
+ICA_PARAMS = {
+    'n_components': 15,
+    'method': 'infomax',
+    'random_state': SEED,
+    'fit_params': {'extended': True},
+    'max_iter': 'auto',
+}
+
+ICLABEL_THRESHOLDS = {
+    'eye blink': 0.7,
+    'heart beat': 0.8,
+    'line noise': 0.8,
+    'channel noise': 0.8,
+    'muscle artifact': 0.9,
+}
+
+AUTOREJECT_MARGIN = 0.4
+AUTOREJECT_WINDOW = (TIME_WINDOW[0] - AUTOREJECT_MARGIN, TIME_WINDOW[1] + AUTOREJECT_MARGIN)
+AUTOREJECT_PARAMS = {
+    'random_state': SEED,
+    'n_jobs': 4,
+    'n_interpolate': np.array([1, 2, 4, 8])
+}
+
+AUTO_BAD_CHANNEL_PARAMS = {
+    'clip_fraction': 0.005,  # channel-specific saturation in more than this fraction of samples -> clipping
+    'common_clip_share': 0.25,  # samples where at least this share of channels saturate together are ignored
+    'flat_std_uv': 1.0,  # raw 1-40 Hz std below this -> flat
+    'noise_ratio': 10.0,  # average-referenced 1-40 Hz std above this multiple of the channel median -> noisy
+    'line_freq': 50.0,
+    'line_min_db': 20.0,  # line band power this many dB above its neighbouring bands ...
+    'line_excess_db': None,  # ... and this many dB above the median channel -> line noise (None = off, see module docs)
+    'max_iterations': 3,
+    'exclude': ['EEG VREF'],  # recording reference, flat before re-referencing
+}
+
 EPOCHS_DIR_NAME = "epochs"
 SUPERLET_DIR_NAME = "superlet_targets"
 WAVELET_DIR_NAME = "wavelet_targets"
@@ -60,6 +98,7 @@ WAVELET_DIR_NAME = "wavelet_targets"
 BASE_DIR = Path(".")
 DATA_ROOT = BASE_DIR / "data" / "raw"/ "STMD_data"
 PROCESS_DIR = BASE_DIR / "data" / "processed"
+CACHE_DIR = PROCESS_DIR / "cache"
 
 FINETUNE_DIR = PROCESS_DIR / "pre_patching"
 FINETUNE_EPOCHS_DIR = FINETUNE_DIR / EPOCHS_DIR_NAME
@@ -76,6 +115,7 @@ PLOT_DIR = BASE_DIR / "outputs" / "plots"
 INFERENCE_DIR = BASE_DIR / "outputs" / "inference_outputs"
 PLOT_MACRO = PLOT_DIR / "macro_plots"
 PLOT_INFERENCE = PLOT_DIR / "inference_plots"
+QC_DIR = BASE_DIR / "outputs" / "qc"
 CHECKPOINT_DIR = BASE_DIR / "libs" / "labram" / "checkpoints"
 
 # Model
