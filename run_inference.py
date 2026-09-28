@@ -44,10 +44,15 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None
                     trial_output = output_np[j]
                     trial_target = target_np[j]
                     subject, condition, idx = subjects[j], conditions[j], ids[j]
-                    metrics, ch_metrics = core_utils.get_inference_metrics(trial_output, trial_target, freqs=freqs,
-                                                               freq_bands=freq_bands, eps=settings.EPS)
-                    save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, metrics, ch_metrics)
 
+                    window_metrics = {}
+                    for name, window in settings.METRIC_WINDOWS.items():
+                        print("Calculating metrics for window:", name)
+                        cut_output = core_utils.cut_to_timewindow(trial_output, settings.TIME_WINDOW, window, settings.RSFREQ)
+                        cut_target = core_utils.cut_to_timewindow(trial_target, settings.TIME_WINDOW, window, settings.RSFREQ)
+                        window_metrics[name] = core_utils.get_inference_metrics(cut_output, cut_target, freqs=freqs,
+                                                                   freq_bands=freq_bands, eps=settings.EPS)
+                    save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, window_metrics)
 
 
 def get_args():

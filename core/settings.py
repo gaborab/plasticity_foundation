@@ -52,6 +52,16 @@ PAD_TIME = 1.5
 PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targets
 EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
 WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
+ANALYSIS_WINDOW = (0.0, 0.4)
+BUTTON_WINDOW = (ANALYSIS_WINDOW[1], TIME_WINDOW[1])
+REFERENCE_WINDOW = (TIME_WINDOW[0], ANALYSIS_WINDOW[0])
+
+METRIC_WINDOWS = {
+    'full': TIME_WINDOW,
+    'analysis': ANALYSIS_WINDOW,
+    'button': BUTTON_WINDOW,
+    'reference': REFERENCE_WINDOW,
+}
 
 
 ICA_PARAMS = {

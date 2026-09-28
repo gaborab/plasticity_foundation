@@ -1,6 +1,6 @@
 # python
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 import pandas as pd
 
@@ -162,16 +162,15 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
 
 
 
-def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, metrics, ch_metrics):
+def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]]):
     trial_path = f"{subject}/{condition}/{idx}"
     trial_group = h5file.create_group(trial_path)
     trial_group.create_dataset("target", data=trial_target, compression="gzip")
     trial_group.create_dataset("output", data=trial_output, compression="gzip")
 
-    metrics_json = json.dumps(metrics, cls=NumpyEncoder)
-    ch_metrics_json = json.dumps(ch_metrics, cls=NumpyEncoder)
-    trial_group.attrs["metrics_json"] = metrics_json
-    trial_group.attrs["channel_metrics_json"] = ch_metrics_json
+    for name, (metrics, ch_metrics) in window_metrics.items():
+        trial_group.attrs[f"{name}_metrics_json"] = json.dumps(metrics, cls=NumpyEncoder)
+        trial_group.attrs[f"{name}_channel_metrics_json"] = json.dumps(ch_metrics, cls=NumpyEncoder)
 
 def load_inference_data(h5file_path: Path, channel_mode: bool, subjects: str = None, conditions: str = None, idxs = None, results: List[str]=None, metrics: List[str]=None, channels: List[str]=None, bands: List[str] = None) -> Any:
 

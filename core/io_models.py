@@ -34,6 +34,22 @@ class Metrics:
     recon_volatility_bandwise: Dict[str, float] = None
 
 
+def ch_metrics_from_json(ch_json: str) -> Dict[str, Metrics]:
+    raw_dict = json.loads(ch_json)
+    ret_metrics = {}
+    for ch_name, metrics_data in raw_dict.items():
+        ret_metrics[ch_name] = Metrics.from_dict(metrics_data)
+    return ret_metrics
+
+def _metrics_field(window: str, channel: bool = False) -> cached_property:
+    key = f"{window}_channel_metrics_json" if channel else f"{window}_metrics_json"
+
+    def getter(self):
+        raw = self.trial_data.attrs[key]
+        return ch_metrics_from_json(raw) if channel else Metrics.from_dict(json.loads(raw))
+
+    return cached_property(getter)
+
 @dataclass
 class Trial:
     trial_data: h5py.Group
@@ -47,16 +63,13 @@ class Trial:
     @property
     def recon_data(self) -> np.ndarray:
         return self.trial_data["output"][()]
-    @cached_property
-    def channel_metrics(self) -> Dict[str, Metrics]:
-        ch_json = self.trial_data.attrs["channel_metrics_json"]
-        raw_dict = json.loads(ch_json)
-        ret_metrics = {}
-        for ch_name, metrics_data in raw_dict.items():
-            ret_metrics[ch_name] = Metrics.from_dict(metrics_data)
-        return ret_metrics
-    @cached_property
-    def metrics(self) -> Metrics:
-        m_json = self.trial_data.attrs["metrics_json"]
-        raw_dict = json.loads(m_json)
-        return Metrics.from_dict(raw_dict)
+
+    metrics = _metrics_field("full")
+    channel_metrics = _metrics_field("full", channel=True)
+    analysis_metrics = _metrics_field("analysis")
+    analysis_channel_metrics = _metrics_field("analysis", channel=True)
+    button_metrics = _metrics_field("button")
+    button_channel_metrics = _metrics_field("button", channel=True)
+    reference_metrics = _metrics_field("reference")
+    reference_channel_metrics = _metrics_field("reference", channel=True)
+

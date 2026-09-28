@@ -194,8 +194,8 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
         ch_metrics.recon_volatility = recon_channel_stds[i]
         ch_metrics.nmae = ch_metrics.mae / signal_channel_stds[i]
 
-        ch_metrics.signal_mean = np.mean(trial_target).item()
-        ch_metrics.recon_mean = np.mean(trial_output).item()
+        ch_metrics.signal_mean = np.mean(trial_target[i]).item()
+        ch_metrics.recon_mean = np.mean(trial_output[i]).item()
 
 
 
