@@ -58,6 +58,7 @@ def get_args():
     parser.add_argument('--huber_beta', type=float, default=0.1)
     parser.add_argument('--no_pretrained', action='store_true', default=False)
     parser.add_argument('--mse', action='store_true', default=False)
+    parser.add_argument('--model_desc', type=str, default='')
 
     return parser.parse_args()
 
@@ -102,6 +103,7 @@ def main(opts):
             "lr": LR,
             "pretrained": USE_PRETRAINED,
         },
+        "description": opts.model_desc
     }
 
     output_dir_base = settings.FINETUNE_OUTPUT_DIR / opts.model_name
