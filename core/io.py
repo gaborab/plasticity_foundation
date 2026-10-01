@@ -40,7 +40,7 @@ class EpochIO:
         directory.mkdir(parents=True, exist_ok=True)
         filename = io_utils.vars_to_filename(subject, condition, epoch_id, saved_type, self.ext)
         target = directory / filename
-        torch.save(tensor_data, target)
+        torch.save(tensor_data.clone(), target)
         return target
 
     def load_specific(self, directory: Path, subject: str, cond: str, idx: str, marker: str) -> Optional[Any]:
@@ -49,18 +49,15 @@ class EpochIO:
         """
         filename = io_utils.vars_to_filename(subject, cond, idx, marker=marker, ext=self.ext)
         # find matching file in directory
-        file = next(directory.glob(filename), None)
+        file = directory / filename
 
-        if not file or not file.exists():
+        if not file.exists():
             print(f"WARNING: File not found for filename: {filename} in directory: {directory}")
-
-        if file and file.exists():
-            try:
-                return torch.load(file)
-            except Exception:
-                print(f"WARNING: Failed to load file: {file.name}")
-
-        return None
+        try:
+            return torch.load(file)
+        except Exception:
+            print(f"WARNING: Failed to load file: {file.name}")
+            return None
 
     def load_all_epochs(self, directory: Path) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """

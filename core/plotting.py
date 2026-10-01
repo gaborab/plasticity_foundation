@@ -196,7 +196,7 @@ def set_heatmap_formatting(ax, target_mode, im=None):
 
             plt.colorbar(im, cax=cax, label='Z-scored Power')
 
-        my_ticks = [4, 5, 10, 20, 50]
+        my_ticks = [2, 4, 5, 10, 20, 50]
         ax.set_yticks(my_ticks)
         ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
@@ -258,10 +258,6 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
                 set_heatmap_formatting(ax1, target_mode)
 
             elif target_mode in ["wavelet", "superlet"]:
-
-                freq_window = settings.SPECTRAL_DECODER_PARAMS["freq_window"]
-                n_freqs = settings.SPECTRAL_DECODER_PARAMS["n_freqs"]
-
                 # Column 1: True
                 ax1 = fig.add_subplot(gs[i, 0])
                 im1 = ax1.pcolormesh(time, freqs, channel_true, vmin=-v_max, vmax=v_max)
