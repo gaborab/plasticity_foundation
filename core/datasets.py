@@ -96,7 +96,7 @@ class KFoldSplitter:
     and `settings.FINETUNE_DIR`.
     """
 
-    def __init__(self, data_dir: Optional[Path], seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6):
+    def __init__(self, data_dir: Optional[Path], seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6, no_press_threshold: int = 59):
         if all_data is None:
             io_handler = EpochIO(ext='.pt')
             # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
@@ -108,6 +108,7 @@ class KFoldSplitter:
         self.all_data = all_data
         self.k_folds = k_folds
         self.seed = seed
+        self.no_press_threshold = no_press_threshold
 
     def split_by_subject(self) -> List[FinetuneSplits]:
         """
@@ -116,13 +117,11 @@ class KFoldSplitter:
         Returns: a list of `FinetuneDataset` instances, one per fold.
         """
         subject_paradigm = utils.subject_paradigm
-        subjects = list(self.all_data.keys())
         rng = random.Random(self.seed)
-        rng.shuffle(subjects)
         # Split subjects into K folds, stratify by button press paradigm
         groups = {}
         for subject in sorted(self.all_data.keys()):
-            button_press = subject_paradigm(subject)
+            button_press = subject_paradigm(subject, thresh=self.no_press_threshold)
             groups.setdefault(button_press, []).append(subject)
         grouped_shuffle_subjects = []
         for paradigm, p_subjects in groups.items():
@@ -134,10 +133,10 @@ class KFoldSplitter:
         splits = []
         for i in range(self.k_folds):
             test_subj = folds[i]
-            train_val_subj = [s for s in subjects if s not in test_subj]
+            train_val_subj = [s for s in grouped_shuffle_subjects if s not in test_subj]
             val_subj = []
             for paradigm in groups.keys():
-                paradigm_subj = [s for s in train_val_subj if subject_paradigm(s) == paradigm]
+                paradigm_subj = [s for s in train_val_subj if subject_paradigm(s, thresh=self.no_press_threshold) == paradigm]
                 rng.shuffle(paradigm_subj)
                 val_subj.extend(paradigm_subj[:len(paradigm_subj)//5])  # 20% for validation
             train_subj = [s for s in train_val_subj if s not in val_subj]

@@ -74,7 +74,7 @@ def main(opts):
         print("Loading postpatch data...")
         postpatch_all_data = io_handler.load_all_epochs(settings.PATCH_EPOCHS_DIR)
 
-    splitter = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, all_data=finetune_all_data, k_folds=6)
+    splitter = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, all_data=finetune_all_data, k_folds=6, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = splitter.split_by_subject()
 
     ch_names = settings.CHORDER_STANDARD

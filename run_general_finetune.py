@@ -69,7 +69,7 @@ def main(opts):
     dataloaders, initializing the model, and training/evaluating across folds.
     """
     torch.manual_seed(settings.SEED)
-    kfold = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, k_folds=opts.k_folds)
+    kfold = KFoldSplitter(data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = kfold.split_by_subject()
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
     ch_names = settings.CHORDER_STANDARD

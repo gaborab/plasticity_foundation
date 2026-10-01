@@ -7,8 +7,8 @@ from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
 
-def subject_paradigm(subject: str, thresh: int=59):
-    return "no_press" if int(subject.removeprefix("STMD")) > thresh else "press"
+def subject_paradigm(subject: str, thresh: int):
+    return "no_press" if int(subject.removeprefix("STMD")) >= thresh else "press"
 
 def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, pad, **kwargs):
     """
