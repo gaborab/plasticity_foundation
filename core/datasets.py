@@ -125,9 +125,9 @@ class KFoldSplitter:
             button_press = subject_paradigm(subject)
             groups.setdefault(button_press, []).append(subject)
         grouped_shuffle_subjects = []
-        for paradigm, subjects in groups.items():
-            rng.shuffle(subjects)
-            grouped_shuffle_subjects.extend(subjects)
+        for paradigm, p_subjects in groups.items():
+            rng.shuffle(p_subjects)
+            grouped_shuffle_subjects.extend(p_subjects)
 
         folds = [grouped_shuffle_subjects[i::self.k_folds] for i in range(self.k_folds)]
         # Iterate over folds to create train/val/test splits for each fold
