@@ -115,19 +115,32 @@ class KFoldSplitter:
         Used for fine-tuning generalizable models.
         Returns: a list of `FinetuneDataset` instances, one per fold.
         """
+        subject_paradigm = utils.subject_paradigm
         subjects = list(self.all_data.keys())
         rng = random.Random(self.seed)
         rng.shuffle(subjects)
-        # Split subjects into K folds
-        folds = [subjects[i::self.k_folds] for i in range(self.k_folds)]
+        # Split subjects into K folds, stratify by button press paradigm
+        groups = {}
+        for subject in sorted(self.all_data.keys()):
+            button_press = subject_paradigm(subject)
+            groups.setdefault(button_press, []).append(subject)
+        grouped_shuffle_subjects = []
+        for paradigm, subjects in groups.items():
+            rng.shuffle(subjects)
+            grouped_shuffle_subjects.extend(subjects)
+
+        folds = [grouped_shuffle_subjects[i::self.k_folds] for i in range(self.k_folds)]
         # Iterate over folds to create train/val/test splits for each fold
         splits = []
         for i in range(self.k_folds):
             test_subj = folds[i]
             train_val_subj = [s for s in subjects if s not in test_subj]
-            split_idx = len(train_val_subj) // 5
-            val_subj = train_val_subj[:split_idx]  # 20% for validation
-            train_subj = train_val_subj[split_idx:]  # 80% for training
+            val_subj = []
+            for paradigm in groups.keys():
+                paradigm_subj = [s for s in train_val_subj if subject_paradigm(s) == paradigm]
+                rng.shuffle(paradigm_subj)
+                val_subj.extend(paradigm_subj[:len(paradigm_subj)//5])  # 20% for validation
+            train_subj = [s for s in train_val_subj if s not in val_subj]
             train = {subject: self.all_data[subject] for subject in train_subj}
             val = {subject: self.all_data[subject] for subject in val_subj}
             test = {subject: self.all_data[subject] for subject in test_subj}
