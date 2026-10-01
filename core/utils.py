@@ -6,6 +6,7 @@ import torch
 from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
+import pandas as pd
 
 def subject_paradigm(subject: str, thresh: int):
     return "no_press" if int(subject.removeprefix("STMD")) >= thresh else "press"
@@ -234,6 +235,15 @@ def avg_metrics_over_folds(model_data: Dict[str, List[Dict]], metrics: List[str]
             print(f"WARNING: No values found for metric {metric} across folds.")
             averaged_metrics[metric] = None
     return averaged_metrics
+
+def get_subjects_by_eye_dominance(side: str, eye_dom_csv_path: Path):
+    """
+    Reads eye dominance information from a CSV file and returns a list of subject IDs with the specified eye dominance ('left' or 'right').
+    Expects the CSV to have columns 'subject_id' and 'eye_dominance'.
+    """
+    eye_dom = pd.read_csv(eye_dom_csv_path)
+
+    return eye_dom[eye_dom["eye_dominance"] == side]["subject_id"].tolist()
 
 
 

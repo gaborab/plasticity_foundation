@@ -226,7 +226,7 @@ def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]],
             ret[item.name] = item[()]
     return ret
 
-def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] = None) -> List[Trial]:
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] = None, exclude_subjects: List[str] = None) -> List[Trial]:
     print("Loading inference trials...")
     try:
         data = h5py.File(h5file_path, "r")
@@ -240,6 +240,8 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     all_trials = []
     for subject, subj_group in data.items():
         if subjects is not None and subject not in subjects:
+            continue
+        if exclude_subjects is not None and subject in exclude_subjects:
             continue
         for condition, cond_group in subj_group.items():
             if conditions is not None and condition not in conditions:
@@ -262,4 +264,27 @@ def save_report(rows, filename: str, save_dir: Path):
     print(f"Saved {len(rows)} rows to {path}")
 
 
+def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
+    filename = name_input.strip() or default_name
+    if not filename.endswith(".png"):
+        filename += ".png"
+    save_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
+        save_path = save_dir / filename
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Figure saved to: {save_path}")
+    except Exception as e:
+        print(f"Error saving figure: {e}")
+
+def get_stored_subject_names(data_dir: Path) -> List[str]:
+    """
+    Returns a list of subject names based on the directory contents of the data_dir.
+    Assumes that each subject has a dedicated subdirectory in data_dir.
+    """
+    if not data_dir.exists():
+        print(f"WARNING: Data directory does not exist: {data_dir}")
+        return []
+
+    subject_names = [d.name for d in data_dir.iterdir() if d.is_dir()]
+    return subject_names

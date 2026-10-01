@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 
+import core.io
 from core import settings, io_utils
 from core.io_models import Trial
 from core.plot_data_processing import order_to_channel_viewer_format
@@ -367,7 +368,7 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
     def on_save_clicked(b):
         with output_comp:
             output_comp.clear_output()
-            io_utils.save_figure(name_input=name_input.value, save_dir=save_dir, fig=fig, default_name=default_name)
+            core.io.save_figure(name_input=name_input.value, save_dir=save_dir, fig=fig, default_name=default_name)
 
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))

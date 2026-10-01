@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 import hashlib
 import h5py
 from typing import Dict, Any
@@ -51,20 +50,6 @@ def nested_group_to_dict(group: h5py.Group) -> Dict[str, Any]:
                 print(f"WARNING: key {key} already exists in nested group, overriding value: {ret_dict[key]}")
             ret_dict[key] = value[()]
     return ret_dict
-
-def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
-    filename = name_input.strip() or default_name
-    if not filename.endswith(".png"):
-        filename += ".png"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        save_path = save_dir / filename
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Figure saved to: {save_path}")
-    except Exception as e:
-        print(f"Error saving figure: {e}")
-
 
 
 def generate_hash(input_dict: dict, return_length: int = 10) -> str:
