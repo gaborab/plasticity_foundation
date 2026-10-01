@@ -18,6 +18,64 @@ from libs.unscrambly.preprocessing import DataPreprocessor
 from core import settings, io
 from core import utils
 from typing import Dict, Any, Tuple
+import argparse
+from pathlib import PureWindowsPath
+
+
+def load_autoreject():
+    ar = pd.read_csv(settings.QC_DIR / "autoreject_report.csv")
+    ar = ar.rename(columns={"subject_name": "subject", "conditions": "session"})
+    ar["dropped_share"] = ar["n_dropped"] / ar["n_epochs"]
+    return ar[["subject", "session", "n_epochs", "n_dropped", "dropped_share", "mean_interp_per_kept_epoch"]]
+
+
+def load_auto_bad_channels():
+    bc = pd.read_csv(settings.QC_DIR / "auto_bad_chans.csv")
+    # data\raw\STMD_data\<subject>\<session>\<recording folder>\<file>.edf
+    parts = bc["recording"].map(lambda p: PureWindowsPath(p).parts)
+    bc["subject"], bc["session"], bc["rec"] = parts.str[-4], parts.str[-3], parts.str[-2]
+    bc["flagged"] = bc["reasons"].fillna("") != ""
+    per_rec = bc.groupby(["subject", "session", "rec"])["flagged"].sum().rename("n_flagged").reset_index()
+    per_session = per_rec.groupby(["subject", "session"])["n_flagged"].agg(
+        auto_max_per_recording="max", auto_mean_per_recording="mean").reset_index()
+    return per_rec, per_session
+
+
+def print_hits(title, df, cols):
+    print(f"\n=== {title} ===")
+    if df.empty:
+        print("none")
+        return
+    print(df[cols].round(2).to_string(index=False))
+    print(f"-> subjects: {', '.join(sorted(df['subject'].unique(), key=lambda s: int(s.removeprefix('STMD'))))}")
+
+def run_qc_check(max_dropped_share, max_channels, show_all):
+    ar = load_autoreject()
+    per_rec, per_session = load_auto_bad_channels()
+    sessions = ar.merge(per_session, on=["subject", "session"], how="outer")
+    sessions["combined_mean"] = sessions["auto_mean_per_recording"].fillna(0) + sessions[
+        "mean_interp_per_kept_epoch"].fillna(0)
+
+    print(f"{sessions['subject'].nunique()} subjects, {len(sessions)} sessions | thresholds: "
+          f"dropped share > {max_dropped_share:.3f}, channels > {max_channels}")
+
+    print_hits(f"Epochs: more than {max_dropped_share:.0%} of a session's epochs dropped",
+               sessions[sessions["dropped_share"] > max_dropped_share],
+               ["subject", "session", "n_dropped", "n_epochs", "dropped_share"])
+    print_hits(f"Autoreject: more than {max_channels} channels interpolated per kept epoch (session average)",
+               sessions[sessions["mean_interp_per_kept_epoch"] > max_channels],
+               ["subject", "session", "mean_interp_per_kept_epoch"])
+    print_hits(f"Automatic bad channel detector: more than {max_channels} channels in a recording",
+               per_rec[per_rec["n_flagged"] > max_channels],
+               ["subject", "session", "rec", "n_flagged"])
+    print_hits(f"Combined: detector channels (session mean) + autoreject average > {max_channels}",
+               sessions[sessions["combined_mean"] > max_channels],
+               ["subject", "session", "auto_mean_per_recording", "mean_interp_per_kept_epoch", "combined_mean"])
+
+    if show_all:
+        print("\n=== All sessions ===")
+        print(sessions.sort_values(["subject", "session"]).round(2).to_string(index=False))
+
 
 
 def match_and_order(raw_io: mne.io.Raw):
@@ -139,6 +197,7 @@ def main(opts):
         autoreject_mode="local",
         autoreject_params=settings.AUTOREJECT_PARAMS,
         autoreject_window=settings.AUTOREJECT_WINDOW,
+        interactive_selection=False
     )
 
     # preprocess subjects, order into a dict with hierarchy: subject, condition
@@ -188,6 +247,9 @@ def main(opts):
                  save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
 
     print(f"Preprocessed epochs saved to {settings.FINETUNE_EPOCHS_DIR} and {settings.PATCH_EPOCHS_DIR}.")
+
+    print("Running quality check for bad channel rejection and autoreject...")
+    run_qc_check(settings.QC_MAX_DROPPED_SHARE, settings.QC_MAX_DROPPED_CHANS, False)
 
 
 if __name__ == "__main__":

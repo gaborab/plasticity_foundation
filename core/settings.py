@@ -44,7 +44,8 @@ H_FREQ = 75.0
 RSFREQ = 200
 NOTCH_WIDTH = 3.0
 INCLUDED_CONDITIONS = ['baseline', 'post-patching']
-EXCLUDED_SUBJECTS = ['STMD35', 'STMD37', 'STMD38', 'STMD39', 'STMD40', 'STMD41', 'STMD42', 'STMD43', 'STMD44', 'STMD45']
+EXCLUDED_SUBJECTS = []
+NO_PRESS_FROM_SUBJECT = 59
 RECORDINGS_PER_CONDITION = None
 TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
 EXTENDED_OFFSET = 1.5
@@ -99,6 +100,10 @@ AUTO_BAD_CHANNEL_PARAMS = {
     'max_iterations': 3,
     'exclude': ['EEG VREF'],  # recording reference, flat before re-referencing
 }
+
+
+QC_MAX_DROPPED_SHARE = 1/3
+QC_MAX_DROPPED_CHANS = 12
 
 EPOCHS_DIR_NAME = "epochs"
 SUPERLET_DIR_NAME = "superlet_targets"

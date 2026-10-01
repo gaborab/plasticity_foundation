@@ -51,7 +51,8 @@ class DataPreprocessor:
                  auto_bad_channel_params: Optional[Dict] = None,
                  qc_dir: Optional[Path] = None,
                  cache_dir: Optional[Path] = None,
-                 autoreject_window: Optional[Tuple] = None
+                 autoreject_window: Optional[Tuple] = None,
+                 interactive_selection: Optional[bool] = True
                  ):
         """
         Initialize the DataPreprocessor with configuration parameters.
@@ -172,7 +173,7 @@ class DataPreprocessor:
         if self.auto_bad_channel_params is not None and not self.bad_channels:
             print(
                 'WARNING: Automatic bad channel detection enabled, but bad_channels is None. Detected channels will not be handled.')
-
+        self.interactive_selection = interactive_selection
     @staticmethod
     def _load_triggers(trigger_type: str = 'onset') -> Dict[str, str]:
         """
@@ -784,12 +785,17 @@ class DataPreprocessor:
                 # Get bad channel selections for this condition
                 bad_channel_selection = None
                 if self.bad_channels and condition_edf_paths:
-                    if skip_bad_channel_prompts and condition_key in preloaded_bad_channels:
+                    if preloaded_bad_channels.get(condition_key) is not None:
                         bad_channel_selection = preloaded_bad_channels[condition_key]
-                    else:
+                    elif self.interactive_selection:
                         bad_channel_selection = get_bad_channels(str(condition_folder), condition_edf_paths)
+                    else:
+                        print(
+                            f'  WARNING: no manual bad channel selection for some recordings of {subject_name}/{condition_name}; '
+                            f'using automatic detection only.')
+                        bad_channel_selection = {}
 
-                # Get ICA selections for this condition
+                        # Get ICA selections for this condition
                 ica_selection = None
                 if self.ica_method == 'manual' and condition_edf_paths:
                     if skip_ica_prompts and condition_key in preloaded_ica:
