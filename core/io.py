@@ -59,7 +59,7 @@ class EpochIO:
             print(f"WARNING: Failed to load file: {file.name}")
             return None
 
-    def load_all_epochs(self, directory: Path) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
+    def load_all_epochs(self, directory: Path, marker: str = '_epoch') -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """
         Load all epoch files in `directory` matching the filename convention.
         Returns: {subject: {condition: [1: epoch_tensor1, ...]}}
@@ -70,7 +70,7 @@ class EpochIO:
             return epochs
 
         for file in directory.glob(f"*{self.ext}"):
-            pos, id, subject, condition = io_utils.vars_from_filename(file.stem, marker="_epoch")
+            pos, id, subject, condition = io_utils.vars_from_filename(file.stem, marker=marker)
 
             # load tensor
             try:

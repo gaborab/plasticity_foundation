@@ -139,7 +139,7 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
             band_pred = y_pred[:, band_indices, :].flatten()
         else:
             print("WARNING: Expected 2D or 3D arrays for y_true and y_pred when calculating bandwise metrics, but got arrays with shape:", y_true.shape)
-            return {}, {}
+            return None, None, None, None, None, None, None
         r2 = r2_score(band_true, band_pred)
         mae = np.mean(np.abs(band_true - band_pred))
         r2_bandwise[name] = r2
@@ -196,7 +196,7 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
 
         ch_metrics.signal_volatility = signal_channel_stds[i]
         ch_metrics.recon_volatility = recon_channel_stds[i]
-        ch_metrics.nmae = ch_metrics.mae / signal_channel_stds[i]
+        ch_metrics.nmae = ch_metrics.mae / (signal_channel_stds[i] + eps)
 
         ch_metrics.signal_mean = np.mean(trial_target[i]).item()
         ch_metrics.recon_mean = np.mean(trial_output[i]).item()

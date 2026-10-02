@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 
 from core import settings
-from core.io_models import Trial, Metrics
+from core.io_models import Trial
 from scipy.stats import sem
 from numpy import mean, std
 from collections import defaultdict
