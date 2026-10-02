@@ -5,7 +5,7 @@ import numpy as np
 from core import settings
 from core.io_models import Trial
 from scipy.stats import sem
-from numpy import mean, std
+import numpy as np
 from collections import defaultdict
 
 def calc_subjectwise_channel_metric_stats(trial_list: List[Trial], bands: List[str], metric: str,  ch_names: List[str]=None) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
@@ -22,29 +22,48 @@ def calc_subjectwise_channel_metric_stats(trial_list: List[Trial], bands: List[s
         subjectwise_nmae[subject], subjectwise_sem[subject], _ = get_channel_bandwise_metric_stats(trials, metric_name=metric, ch_names=ch_names, bands=bands)
         global_metric_mean, global_metric_sem, _= get_channel_metric_stats(trials, metric_name=metric, ch_names=ch_names)
         for ch in subjectwise_nmae[subject]:
-            subjectwise_nmae[subject][ch]['global'] = global_metric_mean[ch]
-            subjectwise_sem[subject][ch]['global'] = global_metric_sem[ch]
+            subjectwise_nmae[subject][ch]['all bands'] = global_metric_mean[ch]
+            subjectwise_sem[subject][ch]['all bands'] = global_metric_sem[ch]
 
 
     return subjectwise_nmae, subjectwise_sem
 
 def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], metric: str) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    Calculates the mean NMAE and SEM for each subject across all trials in trial_list.
-    Returns a dictionary with subject names as keys and bandwise mean NMAE including global values as values.
+    Calculates the mean metric and SEM for each subject across all trials in trial_list.
+    Returns a dictionary with subject names as keys and bandwise mean metric including global values as values.
     """
-    subjectwise_nmae = {}
+    subjectwise_metric = {}
     subjectwise_sem = {}
 
     trials_by_subject = _group_by(trial_list, 'subject')
 
     for subject, trials in trials_by_subject.items():
-        subjectwise_nmae[subject], subjectwise_sem[subject], _ = get_bandwise_metric_stats(trials, metric_name=metric, bands=bands)
-        subjectwise_nmae[subject]['global'], subjectwise_sem[subject]['global'], _ = get_metric_stats(trials, metric_name=metric)
+        subjectwise_metric[subject], subjectwise_sem[subject], _ = get_bandwise_metric_stats(trials, metric_name=metric, bands=bands)
+        subjectwise_metric[subject]['all bands'], subjectwise_sem[subject]['all bands'], _ = get_metric_stats(trials, metric_name=metric)
 
 
-    return subjectwise_nmae, subjectwise_sem
+    return subjectwise_metric, subjectwise_sem
 
+
+
+def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metric: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Calculates metric mean for each subject, then calculates the mean and sem of those means.
+    Returns a dictionary with bandwise metric means and sems and global metric mean and sem.
+    """
+    by_subject_means, _ = calc_subjectwise_metric_stats(trial_list, bands, metric)
+    band_means = {}
+    band_sems = {}
+    for subj in by_subject_means.keys():
+        for b, mean in by_subject_means[subj].items():
+            band_means.setdefault(b, []).append(mean)
+
+    for b, means in band_means.items():
+        band_means[b] = np.mean(means)
+        band_sems[b] = sem(means)
+
+    return band_means, band_sems
 
 def calc_channel_glass_delta(ch_nmaes_b: Dict[str, float], ch_nmaes_p: Dict[str, float], ch_stds: Dict[str, float]) -> List[float]:
     """
@@ -147,9 +166,9 @@ def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names
         if len(vals) == 0:
             print(f"WARNING: No values found for channel {ch_name} for metric {metric_name}. This channel will be skipped in the averaging.")
             del channel_values[ch_name]
-        ch_means[ch_name] = mean(vals)
-        ch_sems[ch_name] = sem(vals, ddof=0)
-        ch_stds[ch_name] = std(vals, ddof=0)
+        ch_means[ch_name] = np.mean(vals)
+        ch_sems[ch_name] = sem(vals)
+        ch_stds[ch_name] = np.std(vals)
     return ch_means, ch_sems, ch_stds
 
 
@@ -165,15 +184,17 @@ def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str,
         if len(vals) == 0:
             print(f"WARNING: No values found for channel {ch_name} for metric {metric_name}")
             continue
-        ch_means[ch_name] = {b: mean(band_vals) for b, band_vals in vals.items()}
-        ch_sems[ch_name] = {b: sem(band_vals, ddof=0) for b, band_vals in vals.items()}
-        ch_stds[ch_name] = {b: std(band_vals, ddof=0) for b, band_vals in vals.items()}
+        ch_means[ch_name] = {b: np.mean(band_vals) for b, band_vals in vals.items()}
+        ch_sems[ch_name] = {b: sem(band_vals) for b, band_vals in vals.items()}
+        ch_stds[ch_name] = {b: np.std(band_vals) for b, band_vals in vals.items()}
     return ch_means, ch_sems, ch_stds
 
 
 def get_metric_stats(trial_list: List[Trial], metric_name: str) -> Tuple[float, float, float]:
+    if "bandwise" in metric_name:
+        metric_name = metric_name.replace("_bandwise", "")
     values = extract_metric(trial_list, metric_name)
-    return mean(values), sem(values, ddof=0), std(values, ddof=0)
+    return np.mean(values), sem(values), np.std(values)
 
 
 def get_bandwise_metric_stats(trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
@@ -186,9 +207,9 @@ def get_bandwise_metric_stats(trial_list: List[Trial], metric_name: str, bands: 
     sems = {}
     stds = {}
     for b, vals in bandwise_values.items():
-        means[b] = mean(vals)
-        sems[b] = sem(vals, ddof=0)
-        stds[b] = std(vals, ddof=0)
+        means[b] = np.mean(vals)
+        sems[b] = sem(vals)
+        stds[b] = np.std(vals)
     return means, sems, stds
 
 def _extract_channel_metric(trial_list: List[Trial], metric_name: str, ch_names: List[str]=None, bands: List[str]=None, bandwise: bool=False) -> Dict[str, Any]:

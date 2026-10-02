@@ -86,7 +86,7 @@ def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str,
 
 
 def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans,
-                          styling_params, save_dir: Path, freqs, bands=None):
+                          styling_params, save_dir: Path, freqs, model_name: str, an_suffix: str, excl_suffix: str, bands=None):
     """
     Interactive viewer for visualizing single-channel reconstructions across multiple datasets.
     Allows users to select a sample and channel, and view the corresponding reconstruction and metrics.
@@ -142,7 +142,7 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
     def on_save_clicked(b):
         trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_slider.value,
                                                                      channel_slider.value)
-        filepath = save_dir / f"sample_{sample_slider.value}_ch_{channel_slider.value}.png"
+        filepath = save_dir / f"{model_name}_sample_{sample_slider.value}_ch_{channel_slider.value}_{an_suffix}_{excl_suffix}.png"
         with save_message:
             # Clear previous save messages
             save_message.clear_output()
@@ -317,7 +317,7 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
 
 def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], title: str, single_channel=False,
                      ax=None, fig=None, sems: Optional[List[List[Any]]] = None, y_label="Normalized MAE (NMAE)",
-                     ylim=None):
+                     ylim=None, n_text: str=None):
     x = np.arange(len(x_text))
     is_standalone = ax is None
     if is_standalone:
@@ -346,6 +346,9 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
     ax.set_ylabel(y_label)
     if ylim is not None:
         ax.set_ylim(ylim)
+
+    if n_text is not None:
+        title+= f" ({n_text})"
     ax.set_title(title)
     ax.legend()
 
