@@ -3,32 +3,202 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 
 from core import settings
-from core.io_models import Trial
+from core.io_models import Trial, Metrics
 from scipy.stats import sem
 import numpy as np
 from collections import defaultdict
 
-def calc_subjectwise_channel_metric_stats(trial_list: List[Trial], bands: List[str], metric: str,  ch_names: List[str]=None) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+ALL_BANDS = "all bands"
+
+def calc_subject_adjusted_metric(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, float]]:
     """
-    Calculates the mean NMAE and SEM for each subject across all trials in trial_list.
-    Returns a dictionary with subject names as keys and channel-wise mean NMAE including global values as values.
+    Calculates volatility-adjusted subject means of metric_name for the whole tensor (every band and "all bands").
+    Per band, one line is fitted on the subjects' metric change (post - baseline) against their volatility change, see _adjust_subject_means.
+    Only subjects with both sessions are used and returned.
+    Returns:
+        baseline subject means {subject: {band: value}} (unadjusted, the baseline is the reference),
+        adjusted post-patching subject means {subject: {band: value}},
+        fitted slopes {band: slope}.
     """
-    subjectwise_nmae = {}
+    b_metric_means, _ = calc_subjectwise_metric_stats(b_trial_list, bands, metric_name)
+    p_metric_means, _ = calc_subjectwise_metric_stats(p_trial_list, bands, metric_name)
+    b_vol_means, _ = calc_subjectwise_metric_stats(b_trial_list, bands, 'signal_volatility')
+    p_vol_means, _ = calc_subjectwise_metric_stats(p_trial_list, bands, 'signal_volatility')
+
+    return _adjust_subject_means(b_metric_means, p_metric_means, b_vol_means, p_vol_means)
+
+
+def calc_subject_adjusted_channel_metric(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, Dict[str, Dict[str, float]]], Dict[str, Dict[str, Dict[str, float]]], Dict[str, Dict[str, float]]]:
+    """
+    Calculates volatility-adjusted subject means of metric_name for every channel separately (every band and "all bands").
+    Every channel gets its own fit of the subjects' metric change (post - baseline) against their volatility change, see _adjust_subject_means.
+    Only subjects with both sessions are used and returned.
+    Returns:
+        baseline subject means {channel: {subject: {band: value}}} (unadjusted, the baseline is the reference),
+        adjusted post-patching subject means {channel: {subject: {band: value}}},
+        fitted slopes {channel: {band: slope}}.
+    """
+    b_metric_means, _ = calc_subjectwise_channel_metric_stats(b_trial_list, bands, metric_name, group_by='channel')
+    p_metric_means, _ = calc_subjectwise_channel_metric_stats(p_trial_list, bands, metric_name, group_by='channel')
+    b_vol_means, _ = calc_subjectwise_channel_metric_stats(b_trial_list, bands, 'signal_volatility', group_by='channel')
+    p_vol_means, _ = calc_subjectwise_channel_metric_stats(p_trial_list, bands, 'signal_volatility', group_by='channel')
+
+    b_means, p_adjusted, slopes = {}, {}, {}
+    for ch in b_metric_means.keys():
+        b_means[ch], p_adjusted[ch], slopes[ch] = _adjust_subject_means(b_metric_means[ch], p_metric_means[ch], b_vol_means[ch], p_vol_means[ch])
+
+    return b_means, p_adjusted, slopes
+
+def _adjust_subject_means(b_metric_means: Dict[str, Dict[str, float]], p_metric_means: Dict[str, Dict[str, float]],
+                          b_vol_means: Dict[str, Dict[str, float]], p_vol_means: Dict[str, Dict[str, float]]) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, float]]:
+    """
+    Expects subject means as {subject: {band: value}} for the metric and the volatility of both sessions.
+    For every band, one line is fitted on the subjects' metric change (post - baseline) against their volatility change.
+    Adjusted post-patching mean = post-patching mean - slope * volatility change, i.e. the post-patching value at the subject's baseline volatility.
+    Only subjects with both sessions are used and returned.
+    Returns the baseline means, the adjusted post-patching means and the slopes per band.
+    """
+    subjects = [s for s in b_metric_means if s in p_metric_means]
+    band_keys = list(b_metric_means[subjects[0]].keys())
+    delta_vols = {s: {b: p_vol_means[s][b] - b_vol_means[s][b] for b in band_keys} for s in subjects}
+    delta_metrics = {s: {b: p_metric_means[s][b] - b_metric_means[s][b] for b in band_keys} for s in subjects}
+
+    slopes = {}
+    for b in band_keys:
+        vol_changes = [delta_vols[s][b] for s in subjects]
+        metric_changes = [delta_metrics[s][b] for s in subjects]
+        slopes[b] = float(np.polyfit(vol_changes, metric_changes, 1)[0])
+
+    # filter baseline means for subjects that are in both sessions (adjustment not applied to baseline)
+    b_means = {s: {b: b_metric_means[s][b] for b in band_keys} for s in subjects}
+    # calculate adjusted post-patching means for subjects that are in both sessions
+    p_adjusted = {s: {b: p_metric_means[s][b] - slopes[b] * delta_vols[s][b] for b in band_keys} for s in subjects}
+    return b_means, p_adjusted, slopes
+
+
+def fill_corrected_maes(b_trial_list: List[Trial], p_trial_list: List[Trial], bands: List[str]) -> Tuple[Dict[str, float], Dict[str, Dict[str,float]]]:
+    """
+    Fills in the corrected_mae and corrected_mae_bandwise fields of the global metrics and of every channel's metrics for each trial in b_trial_list and p_trial_list.
+    The whole tensor and every channel are corrected separately: volatility and MAE are centered within each subject and session,
+    then one line per band (and for all bands) is fitted on the centered trials of all subjects.
+    Corrected MAE is calculated as: MAE - slope * (signal_volatility - mean_baseline_volatility).
+    Returns the global slopes {band: slope} and the channel slopes {channel: {band: slope}}, with "all bands" included as a band.
+    """
+    # merge all bands with rest of the individual bands
+    keys = [ALL_BANDS, *bands]
+    b_trials_by_subject = _group_by(b_trial_list, 'subject')
+    p_trials_by_subject = _group_by(p_trial_list, 'subject')
+
+    session_trial_groups = []  # one list of trials per subject and session, only subjects with both sessions
+    # create groups of trials for each subject and session, only subjects with both sessions are included
+    for subject in b_trials_by_subject.keys():
+        if subject not in p_trials_by_subject:
+            print(
+                f"WARNING: Subject {subject} has baseline trials but no post-patching trials. Skipping it when fitting the slopes.")
+            continue
+        session_trial_groups.append(b_trials_by_subject[subject])
+        session_trial_groups.append(p_trials_by_subject[subject])
+    all_trials = [*b_trial_list, *p_trial_list]
+
+    # whole tensor
+    all_channel_slopes = _fill_corrected_metrics(
+        session_groups=[[t.metrics for t in trials] for trials in session_trial_groups],
+        baseline_metrics=[t.metrics for t in b_trial_list],
+        all_metrics=[t.metrics for t in all_trials],
+        band_keys=keys)
+
+    # per-channel
+    channel_slopes = {}
+    for ch in b_trial_list[0].channel_metrics.keys():
+        # same function call with channel metrics instead of whole tensor metrics
+        channel_slopes[ch] = _fill_corrected_metrics(
+            session_groups=[[t.channel_metrics[ch] for t in trials] for trials in session_trial_groups],
+            baseline_metrics=[t.channel_metrics[ch] for t in b_trial_list],
+            all_metrics=[t.channel_metrics[ch] for t in all_trials],
+            band_keys=keys)
+
+    return all_channel_slopes, channel_slopes
+
+
+def _fill_corrected_metrics(session_groups: List[List[Metrics]], baseline_metrics: List[Metrics], all_metrics: List[Metrics], band_keys: List[str]) -> Dict[str, float]:
+    """
+        Fits one slope per key and fills in corrected_mae / corrected_mae_bandwise for one signal (the whole tensor or one channel).
+        session_groups: metrics of one subject and session per list, volatility and MAE are centered within each list before fitting.
+        baseline_metrics: metrics of all baseline trials, their mean volatility is the reference of the correction.
+        all_metrics: metrics of all baseline and post-patching trials, these get corrected.
+        Returns the fitted slopes with keys as keys.
+    """
+    # one slope per band, then correct every trial relative to the mean baseline volatility
+    slopes = {}
+
+    # get one slope per band by fitting a line to the centered volatility and MAE of all trials across all subjects
+    for k in band_keys:
+        centered_vols, centered_maes = [], []
+        # center volatility and MAE within each session group (subject + session)
+        for group in session_groups:
+            centered_vols.extend(_center([_band_value(m, 'signal_volatility', k) for m in group]))
+            centered_maes.extend(_center([_band_value(m, 'mae', k) for m in group]))
+        slopes[k] = float(np.polyfit(centered_vols, centered_maes, 1)[0])
+
+    # correct every trial's MAE relative to the mean baseline volatility
+    for m in all_metrics:
+        m.corrected_mae_bandwise = {}
+    for k in band_keys:
+        b_mean_volatility = float(np.mean([_band_value(m, 'signal_volatility', k) for m in baseline_metrics]))
+        for m in all_metrics:
+            corrected = _band_value(m, 'mae', k) - slopes[k] * (
+                        _band_value(m, 'signal_volatility', k) - b_mean_volatility)
+            if k == ALL_BANDS:
+                m.corrected_mae = corrected
+            else:
+                m.corrected_mae_bandwise[k] = corrected
+    return slopes
+
+
+def _band_value(metrics: Metrics, metric_name: str, band: str) -> float:
+    """Returns the global value of metric_name for "all bands", otherwise its band-wise value for band."""
+    return getattr(metrics, metric_name) if band == ALL_BANDS else getattr(metrics, f"{metric_name}_bandwise")[band]
+
+
+def _center(values: List[float]) -> List[float]:
+    """Subtracts the mean of values from each value."""
+    mean_value = np.mean(values)
+    return [value - mean_value for value in values]
+
+def calc_subjectwise_channel_metric_stats(trial_list: List[Trial], bands: List[str], metric: str,  ch_names: List[str]=None, group_by: str = 'subject') -> Tuple[Dict[str, Dict[str, Dict[str, float]]], Dict[str, Dict[str, Dict[str, float]]]]:
+    """
+    Calculates the mean metric and SEM for each subject across all trials in trial_list.
+    Returns a dictionary with subject names as keys and channel-wise mean metric including global(all bands) values as values.
+    """
+    subjectwise_metric = {}
     subjectwise_sem = {}
 
     trials_by_subject = _group_by(trial_list, 'subject')
 
     for subject, trials in trials_by_subject.items():
-        subjectwise_nmae[subject], subjectwise_sem[subject], _ = get_channel_bandwise_metric_stats(trials, metric_name=metric, ch_names=ch_names, bands=bands)
+        subjectwise_metric[subject], subjectwise_sem[subject], _ = get_channel_bandwise_metric_stats(trials, metric_name=metric, ch_names=ch_names, bands=bands)
         global_metric_mean, global_metric_sem, _= get_channel_metric_stats(trials, metric_name=metric, ch_names=ch_names)
-        for ch in subjectwise_nmae[subject]:
-            subjectwise_nmae[subject][ch]['all bands'] = global_metric_mean[ch]
+        for ch in subjectwise_metric[subject]:
+            subjectwise_metric[subject][ch]['all bands'] = global_metric_mean[ch]
             subjectwise_sem[subject][ch]['all bands'] = global_metric_sem[ch]
 
+    if group_by == 'channel':
+        # Reorganize the data to be grouped by channel instead of subject
+        by_channel_metric = {}
+        by_channel_sem = {}
+        for subject in subjectwise_metric.keys():
+            for ch in subjectwise_metric[subject].keys():
+                by_channel_metric.setdefault(ch, {})
+                by_channel_sem.setdefault(ch, {})
+                by_channel_metric[ch][subject] = subjectwise_metric[subject][ch]
+                by_channel_sem[ch][subject] = subjectwise_sem[subject][ch]
 
-    return subjectwise_nmae, subjectwise_sem
+        return by_channel_metric, by_channel_sem
 
-def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], metric: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+
+    return subjectwise_metric, subjectwise_sem
+
+def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], metric: str) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
     """
     Calculates the mean metric and SEM for each subject across all trials in trial_list.
     Returns a dictionary with subject names as keys and bandwise mean metric including global values as values.
@@ -47,12 +217,12 @@ def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], met
 
 
 
-def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metric: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metric_name: str) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
     Calculates metric mean for each subject, then calculates the mean and sem of those means.
     Returns a dictionary with bandwise metric means and sems and global metric mean and sem.
     """
-    by_subject_means, _ = calc_subjectwise_metric_stats(trial_list, bands, metric)
+    by_subject_means, _ = calc_subjectwise_metric_stats(trial_list, bands, metric_name)
     band_means = {}
     band_sems = {}
     for subj in by_subject_means.keys():

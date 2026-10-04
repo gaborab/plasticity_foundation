@@ -526,10 +526,12 @@ baseline_reconstruction.h5   /   postpatch_reconstruction.h5
         └── {id}/                      e.g. 17  (HDF5 key, i.e. a string)
             ├── target   (23, 50, 200) float32, gzip   z-scored dB wavelet target
             ├── output   (23, 50, 200) float32, gzip   reconstruction
-            └── attrs:
-                ├── metrics_json           trial-level Metrics as JSON
-                └── channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
+            └── attrs (one pair per time window):
+                ├── {window}_metrics_json           trial-level Metrics as JSON
+                └── {window}_channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
 ```
+
+`{window}` is every key of `METRIC_WINDOWS` in `core/settings.py`: `full` (`TIME_WINDOW`, −0.2–0.8 s), `analysis` (`ANALYSIS_WINDOW`, 0–0.4 s), `button` (0.4–0.8 s) and `reference` (−0.2–0 s). For each window, `run_reconstruction` crops target and output with `cut_to_timewindow` and computes the metrics on the crop. The crops are *not* re-normalised: only the full window is z-scored. Files written before the window metrics were added only contain `metrics_json` / `channel_metrics_json`, and the current `Trial` class can't read them, so re-run inference for such models.
 
 (In `autoencoder` mode, `target`/`output` are (23, 200) µV and there are no band-wise metrics.)
 
@@ -543,11 +545,20 @@ Metrics are computed per trial, **in the target space**, i.e. the per-trial z-sc
 | `mae` | mean \|target − output\| | same, within the channel |
 | `signal_volatility` | mean over (c, f) of `σ_sig` | mean over f of `σ_sig(c, ·)` |
 | `recon_volatility` | same for `σ_rec` | same for `σ_rec` |
-| `nmae` | `mae / signal_volatility` (+ EPS) | `mae / signal_volatility` of the channel |
-| `signal_mean`, `recon_mean` | mean of target / output | ⚠️ currently also the *whole-trial* mean |
+| `nmae` | `mae / signal_volatility` (+ EPS) | `mae / (signal_volatility + EPS)` of the channel |
+| `signal_mean`, `recon_mean` | mean of target / output | mean of the channel's target / output |
+| `corrected_mae` | volatility-corrected MAE, **not stored**: filled in at analysis time by `plot_data_processing.fill_corrected_maes` (see below) | same, corrected per channel |
 | `*_bandwise` | a dict `{band: value}` of the metrics above, restricted to the frequencies in each `FREQ_BANDS` band. Band volatility = mean of the (channel-averaged) `σ` over the band's frequencies | same, within the channel |
 
-**NMAE** (normalised MAE) is the primary plasticity metric. It expresses the reconstruction error relative to the temporal variability of the signal, so trials, channels and bands with different dynamics become comparable.
+**NMAE** (normalised MAE) expresses the reconstruction error relative to the temporal variability of the signal, so trials, channels and bands with different dynamics become comparable.
+
+**Volatility-corrected MAE.** MAE grows with volatility: a trial whose signal fluctuates more has a larger error, with a within-subject correlation of r ≈ .5–.9 depending on the band. A pre/post change in volatility therefore shows up as a change in MAE, even if reconstruction quality is unchanged. NMAE assumes MAE is *proportional* to volatility, which slightly over-corrects within bands (log–log slopes ≈ 0.8). The corrected MAE estimates the dependence from the data instead, like an ANCOVA:
+
+1. For every band (and all bands), centre volatility and MAE within each subject and session. Neither between-subject differences nor the pre/post shift then enter the fit.
+2. Fit one line through the centred trials of all subjects (baseline + post-patching): slope β.
+3. `corrected_mae = mae − β · (signal_volatility − mean baseline volatility)`: the MAE the trial would have at the average baseline volatility, in MAE units. The baseline mean of `corrected_mae` equals the baseline mean of `mae`.
+
+The whole tensor and every channel are corrected separately, each with its own slopes and reference volatility. `fill_corrected_maes(baseline_trials, postpatch_trials, bands)` writes the values into `trial.metrics` and `trial.channel_metrics[ch]` and returns the slopes (`{band: β}`, `{channel: {band: β}}`). Baseline and post-patching slopes are practically identical (per-subject slope differences: all p > .05), which justifies one shared slope per band. Only subjects with both sessions are used for fitting, but every trial is corrected. Run it once after loading the trials. Re-running it overwrites the values.
 
 #### Reading inference results: `core.io` / `core.io_models`
 
@@ -558,11 +569,13 @@ trials = io.load_inference_trials(settings.INFERENCE_DIR / "my_model" / "1" / "b
 t = trials[0]
 t.subject, t.condition, t.idx          # metadata
 t.target_data, t.recon_data            # np.ndarray, read lazily from HDF5 on every access
-t.metrics.nmae_bandwise["gamma (30-60Hz)"]
-t.channel_metrics["ch_8"].nmae         # O1
+t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # full window
+t.channel_metrics["ch_8"].nmae         # O1, full window
+t.analysis_metrics.mae                 # also: button_metrics, reference_metrics
+t.analysis_channel_metrics["ch_8"].mae # also: button_channel_metrics, reference_channel_metrics
 ```
 
-`Trial` is a lazy view on an open HDF5 group. `metrics` / `channel_metrics` are parsed from the JSON attributes into `Metrics` dataclasses and cached. `load_inference_data` / `extract_data` are legacy loaders for an older HDF5 layout, in which metrics were stored as groups.
+`Trial` is a lazy view on an open HDF5 group. `metrics` / `channel_metrics` (full window) and the `{window}_metrics` / `{window}_channel_metrics` fields are parsed from the JSON attributes into `Metrics` dataclasses on first access and cached. `load_inference_trials` also takes `exclude_subjects`. `load_inference_data` / `extract_data` are legacy loaders for an older HDF5 layout, in which metrics were stored as groups.
 
 ---
 
@@ -602,23 +615,38 @@ Requires `run_inference.py --postpatch` outputs. The configuration cell sets:
 - `conditions`: stimulus types, e.g. `["global"]`
 - `trial_ids`: **strings**, or `None`
 - `bands`: `None` for all bands in `FREQ_BANDS`
+- `exclude_left_patched`: excludes the left-eye-dominant subjects of `eye_dominance.csv` (patched on the left eye)
+- `exclude_right_patched_lefties`: excludes the left-eye-dominant subjects of `rightpatch_eye_dominance.csv` (from STMD35 on, every subject was patched on the right eye)
+- `exclude_button_press`: excludes subjects of the button-press paradigm (before `NO_PRESS_FROM_SUBJECT`)
+- `analysis_window`: `full`, `analysis`, `button` or `reference`. ⚠️ Currently only used in the file names, the plots always use the full-window metrics (see [Known issues](#known-issues--caveats))
 
-Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` lists of `Trial`s. Unless stated otherwise, statistics are **mean ± SEM over trials**.
+The subjects in `settings.EXCLUDED_SUBJECTS` are always excluded. Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` lists of `Trial`s, and `fill_corrected_maes` adds the volatility-corrected MAE right after loading (it prints the global slopes and the range of the channel slopes per band).
 
-| Section | What it shows | Save dir (`outputs/plots/inference_plots/…`) |
+**Statistics.** Bar charts use **subject means**: every subject's trials are averaged per session first, then the mean and SEM (`ddof=1`) over subjects are shown. Comparisons of the two sessions use the paired subject differences (post − baseline). The topomaps, distributions and correlation plots work on pooled trials.
+
+**Saving.** Every figure is saved under `outputs/plots/inference_plots/{model_name}/{conditions}/{plot type}/`, so file names only carry the window and exclusion suffixes (e.g. `error_window_full_excl_left.png`). With `conditions = None`, the folder is called `all_conditions`.
+
+| Section | What it shows | Plot type folder |
 |---|---|---|
-| Band-wise error comparison | Grouped bars of band-wise NMAE, baseline vs post | `bandwise_e_comparison/` |
-| Band-wise R² comparison | Same for band-wise R² | `bandwise_e_comparison/` |
-| Single channel comparison viewer | Sliders for sample and channel. True / reconstructed / error heatmaps for baseline and post rows, plus a band-wise NMAE bar chart | `single_channel_comparison/{conditions}/` |
-| Topomaps of Glass's Δ | Per channel: `Δ = (mean NMAE_post − mean NMAE_base) / SD_base` over trials, for the global NMAE and each band. MNE `standard_1005` montage, symmetric `RdBu_r` scale. **Positive = worse reconstruction after patching** | `bandwise_topomaps/` |
+| Band-wise error comparison | Grouped bars of band-wise + global NMAE, baseline vs post, subject means ± SEM | `bandwise_e_comparison/` |
+| Band-wise R² comparison | Same for R² | `bandwise_e_comparison/` |
+| Band-wise MAE comparison | Same for MAE | `bandwise_e_mae_comparison/` |
+| Single channel comparison viewer | Sliders for sample and channel. True / reconstructed / error heatmaps for baseline and post rows, plus a band-wise NMAE bar chart | `single_channel_comparison/` |
+| Topomaps of Glass's Δ (NMAE, MAE) | Per channel: `Δ = (mean_post − mean_base) / SD_base` over **pooled trials**, for the global value and each band. MNE `standard_1005` montage, symmetric `RdBu_r` scale per panel. **Positive = worse reconstruction after patching**. The MAE version mostly reflects the volatility change, use NMAE or corrected MAE | `bandwise_topomaps/` (`nmae_topomaps_*`, `mae_topomaps_*`) |
 | *(placeholder)* | Trials where post-patching NMAE < baseline (commented out) | — |
-| Band-wise volatility | Mean `signal_volatility` (temporal SD of the z-scored band power) per band + global | `bandwise_amplitude/` |
-| Subject-wise gamma NMAE | Per-subject γ-band NMAE, baseline vs post | `subjectwise_e_comparison/` |
-| Channel-wise NMAE for one subject | Per-channel γ-band NMAE (subject hard-coded to `STMD32`) | `channelwise_e_comparison/` |
+| Band-wise volatility | `signal_volatility` (temporal SD of the z-scored band power) per band + global, subject means ± SEM | `bandwise_volatility/` |
+| Subject-wise gamma NMAE | Per-subject γ-band NMAE, baseline vs post, ± SEM over that subject's trials | `subjectwise_e_comparison/` |
 | NMAE distribution | Overlaid histograms (40 bins) of trial NMAE with means | `nmae_dist_comparison/` |
 | Band-wise NMAE distributions | Same, one panel per band | `nmae_dist_comparison/` |
-| Volatility ↔ NMAE correlation | Scatter per band + global, with a linear fit and Pearson *r*, for baseline and post-patching separately | `correlation_plots/` |
-| Scratch cells (end) | Load/plot a single wavelet target or epoch file. Wavelet sanity check on a synthetic 2 Hz sine | — |
+| Volatility ↔ error correlation | Scatter of trial volatility vs NMAE and vs MAE (two figures, `correlation_plot`), baseline and post-patching trials pooled, one panel per band + global with a linear fit, slope *m* and Pearson *r* (no p-value: pooled trials are not independent) | `correlation_plots/` (`nmae_correlation_*`, `mae_correlation_*`) |
+| Volatility vs MAE, NMAE and corrected MAE | Rows: bands + global. Columns: MAE, NMAE, corrected MAE against volatility (own y scale each). Pooled trials, baseline and post-patching in separate colours with their own fitted line, slope and *r* | `correlation_plots/` (`mae_correction_correlation_*`) |
+| Change of MAE, NMAE and corrected MAE | Bars of the mean subject difference (post − baseline) ± SEM per band + global, in % of each metric's mean baseline value so the metrics are comparable, with N. The cell also prints the paired t-test p-values | `bandwise_e_mae_comparison/` (`mae_correction_difference_*`) |
+| Subject changes vs volatility change (subject-level adjustment) | One figure per metric (MAE, NMAE, corrected MAE). One point per subject: left the raw change (post − baseline) against the volatility change with the fitted line, right the adjusted change. The right panel is flat by construction | `subject_adjustment/` (`{metric}_subject_adjustment_*`) |
+| Change before and after the subject-level adjustment | Two panels, three bars per band (MAE, NMAE, corrected MAE), in % of baseline, mean ± SEM of the subject differences with a paired t-test. Left: raw subject means (reuses `raw_changes` from the previous bar cell). Right: adjusted subject means from `calc_subject_adjusted_metric`; this test treats the fitted slope as known, so its p-values are marginally optimistic. The cell prints both tables | `subject_adjustment/` (`subject_adjustment_difference_*`) |
+
+**Subject-level volatility adjustment (recommended).** The pre/post comparison runs on subject means, so the volatility dependence is removed at that level: per band, the subjects' metric changes (post − baseline) are regressed on their volatility changes. The intercept is the change at zero volatility change, i.e. the volatility-adjusted effect. Adjusted subject values (`adjusted post = post − slope · Δvolatility`, baseline unchanged) come from `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric`, and their mean difference equals the intercept. After the adjustment, MAE and NMAE agree in every band (on `huber_1001_all_data`, global condition: delta ≈ +2.85 %, theta ≈ +1.7 %, other bands n.s.). Adjusted corrected MAE is identical to adjusted MAE by construction (the trial-level correction is linear in volatility, so the subject-level slope absorbs it); the agreement with NMAE is the independent check.
+
+In the before/after plot, the corrected MAE is flat in delta, beta, gamma and all bands. Theta and alpha keep a small slope (m ≈ 0.1–0.16). Two reasons: the pooled scatter also contains differences between subjects, and the within-subject slope is attenuated, because a single trial's volatility is a noisy estimate. At the subject level (each subject's change of a metric vs. their change of volatility), corrected MAE still follows volatility in theta–gamma (r ≈ .35–.55) and NMAE in all bands (r ≈ .44). Neither metric is fully volatility-free at the level of the paired comparison. Regressing the subject changes on the volatility change and reading off the intercept (the change at zero volatility change) gives the same result for all three metrics (delta ≈ +3.2 %, theta ≈ +1.8 %, other bands n.s.), which is the subject-level adjustment described above.
 
 #### `preproc_plotting.ipynb`: preprocessing QC plots
 
@@ -635,10 +663,10 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 | `datasets.py` | `FinetuneDataset` (loads samples, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter` (subject-wise k-fold split) |
 | `utils.py` | `calc_wavelet` (padded CWT magnitude), `cut_to_timewindow` (crop by seconds), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
 | `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `load_inference_trials`. `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` / `load_inference_data` / `extract_data` |
-| `io_models.py` | `Metrics` dataclass (all metric fields, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`, cached `metrics`, `channel_metrics`) |
+| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`, cached `metrics` / `channel_metrics` and `{analysis,button,reference}_metrics` / `_channel_metrics`) |
 | `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
-| `plot_data_processing.py` | Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM, SD, all with `ddof=0`). `calc_subjectwise_metric_stats` and `calc_subjectwise_channel_metric_stats`. `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta`. `rename_chans_to_mne`. Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
-| `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `save_button`, `save_heatmap`, `save_line_plot` |
+| `plot_data_processing.py` | Volatility correction: `fill_corrected_maes` (see [Metric definitions](#metric-definitions-coreutilsget_inference_metrics--calculate_bandwise_metrics)). Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM with `ddof=1`, SD with `ddof=0`). Subject level: `calc_subjectwise_metric_stats`, `calc_subjectwise_channel_metric_stats` (`group_by='channel'` returns `{channel: {subject: {band}}}`), `get_subjectwise_metric_mean` (mean ± SEM of subject means). Subject-level volatility adjustment: `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric` (baseline and adjusted post-patching subject means, slopes). `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta`. `rename_chans_to_mne`. Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
+| `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `session_correlation_plot` (bands × metrics grid, one colour and fitted line per session, adjustable point size), `save_button`, `save_heatmap`, `save_line_plot`. `plot_grouped_bar` places the bars of a group side by side for any number of series |
 
 ---
 
@@ -727,11 +755,12 @@ Only local autoreject was ported.
 - Inference and the notebooks rebuild the folds from the *current* contents of `FINETUNE_EPOCHS_DIR`. The subject order comes from filesystem glob order and is not sorted before seeded shuffling. Adding or removing subjects, or moving the data to another filesystem, can change the splits. Test sets would then no longer match training.
 
 **Inference / metrics**
-- Channel-level `signal_mean` / `recon_mean` hold the whole-trial mean, not the channel mean.
-- In NMAE, `EPS` is added to the ratio (`mae / std + eps`), not to the denominator.
+- In the trial-level and band-wise NMAE, `EPS` is added to the ratio (`mae / std + eps`), not to the denominator. The channel-level NMAE adds it to the denominator.
 - `load_inference_trials` compares `idxs` with HDF5 keys, which are strings. Pass trial ids as strings. The HDF5 file stays open while the returned `Trial` objects are in use.
 
 **Notebooks**
+- `plasticity_plotting.ipynb`: `analysis_window` only changes the file names. All `plot_data_processing` helpers read `trial.metrics` / `trial.channel_metrics` (the full window), and `fill_corrected_maes` corrects the full-window metrics.
+- `plasticity_plotting.ipynb`: the Glass's Δ topomaps still use pooled trials and trial-level SDs, while the bar charts use subject means. A subject-level effect size (paired d_z or Glass's Δ on subject means) and a shared colour scale across panels are not implemented yet.
 - `micro_evaluation.ipynb` calls `calculate_bandwise_metrics` with an outdated signature, so the band-wise MAE table fails in wavelet mode (the error is printed). Its `apply_log = True` default is wrong for current models, and its channel slider allows index 23, which is out of range.
 - `single_channel_viewer` pairs the *i*-th baseline trial with the *i*-th post-patching trial of the loaded lists. These are not matched trials.
 - The scratch cells at the end of `plasticity_plotting.ipynb` call `calc_wavelet` without the new `pad` argument.

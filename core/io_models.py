@@ -26,6 +26,8 @@ class Metrics:
     signal_volatility_bandwise: Dict[str, float] = None
     nmae: float = None
     nmae_bandwise: Dict[str, float] = None
+    corrected_mae: float = None
+    corrected_mae_bandwise: Dict[str, float] = None
     signal_mean: float = None
     signal_mean_bandwise: Dict[str, float] = None
     recon_mean: float = None

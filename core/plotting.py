@@ -44,6 +44,47 @@ def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabe
     plt.show()
 
 
+def session_correlation_plot(x_by_session: Dict[str, Dict[str, List[float]]], y_by_metric: Dict[str, Dict[str, Dict[str, List[float]]]],
+                             xlabel: str, title: str, save_dir: Path, save_name: str, sharey: bool | str = 'row', point_size: float = 8, point_alpha: float = 0.35):
+    """
+    Scatter plots with one row per band and one column per metric, e.g. MAE before and corrected MAE after the volatility correction.
+    Every session gets its own color and its own fitted line, the legend shows the slope (m) and Pearson r per session.
+    x_by_session: {session: {band: x values}}
+    y_by_metric: {metric label: {session: {band: y values}}}, with the same sessions, bands and value order as x_by_session.
+    sharey: passed to plt.subplots, use False when the metrics have different units.
+    point_size, point_alpha: marker size and opacity, e.g. larger and more opaque for one point per subject than for one point per trial.
+    """
+    sessions = list(x_by_session.keys())
+    bands = list(x_by_session[sessions[0]].keys())
+    metrics = list(y_by_metric.keys())
+    colors = ['steelblue', 'salmon', 'lightgreen', 'plum']
+
+    fig, axes = plt.subplots(len(bands), len(metrics), figsize=(6 * len(metrics), 3.6 * len(bands)), sharex='row', sharey=sharey, squeeze=False)
+    for row, band in enumerate(bands):
+        for col, metric in enumerate(metrics):
+            ax = axes[row, col]
+            for i, session in enumerate(sessions):
+                x = np.array(x_by_session[session][band])
+                y = np.array(y_by_metric[metric][session][band])
+                if len(x) != len(y):
+                    raise ValueError(f"x and y of {session}, {metric}, {band} have different lengths.")
+                m, b = np.polyfit(x, y, 1)
+                r = stats.pearsonr(x, y)[0]
+                ax.scatter(x, y, s=point_size, alpha=point_alpha, color=colors[i], zorder=2)
+                xs = np.array([x.min(), x.max()])
+                ax.plot(xs, m * xs + b, color=colors[i], linewidth=2, label=f"{session}: m={m:.3f}, r={r:.2f}", zorder=3)
+            ax.set_title(f"{metric}: {band}", fontsize=12, fontweight='bold')
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(metric)
+            ax.yaxis.grid(True, linestyle='--', alpha=0.7, zorder=0)
+            ax.legend(fontsize=9, loc='upper left')
+
+    fig.suptitle(title, fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.99))
+    save_button(fig, save_dir=save_dir, default_name=save_name)
+    plt.show()
+
+
 def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str, List[float]], title: str,
                         save_dir: Path, save_name: str):
     if not len(pre_nmaes) == len(post_nmaes):
@@ -86,7 +127,7 @@ def distribution_viewer(pre_nmaes: Dict[str, List[float]], post_nmaes: Dict[str,
 
 
 def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], n_chans,
-                          styling_params, save_dir: Path, freqs, model_name: str, an_suffix: str, excl_suffix: str, bands=None):
+                          styling_params, save_dir: Path, freqs, an_suffix: str, excl_suffix: str, bands=None):
     """
     Interactive viewer for visualizing single-channel reconstructions across multiple datasets.
     Allows users to select a sample and channel, and view the corresponding reconstruction and metrics.
@@ -142,7 +183,7 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
     def on_save_clicked(b):
         trial_data_dict, ds_metrics = order_to_channel_viewer_format(dataset_data, dataset_metrics, sample_slider.value,
                                                                      channel_slider.value)
-        filepath = save_dir / f"{model_name}_sample_{sample_slider.value}_ch_{channel_slider.value}_{an_suffix}_{excl_suffix}.png"
+        filepath = save_dir / f"sample_{sample_slider.value}_ch_{channel_slider.value}_{an_suffix}_{excl_suffix}.png"
         with save_message:
             # Clear previous save messages
             save_message.clear_output()
@@ -326,7 +367,7 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
     colors = ['skyblue', 'salmon', 'lightgreen', 'plum', 'lightcoral']  # Add more colors if needed
     for i in range(n):
         group_means = means[i]
-        offset = x - width / 2 + i * width / (n - 1) if n > 1 else x
+        offset = x + (i - (n - 1) / 2) * width  # bars of one group side by side, centered on the tick
         if not single_channel:
             group_sems = sems[i]
             label = labels[i]
