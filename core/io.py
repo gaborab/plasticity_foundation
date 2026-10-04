@@ -223,7 +223,13 @@ def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]],
             ret[item.name] = item[()]
     return ret
 
-def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] = None, exclude_subjects: List[str] = None) -> List[Trial]:
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] = None, exclude_subjects: List[str] = None, window: str = "full") -> List[Trial]:
+    """
+    Loads the trials of an inference HDF5 file as lazy Trial objects, keeping the file open while they are in use.
+    subjects, conditions, idxs: only keep these (None keeps all). idxs are compared with the HDF5 keys, so pass them as strings.
+    exclude_subjects: drop these subjects.
+    window: key of settings.METRIC_WINDOWS, the time window whose metrics trial.metrics / trial.channel_metrics return.
+    """
     print("Loading inference trials...")
     try:
         data = h5py.File(h5file_path, "r")
@@ -246,7 +252,7 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
             for idx, trial_group in cond_group.items():
                 if idxs is not None and idx not in idxs:
                     continue
-                trial = Trial(trial_group, subject, condition, idx)
+                trial = Trial(trial_group, subject, condition, idx, window=window)
                 all_trials.append(trial)
     return all_trials
 

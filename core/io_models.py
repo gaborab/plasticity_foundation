@@ -1,6 +1,8 @@
 from dataclasses import dataclass, fields, asdict
 from functools import cached_property
 from typing import Dict, Any
+
+from core import settings
 from core.io_utils import nested_group_to_dict
 import h5py
 import numpy as np
@@ -44,6 +46,7 @@ def ch_metrics_from_json(ch_json: str) -> Dict[str, Metrics]:
     return ret_metrics
 
 def _metrics_field(window: str, channel: bool = False) -> cached_property:
+    """Returns a cached property that parses the trial-level (or channel-level) metrics of window from the trial's HDF5 attributes."""
     key = f"{window}_channel_metrics_json" if channel else f"{window}_metrics_json"
 
     def getter(self):
@@ -54,10 +57,20 @@ def _metrics_field(window: str, channel: bool = False) -> cached_property:
 
 @dataclass
 class Trial:
+    """
+    Lazy view on one trial of an inference HDF5 file.
+    The metrics of every time window are available as {window}_metrics / {window}_channel_metrics, parsed on first access and cached.
+    metrics / channel_metrics return the metrics of the trial's window, so analyses reading them use the window selected when loading.
+    """
     trial_data: h5py.Group
     subject: str
     condition: str
     idx: int
+    window: str = "full"  # key of settings.METRIC_WINDOWS, selects which stored metrics metrics / channel_metrics return
+
+    def __post_init__(self):
+        if self.window not in settings.METRIC_WINDOWS:
+            raise ValueError(f"Unknown window '{self.window}', expected one of {list(settings.METRIC_WINDOWS)}")
 
     @property
     def target_data(self) -> np.ndarray:
@@ -66,8 +79,18 @@ class Trial:
     def recon_data(self) -> np.ndarray:
         return self.trial_data["output"][()]
 
-    metrics = _metrics_field("full")
-    channel_metrics = _metrics_field("full", channel=True)
+    @property
+    def metrics(self) -> Metrics:
+        """Trial-level metrics of the selected window, the same cached object as {window}_metrics (e.g. analysis_metrics)."""
+        return getattr(self, f"{self.window}_metrics")
+
+    @property
+    def channel_metrics(self) -> Dict[str, Metrics]:
+        """Channel-level metrics {"ch_0": Metrics, ...} of the selected window, the same cached object as {window}_channel_metrics."""
+        return getattr(self, f"{self.window}_channel_metrics")
+
+    full_metrics = _metrics_field("full")
+    full_channel_metrics = _metrics_field("full", channel=True)
     analysis_metrics = _metrics_field("analysis")
     analysis_channel_metrics = _metrics_field("analysis", channel=True)
     button_metrics = _metrics_field("button")

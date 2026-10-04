@@ -565,17 +565,18 @@ The whole tensor and every channel are corrected separately, each with its own s
 ```python
 from core import io, settings
 trials = io.load_inference_trials(settings.INFERENCE_DIR / "my_model" / "1" / "baseline_reconstruction.h5",
-                                  subjects=None, conditions=["global"], idxs=None)   # List[Trial]
+                                  subjects=None, conditions=["global"], idxs=None,
+                                  exclude_subjects=None, window="analysis")   # List[Trial]
 t = trials[0]
-t.subject, t.condition, t.idx          # metadata
+t.subject, t.condition, t.idx, t.window  # metadata
 t.target_data, t.recon_data            # np.ndarray, read lazily from HDF5 on every access
-t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # full window
-t.channel_metrics["ch_8"].nmae         # O1, full window
-t.analysis_metrics.mae                 # also: button_metrics, reference_metrics
-t.analysis_channel_metrics["ch_8"].mae # also: button_channel_metrics, reference_channel_metrics
+t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # selected window (here: analysis)
+t.channel_metrics["ch_8"].nmae         # O1, selected window
+t.full_metrics.mae                     # a specific window, independent of t.window
+t.reference_channel_metrics["ch_8"].mae  # {full,analysis,button,reference}_metrics / _channel_metrics
 ```
 
-`Trial` is a lazy view on an open HDF5 group. `metrics` / `channel_metrics` (full window) and the `{window}_metrics` / `{window}_channel_metrics` fields are parsed from the JSON attributes into `Metrics` dataclasses on first access and cached. `load_inference_trials` also takes `exclude_subjects`. `load_inference_data` / `extract_data` are legacy loaders for an older HDF5 layout, in which metrics were stored as groups.
+`Trial` is a lazy view on an open HDF5 group. Every window's metrics are available as `{window}_metrics` / `{window}_channel_metrics`, parsed from the JSON attributes into `Metrics` dataclasses on first access and cached. `metrics` / `channel_metrics` return the metrics of the trial's `window` (default `"full"`), i.e. the same cached objects as `{window}_metrics` / `{window}_channel_metrics`. All analysis helpers read `metrics` / `channel_metrics`, so the window passed to `load_inference_trials` selects the window of the whole analysis, including the volatility corrections. An unknown window raises a `ValueError` when the trial is created. `load_inference_data` / `extract_data` are legacy loaders for an older HDF5 layout, in which metrics were stored as groups.
 
 ---
 
@@ -618,13 +619,13 @@ Requires `run_inference.py --postpatch` outputs. The configuration cell sets:
 - `exclude_left_patched`: excludes the left-eye-dominant subjects of `eye_dominance.csv` (patched on the left eye)
 - `exclude_right_patched_lefties`: excludes the left-eye-dominant subjects of `rightpatch_eye_dominance.csv` (from STMD35 on, every subject was patched on the right eye)
 - `exclude_button_press`: excludes subjects of the button-press paradigm (before `NO_PRESS_FROM_SUBJECT`)
-- `analysis_window`: `full`, `analysis`, `button` or `reference`. ⚠️ Currently only used in the file names, the plots always use the full-window metrics (see [Known issues](#known-issues--caveats))
+- `time_window`: `full`, `analysis`, `button` or `reference`. Passed to `load_inference_trials`, so every plot, statistic and volatility correction of the notebook uses that window's metrics. It also sets the `window_*` file name suffix
 
 The subjects in `settings.EXCLUDED_SUBJECTS` are always excluded. Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` lists of `Trial`s, and `fill_corrected_maes` adds the volatility-corrected MAE right after loading (it prints the global slopes and the range of the channel slopes per band).
 
 **Statistics.** Bar charts use **subject means**: every subject's trials are averaged per session first, then the mean and SEM (`ddof=1`) over subjects are shown. Comparisons of the two sessions use the paired subject differences (post − baseline). The topomaps, distributions and correlation plots work on pooled trials.
 
-**Saving.** Every figure is saved under `outputs/plots/inference_plots/{model_name}/{conditions}/{plot type}/`, so file names only carry the window and exclusion suffixes (e.g. `error_window_full_excl_left.png`). With `conditions = None`, the folder is called `all_conditions`.
+**Saving.** Every figure is saved under `outputs/plots/inference_plots/{model_name}/{conditions}/{plot type}/`, so file names only carry the window and exclusion suffixes (e.g. `error_window_full_excl_left.png`). Only the full window is z-scored: the sub-windows are slices of it, so their means and volatilities are not normalised, and the 40-sample reference window gives noisier volatility, NMAE and corrections than the 80-sample analysis and button windows. With `conditions = None`, the folder is called `all_conditions`.
 
 | Section | What it shows | Plot type folder |
 |---|---|---|
@@ -662,8 +663,8 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 | `architectures.py` | `BaseMLPWrapper` (LaBraM + MLP head, exposes `get_num_layers` / `no_weight_decay` for the optimiser). `EEGSpectralDecoder` and `EEGAutoencoder` with `forward` (flattened output) and `get_unflattened_output` (per-channel shaped output) |
 | `datasets.py` | `FinetuneDataset` (loads samples, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter` (subject-wise k-fold split) |
 | `utils.py` | `calc_wavelet` (padded CWT magnitude), `cut_to_timewindow` (crop by seconds), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
-| `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `load_inference_trials`. `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` / `load_inference_data` / `extract_data` |
-| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`, cached `metrics` / `channel_metrics` and `{analysis,button,reference}_metrics` / `_channel_metrics`) |
+| `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `load_inference_trials` (with `exclude_subjects` and the time `window` of the returned trials). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` / `load_inference_data` / `extract_data` |
+| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,button,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window) |
 | `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
 | `plot_data_processing.py` | Volatility correction: `fill_corrected_maes` (see [Metric definitions](#metric-definitions-coreutilsget_inference_metrics--calculate_bandwise_metrics)). Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM with `ddof=1`, SD with `ddof=0`). Subject level: `calc_subjectwise_metric_stats`, `calc_subjectwise_channel_metric_stats` (`group_by='channel'` returns `{channel: {subject: {band}}}`), `get_subjectwise_metric_mean` (mean ± SEM of subject means). Subject-level volatility adjustment: `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric` (baseline and adjusted post-patching subject means, slopes). `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta`. `rename_chans_to_mne`. Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
 | `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `session_correlation_plot` (bands × metrics grid, one colour and fitted line per session, adjustable point size), `save_button`, `save_heatmap`, `save_line_plot`. `plot_grouped_bar` places the bars of a group side by side for any number of series |
@@ -759,7 +760,6 @@ Only local autoreject was ported.
 - `load_inference_trials` compares `idxs` with HDF5 keys, which are strings. Pass trial ids as strings. The HDF5 file stays open while the returned `Trial` objects are in use.
 
 **Notebooks**
-- `plasticity_plotting.ipynb`: `analysis_window` only changes the file names. All `plot_data_processing` helpers read `trial.metrics` / `trial.channel_metrics` (the full window), and `fill_corrected_maes` corrects the full-window metrics.
 - `plasticity_plotting.ipynb`: the Glass's Δ topomaps still use pooled trials and trial-level SDs, while the bar charts use subject means. A subject-level effect size (paired d_z or Glass's Δ on subject means) and a shared colour scale across panels are not implemented yet.
 - `micro_evaluation.ipynb` calls `calculate_bandwise_metrics` with an outdated signature, so the band-wise MAE table fails in wavelet mode (the error is printed). Its `apply_log = True` default is wrong for current models, and its channel slider allows index 23, which is out of range.
 - `single_channel_viewer` pairs the *i*-th baseline trial with the *i*-th post-patching trial of the loaded lists. These are not matched trials.
