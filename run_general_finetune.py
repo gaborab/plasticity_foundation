@@ -1,5 +1,6 @@
 import time, datetime
 from collections import OrderedDict
+from pathlib import Path
 
 import torch
 from core import settings
@@ -148,6 +149,9 @@ def main(opts):
         output_dir.mkdir(parents=True, exist_ok=True)
         log_dir = output_dir / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
+        if Path(output_dir / "log.txt").exists():
+            print(f"WARNING: log.txt already exists in {output_dir}. Deleting old log.txt...")
+            Path(output_dir / "log.txt").unlink()
 
         print(f"Initializing model with {opts.target_mode} head...")
         # initialize LaBraM
