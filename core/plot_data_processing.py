@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 
+import mne
 import numpy as np
 
 from core import settings
@@ -235,6 +236,47 @@ def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metri
 
     return band_means, band_sems
 
+def calc_subjectwise_channel_d(b_metrics: Dict[str, Dict[str, Dict[str, float]]], p_metrics: Dict[str, Dict[str, Dict[str, float]]], group_by_bands: bool, ddof: int = 1, effect_size: str = "d_z") -> Dict[str, Dict[str, float]]:
+    """
+    Calculates a subject-level effect size of the change after patching for every channel and band, with d = the subjects' differences (post - baseline):
+        "d_z":   Cohen's d_z = mean(d) / sd(d), the paired effect size (consistency of the change across subjects)
+        "glass": Glass's delta = mean(d) / sd(baseline subject means), the change relative to how much subjects differ at baseline
+    Expects subject means as {channel: {subject: {band: value}}} for both sessions, e.g. the outputs of calc_subject_adjusted_channel_metric
+    or of calc_subjectwise_channel_metric_stats(..., group_by='channel'). Only subjects with both sessions are used.
+    ddof: delta degrees of freedom of the standard deviation in the denominator. 1 (default) gives the sample SD, which for d_z matches the paired t-test (d_z = t / sqrt(N)).
+    Returns {channel: {band: effect size}}, or {band: {channel: effect size}} if group_by_bands is True (one dict per topomap).
+    """
+    if effect_size not in ("d_z", "glass"):
+        raise ValueError(f"Unknown effect_size '{effect_size}', expected 'd_z' or 'glass'")
+
+    channel_d = {}
+    for ch in b_metrics.keys():
+        bw_subject_diffs = {}
+        bw_baselines = {}
+        for subject in b_metrics[ch].keys():
+            if subject not in p_metrics[ch]:
+                continue
+            for band in b_metrics[ch][subject].keys():
+                bw_subject_diffs.setdefault(band, [])
+                bw_baselines.setdefault(band, [])
+                subj_diff = p_metrics[ch][subject][band] - b_metrics[ch][subject][band]
+                bw_subject_diffs[band].append(subj_diff)
+                bw_baselines[band].append(b_metrics[ch][subject][band])
+        denominators = bw_subject_diffs if effect_size == "d_z" else bw_baselines
+        bw_d = {band: float(np.mean(diffs) / np.std(denominators[band], ddof=ddof)) for band, diffs in bw_subject_diffs.items()}
+        channel_d[ch] = bw_d
+
+    if group_by_bands:
+        band_d = {}
+        for ch, bw_d in channel_d.items():
+            for band, d in bw_d.items():
+                band_d.setdefault(band, {})
+                band_d[band][ch] = d
+        return band_d
+
+    return channel_d
+
+
 def calc_channel_glass_delta(ch_nmaes_b: Dict[str, float], ch_nmaes_p: Dict[str, float], ch_stds: Dict[str, float]) -> List[float]:
     """
     Calculates glass's delta effect size for each channel given 2 dicts of channel-wise NMAEs and one dict of STDs.
@@ -273,6 +315,9 @@ def calc_channel_bandwise_glass_delta(ch_bw_nmaes_b: Dict[str, Dict[str, float]]
 
 
 def rename_chans_to_mne(ch_names: List[str]):
+    """
+    Renames channel names in place to the MNE standard_1005 montage names, e.g. "EEG FP1-REF" -> "Fp1", "EEG T1-REF" -> "FT9", "EEG T2-REF" -> "FT10".
+    """
     for i, name in enumerate(ch_names):
         mod_name = name.split(' ')[-1].split('-')[0]
         if mod_name == "T1":
@@ -287,7 +332,29 @@ def rename_chans_to_mne(ch_names: List[str]):
         mod_name = mod_name[0] + mod_name[1].lower() + mod_name[2:]
         ch_names[i] = mod_name
 
+def create_topomap_info() -> mne.Info:
+    """
+    Creates the mne.Info for topomaps of the model channels, in CHORDER_STANDARD order (= ch_0 ... ch_22 of the metrics).
+    The channels keep their 10-20 labels (see rename_chans_to_mne), but are placed at the actual positions of the EGI HydroCel electrodes
+    they were recorded with (EGI_TO_1020_MAP, GSN-HydroCel-65 montage, where the reference electrode VREF is "Cz").
+    """
+    egi_by_channel = {channel: egi for egi, channel in settings.EGI_TO_1020_MAP.items()}
+    egi_names = ["Cz" if egi_by_channel[ch] == "EEG VREF" else "E" + egi_by_channel[ch].split(" ")[-1] for ch in settings.CHORDER_STANDARD]
+
+    info = mne.create_info(ch_names=egi_names, sfreq=settings.RSFREQ, ch_types='eeg')  # sfreq is required but not relevant for static topomaps
+    info.set_montage(mne.channels.make_standard_montage("GSN-HydroCel-65_1.0"))
+
+    labels = list(settings.CHORDER_STANDARD)
+    rename_chans_to_mne(labels)
+    mne.rename_channels(info, dict(zip(egi_names, labels)))
+    return info
+
 def order_to_channel_viewer_format(dataset_data: List[List[Trial]], dataset_metrics: List[List[Dict[str, Any]]], sample_idx, channel_idx) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Selects one sample and channel across all datasets for the single channel viewer.
+    dataset_data: one list of trials per dataset, dataset_metrics: the matching output of get_channel_viewer_metrics per dataset.
+    Returns per dataset the {"output", "target"} arrays of the channel and its metrics dict.
+    """
     ds_trials = [ds[sample_idx] for ds in dataset_data]  # select sample across all datasets
     trial_data_dict = [
         {
@@ -300,6 +367,11 @@ def order_to_channel_viewer_format(dataset_data: List[List[Trial]], dataset_metr
     return trial_data_dict, ds_metrics
 
 def get_channel_viewer_metrics(trial_list: List[Trial], metric_names: List[str], ch_prefix: str= 'ch_') -> List[List[Dict[str, Any]]]:
+    """
+    Collects the requested channel-level metrics of every trial for the single channel viewer.
+    Returns one list per trial with one {"metrics": {metric_name: value}, "metadata": {subject, condition, id}} dict per channel.
+    Channels missing a metric are reported and the metric is left out.
+    """
     ret = []
     for trial in trial_list:
         trial_data = []
@@ -328,6 +400,14 @@ def get_channel_viewer_metrics(trial_list: List[Trial], metric_names: List[str],
 
 
 def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names: List[str]=None) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """
+    Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a global (not band-wise) channel-level metric, e.g. "nmae".
+    A "_bandwise" suffix is removed, so "nmae_bandwise" also returns the global channel value.
+    If ch_names is provided, only those channels are used.
+    Returns three dictionaries {channel: value}.
+    """
+    if "bandwise" in metric_name:
+        metric_name = metric_name.replace("_bandwise", "")
     channel_values = _extract_channel_metric(trial_list, metric_name, ch_names)
     ch_means = {}
     ch_sems = {}
@@ -335,7 +415,7 @@ def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names
     for ch_name, vals in channel_values.items():
         if len(vals) == 0:
             print(f"WARNING: No values found for channel {ch_name} for metric {metric_name}. This channel will be skipped in the averaging.")
-            del channel_values[ch_name]
+            continue
         ch_means[ch_name] = np.mean(vals)
         ch_sems[ch_name] = sem(vals)
         ch_stds[ch_name] = np.std(vals)
@@ -343,6 +423,12 @@ def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names
 
 
 def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str, bands: List[str], ch_names: List[str]=None) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    """
+    Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a band-wise channel-level metric for every band in bands.
+    "_bandwise" is appended to metric_name if missing, so "nmae" and "nmae_bandwise" are equivalent.
+    If ch_names is provided, only those channels are used.
+    Returns three dictionaries {channel: {band: value}}.
+    """
     if 'bandwise' not in metric_name:
         metric_name += '_bandwise'
 
@@ -361,6 +447,10 @@ def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str,
 
 
 def get_metric_stats(trial_list: List[Trial], metric_name: str) -> Tuple[float, float, float]:
+    """
+    Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a global (not band-wise) trial-level metric, e.g. "nmae".
+    A "_bandwise" suffix is removed, so "nmae_bandwise" also returns the global value.
+    """
     if "bandwise" in metric_name:
         metric_name = metric_name.replace("_bandwise", "")
     values = extract_metric(trial_list, metric_name)
@@ -368,6 +458,11 @@ def get_metric_stats(trial_list: List[Trial], metric_name: str) -> Tuple[float, 
 
 
 def get_bandwise_metric_stats(trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
+    """
+    Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a band-wise trial-level metric for every band in bands.
+    "_bandwise" is appended to metric_name if missing, so "nmae" and "nmae_bandwise" are equivalent.
+    Returns three dictionaries {band: value}.
+    """
     if 'bandwise' not in metric_name:
         metric_name += '_bandwise'
 
@@ -456,6 +551,7 @@ def _group_bandwise(bandwise_dict: Dict[str, float], trial: Trial, metric_name: 
 
 
 def _group_by(trial_list: List[Trial], attr_name: str) -> Dict[Any, List[Trial]]:
+    """Groups the trials by the value of one of their attributes, e.g. "subject". Returns {attribute value: [trials]}."""
     trials_by_attr = defaultdict(list)
     for trial in trial_list:
         trials_by_attr[getattr(trial, attr_name)].append(trial)

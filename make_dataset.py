@@ -79,6 +79,14 @@ def run_qc_check(max_dropped_share, max_channels, show_all):
 
 
 def match_and_order(raw_io: mne.io.Raw):
+    """
+    Keeps only the channels of EGI_TO_1020_MAP, renames them to their 10-20 names and orders them as CHORDER_STANDARD.
+    Raises a ValueError if a mapped channel is missing, as the channel order (ch_0 ... ch_22 in all later outputs) would otherwise be wrong.
+    """
+    missing_channels = [ch for ch in settings.EGI_TO_1020_MAP if ch not in raw_io.ch_names]
+    if missing_channels:
+        raise ValueError(f"Channels {missing_channels} of EGI_TO_1020_MAP are missing, cannot order the channels as CHORDER_STANDARD.")
+
     # drop channels not in the LUT
     useless_channels = []
     for ch in raw_io.ch_names:
@@ -89,8 +97,7 @@ def match_and_order(raw_io: mne.io.Raw):
     # rename channels
     raw_io.rename_channels(settings.EGI_TO_1020_MAP)
     # reorder channels
-    if len(settings.CHORDER_STANDARD) == len(raw_io.ch_names):
-        raw_io.reorder_channels(settings.CHORDER_STANDARD)
+    raw_io.reorder_channels(settings.CHORDER_STANDARD)
 
 def rescale_to_uv(epochs: Dict[str, Dict[str, Dict[str, Any]]]):
     for subj, trial_conds in epochs.items(): # STMD1, baseline
@@ -225,7 +232,8 @@ def main(opts):
                 try:
                     match_and_order(epoch)
                 except Exception as e:
-                    print(f"ERROR: Failed to reorder channels for {subj}_{cond}_{id}: {e}")
+                    # stop instead of saving epochs with a wrong channel order
+                    raise RuntimeError(f"Failed to reorder channels for {subj}_{cond}_{id}") from e
 
 
     print("Channel reordering to LaBraM representation complete.")
