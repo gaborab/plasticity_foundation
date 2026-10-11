@@ -157,6 +157,19 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
             value_str = json.dumps(value, cls=NumpyEncoder)
             group.create_dataset(key, data=value_str)
 
+def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, h5file: h5py.File, time_series_metrics: Dict[str, Dict[str, np.ndarray]]):
+    """
+    Saves the time series metrics of one trial as {subject}/{condition}/{idx}/{metric}/{band}, one (channels, time) dataset per band.
+    Expects time_series_metrics as {metric: {band: (channels, time) array}}, e.g. {"mae": calc_metric_time_series(trial, "mae", band_indices)}.
+    """
+    trial_path = f"{subject}/{condition}/{idx}"
+    trial_group = h5file.create_group(trial_path)
+
+    for metric_name, metric_bands in time_series_metrics.items():
+        metric_group = trial_group.create_group(metric_name)
+        for band, metric_array in metric_bands.items():
+            metric_group.create_dataset(band, data=metric_array)
+
 
 
 def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]]):
@@ -169,66 +182,16 @@ def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.Fil
         trial_group.attrs[f"{name}_metrics_json"] = json.dumps(metrics, cls=NumpyEncoder)
         trial_group.attrs[f"{name}_channel_metrics_json"] = json.dumps(ch_metrics, cls=NumpyEncoder)
 
-def load_inference_data(h5file_path: Path, channel_mode: bool, subjects: str = None, conditions: str = None, idxs = None, results: List[str]=None, metrics: List[str]=None, channels: List[str]=None, bands: List[str] = None) -> Any:
-
-    try:
-        data = h5py.File(h5file_path, "r")
-    except:
-        print(f"ERROR: Failed to open HDF file at path: {h5file_path}")
-        return None
-
-    # assuming file structure is {subject}/{condition}/{idx}/ with datasets "target", "output", and group "metrics" containing the metrics as datasets
-    if results is not None and "metrics" not in results:
-        results.append("metrics")
-
-    master_keys_channel = [subjects, conditions, idxs, results, channels, metrics, bands]
-    master_keys_global = [subjects, conditions, idxs, results, metrics, bands]
-
-    master_keys = master_keys_channel if channel_mode else master_keys_global
-    loaded_data = {}
-    loaded_data = extract_data(data, loaded_data, master_keys, depth=0, channel_mode=channel_mode)
-
-    data.close()
-
-    return loaded_data
 
 
-
-def extract_data(group: h5py.File | h5py.Group, ret: Dict, get: List[List[str]], depth, channel_mode: bool) -> Dict:
-    if depth >= len(get):
-        print("WARNING: Depth exceeds length of get list, returning current data")
-        return ret
-    level_keys = get[depth]
-
-    if level_keys is None:
-        level_keys = list(group.keys())
-        # in case of metrics, decide whether to collect channel-wise metrics or global metrics based on channel_mode
-        if group.name.split("/")[-1] == "metrics":
-            if channel_mode:
-                level_keys = [key for key in level_keys if "ch_" in key]
-            else:
-                level_keys = [key for key in level_keys if "ch_" not in key]
-
-    for key in level_keys:
-        if key not in group:
-            print(f"WARNING: Key {key} not found in group {group.name}")
-            continue
-        item = group[key]
-
-        # recurse if group, otherwise save data
-        if isinstance(item, h5py.Group):
-            if depth + 1 < len(get):
-                extract_data(item, ret, get, depth + 1, channel_mode=channel_mode)
-        elif isinstance(item, h5py.Dataset):
-            ret[item.name] = item[()]
-    return ret
-
-def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full") -> List[Trial]:
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full", time_series_path: Optional[Path] = None) -> List[Trial]:
     """
     Loads the trials of an inference HDF5 file as lazy Trial objects, keeping the file open while they are in use.
     subjects, conditions, idxs: only keep these (None keeps all). idxs are compared with the HDF5 keys, so pass them as strings.
     exclude_subjects: drop these subjects.
     window: key of settings.METRIC_WINDOWS, the time window whose metrics trial.metrics / trial.channel_metrics return.
+    time_series_path: optional HDF5 file of time series metrics (see save_time_series_metrics_hdf). Its matching trial groups are attached
+    as trial.time_series_data, so trial.time_series(metric) can read them. Trials missing from it are kept without time series data.
     """
     print("Loading inference trials...")
     try:
@@ -236,11 +199,20 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     except:
         print(f"ERROR: Failed to open HDF file at path: {h5file_path}")
         return []
+    ts_data = None
+    if time_series_path is not None:
+        try:
+            ts_data = h5py.File(time_series_path, "r")
+        except:
+            print(f"ERROR: Failed to open time series HDF file at path: {time_series_path}")
+            data.close()
+            return []
 
     print(f"Filtering for subjects: {', '.join(subjects) if subjects is not None else 'all'}")
     print(f"Filtering for conditions: {', '.join(conditions) if conditions is not None else 'all'}")
     print(f"Filtering for idxs: {', '.join(map(str,idxs)) if idxs is not None else 'all'}")
     all_trials = []
+    n_missing_ts = 0
     for subject, subj_group in data.items():
         if subjects is not None and subject not in subjects:
             continue
@@ -253,7 +225,16 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
                 if idxs is not None and idx not in {str(i) for i in idxs}:
                     continue
                 trial = Trial(trial_group, subject, condition, idx, window=window)
+
+                if ts_data is not None:
+                    try:
+                        trial.time_series_data = ts_data[f"{subject}/{condition}/{idx}"]
+                    except KeyError:
+                        n_missing_ts += 1
+
                 all_trials.append(trial)
+    if n_missing_ts > 0:
+        print(f"WARNING: {n_missing_ts}/{len(all_trials)} trials have no time series data in {time_series_path}")
     return all_trials
 
 

@@ -163,3 +163,5 @@ FREQ_BANDS = {
     'beta (12-30Hz)': (12, 30),
     'gamma (30-60Hz)': (30, 60)
 }
+# indices of the FREQS bins falling into each band, used to index the frequency dimension of spectral tensors
+FREQ_BAND_INDICES = {name: np.where((FREQS >= low) & (FREQS <= high))[0] for name, (low, high) in FREQ_BANDS.items()}

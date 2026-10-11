@@ -399,6 +399,60 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
     return fig, ax
 
 
+def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Optional[Dict[str, np.ndarray]] = None,
+                     x_label="Time (ms)", y_label="MAE", vlines: Optional[List[float]] = None,
+                     hlines: Optional[List[float]] = None, ax=None, fig=None, n_text: str = None):
+    """
+    Plots one line per key of means against times, with a shaded ±SEM band if sems are given (same keys as means).
+    vlines: x positions of dashed vertical lines, e.g. [0] for the stimulus onset. hlines: y positions of solid horizontal lines, e.g. [0] for differences.
+    """
+    is_standalone = ax is None
+    if is_standalone:
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+    for label, mean in means.items():
+        line, = ax.plot(times, mean, label=label)
+        if sems is not None:
+            ax.fill_between(times, mean - sems[label], mean + sems[label], color=line.get_color(), alpha=0.25, linewidth=0)
+    for x in vlines or []:
+        ax.axvline(x, color='gray', linestyle='--', linewidth=1)
+    for y in hlines or []:
+        ax.axhline(y, color='black', linewidth=0.8)
+
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    if n_text is not None:
+        title += f" ({n_text})"
+    ax.set_title(title)
+    ax.legend()
+
+    if is_standalone:
+        plt.tight_layout()
+        plt.show()
+    return fig, ax
+
+
+def plot_time_series_grid(times, means: Dict[str, Dict[str, np.ndarray]], suptitle: str,
+                          sems: Optional[Dict[str, Dict[str, np.ndarray]]] = None, y_label="MAE",
+                          vlines: Optional[List[float]] = None, hlines: Optional[List[float]] = None, n_cols: int = 3):
+    """
+    Plots one plot_time_series subplot per panel, e.g. per band. Expects means (and sems) as {panel title: {line label: series}}.
+    The y-axes are not shared, so panels with different scales stay readable.
+    """
+    n_rows = int(np.ceil(len(means) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
+    for ax, (panel, panel_means) in zip(axes.flat, means.items()):
+        plot_time_series(times, panel_means, title=panel, sems=sems[panel] if sems is not None else None,
+                         y_label=y_label, vlines=vlines, hlines=hlines, ax=ax, fig=fig)
+    for ax in axes.flat[len(means):]:
+        ax.set_visible(False)
+
+    fig.suptitle(suptitle)
+    plt.tight_layout()
+    plt.show()
+    return fig, axes
+
+
 def save_button(fig, save_dir: Path, default_name="untitled"):
     name_input = widgets.Text(value=default_name, description='Filename:', placeholder='untitled')
 

@@ -107,9 +107,10 @@ def calculate_r2(y_true, y_pred):
     return r2
 
 
-def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds, freqs, freq_bands, eps: float = 1e-8):
+def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds, band_indices: Dict[str, np.ndarray], eps: float = 1e-8):
     """
-    Calculates R-squared, MAE, STD and NMAE metrics for each frequency band defined in freq_bands by indexing into the frequency dimension of y_true and y_pred.
+    Calculates R-squared, MAE, STD and NMAE metrics for each frequency band by indexing into the frequency dimension of y_true and y_pred.
+    Expects band_indices as {band name: indices of the band's frequency bins}, e.g. settings.FREQ_BAND_INDICES.
     Expects y_true and y_pred to be 2D or 3D arrays, where the last dimension corresponds to time points and the second-to-last dimension corresponds to frequencies.
     Expects freq_stds to be a 1D array of standard deviations for each frequency.
     """
@@ -124,19 +125,16 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
     signal_mean_bandwise = {}
     recon_mean_bandwise = {}
     nmae_bandwise = {}
-    for name, band in freq_bands.items():
-        low, high = band
-        band_indices = np.where((freqs >= low) & (freqs <= high))[0]
-        if band_indices.size == 0:
-            print(
-                f"WARNING: No frequencies found in band {name} ({low}-{high} Hz). Skipping R2 calculation for this band.")
+    for name, indices in band_indices.items():
+        if indices.size == 0:
+            print(f"WARNING: No frequencies found in band {name}. Skipping metric calculation for this band.")
             continue
         if y_true.ndim == 2:
-            band_true = y_true[band_indices, :].flatten()
-            band_pred = y_pred[band_indices, :].flatten()
+            band_true = y_true[indices, :].flatten()
+            band_pred = y_pred[indices, :].flatten()
         elif y_true.ndim == 3:
-            band_true = y_true[:, band_indices, :].flatten()
-            band_pred = y_pred[:, band_indices, :].flatten()
+            band_true = y_true[:, indices, :].flatten()
+            band_pred = y_pred[:, indices, :].flatten()
         else:
             print("WARNING: Expected 2D or 3D arrays for y_true and y_pred when calculating bandwise metrics, but got arrays with shape:", y_true.shape)
             return None, None, None, None, None, None, None
@@ -144,8 +142,8 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
         mae = np.mean(np.abs(band_true - band_pred))
         r2_bandwise[name] = r2
         mae_bandwise[name] = mae
-        signal_std_bandwise[name] = np.mean(signal_freq_stds[band_indices])
-        recon_std_bandwise[name] = np.mean(recon_freq_stds[band_indices])
+        signal_std_bandwise[name] = np.mean(signal_freq_stds[indices])
+        recon_std_bandwise[name] = np.mean(recon_freq_stds[indices])
         signal_mean_bandwise[name] = np.mean(band_true)
         recon_mean_bandwise[name] = np.mean(band_pred)
         nmae_bandwise[name] = mae / signal_std_bandwise[name] + eps
@@ -153,12 +151,13 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
     return r2_bandwise, mae_bandwise, signal_std_bandwise, recon_std_bandwise, nmae_bandwise, signal_mean_bandwise, recon_mean_bandwise
 
 
-def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = None, freq_bands: Optional[Any]= None, ch_prefix: str = 'ch_', eps: float = 1e-8) -> Tuple[Dict, Dict[str, Dict]]:
+def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dict[str, np.ndarray]] = None, ch_prefix: str = 'ch_', eps: float = 1e-8) -> Tuple[Dict, Dict[str, Dict]]:
     """
     Calculates inference metrics (e.g., R-squared, MAE) for a single trial's output and target data. Expects trial_output and trial_target to be 3D arrays, where the last dimension corresponds to time points.
+    band_indices: {band name: indices of the band's frequency bins} for spectral targets, None skips the band-wise metrics.
     Returns a dictionary containing the calculated metrics.
     """
-    spectral = freqs is not None and freq_bands is not None
+    spectral = band_indices is not None
 
     signal_stds = np.std(trial_target, axis=-1)
     recon_stds = np.std(trial_output, axis=-1)
@@ -180,7 +179,7 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
         signal_freq_stds = np.mean(signal_stds, axis=0)
         recon_freq_stds = np.mean(recon_stds, axis=0)
         g_metrics.r2_bandwise, g_metrics.mae_bandwise, g_metrics.signal_volatility_bandwise, g_metrics.recon_volatility_bandwise, g_metrics.nmae_bandwise, g_metrics.signal_mean_bandwise, g_metrics.recon_mean_bandwise = (
-            calculate_bandwise_metrics(trial_target, trial_output, signal_freq_stds, recon_freq_stds, freqs=freqs, freq_bands=freq_bands, eps=eps)
+            calculate_bandwise_metrics(trial_target, trial_output, signal_freq_stds, recon_freq_stds, band_indices=band_indices, eps=eps)
         )
     g_metrics = g_metrics.to_dict()
 
@@ -208,7 +207,7 @@ def get_inference_metrics(trial_output, trial_target, freqs: Optional[Any] = Non
             signal_channel_freq_stds = signal_stds[i, :]
             recon_channel_freq_stds = recon_stds[i, :]
             ch_metrics.r2_bandwise, ch_metrics.mae_bandwise, ch_metrics.signal_volatility_bandwise, ch_metrics.recon_volatility_bandwise, ch_metrics.nmae_bandwise, ch_metrics.signal_mean_bandwise, ch_metrics.recon_mean_bandwise = (
-                calculate_bandwise_metrics(trial_target[i], trial_output[i], signal_channel_freq_stds, recon_channel_freq_stds, freqs=freqs, freq_bands=freq_bands, eps=eps)
+                calculate_bandwise_metrics(trial_target[i], trial_output[i], signal_channel_freq_stds, recon_channel_freq_stds, band_indices=band_indices, eps=eps)
             )
 
         ch_metrics_dict[ch_key] = ch_metrics.to_dict()

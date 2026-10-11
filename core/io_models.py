@@ -1,6 +1,6 @@
 from dataclasses import dataclass, fields, asdict
 from functools import cached_property
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 from core import settings
 from core.io_utils import nested_group_to_dict
@@ -61,12 +61,14 @@ class Trial:
     Lazy view on one trial of an inference HDF5 file.
     The metrics of every time window are available as {window}_metrics / {window}_channel_metrics, parsed on first access and cached.
     metrics / channel_metrics return the metrics of the trial's window, so analyses reading them use the window selected when loading.
+    If loaded with a time series file, time_series(metric) reads the trial's per-band time series from it on every call (not cached).
     """
     trial_data: h5py.Group
     subject: str
     condition: str
     idx: int
     window: str = "full"  # key of settings.METRIC_WINDOWS, selects which stored metrics metrics / channel_metrics return
+    time_series_data: Optional[h5py.Group] = None  # group of this trial in the time series file, None if loaded without one
 
     def __post_init__(self):
         if self.window not in settings.METRIC_WINDOWS:
@@ -88,6 +90,25 @@ class Trial:
     def channel_metrics(self) -> Dict[str, Metrics]:
         """Channel-level metrics {"ch_0": Metrics, ...} of the selected window, the same cached object as {window}_channel_metrics."""
         return getattr(self, f"{self.window}_channel_metrics")
+
+    def time_series(self, metric: str, bands: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
+        """Returns the time series of metric as {band: (n_chans, n_timepoints) array}, including "all bands".
+        Available metrics are the ones saved in the time series file (keys of plot_data_processing.TIME_SERIES_METRICS: mae, error, target, recon).
+        bands: only read these bands (None reads all of them).
+        Reads from the file on every call, the result is not cached.
+        """
+        if self.time_series_data is None:
+            raise ValueError("Time series data not available for this trial. Please load the trial with time series data.")
+        if metric not in self.time_series_data:
+            raise ValueError(f"Metric '{metric}' not found in time series data. Available metrics: {list(self.time_series_data.keys())}")
+        metric_group = self.time_series_data[metric]
+        if bands is None:
+            bands = list(metric_group.keys())
+        missing = [band for band in bands if band not in metric_group]
+        if missing:
+            raise ValueError(f"Bands {missing} not found in time series data. Available bands: {list(metric_group.keys())}")
+        return {band: metric_group[band][()] for band in bands}
+
 
     full_metrics = _metrics_field("full")
     full_channel_metrics = _metrics_field("full", channel=True)

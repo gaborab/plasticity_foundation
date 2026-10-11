@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import time
 import datetime
 import h5py
@@ -14,10 +15,9 @@ from libs.labram import utils
 from einops import rearrange
 from core import utils as core_utils
 
-def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None, freq_bands=None):
+def run_reconstruction(model, dataset, ch_names, device, output_file, band_indices=None):
     sampler = torch_utils.data.SequentialSampler(dataset)
     loader = torch_utils.data.DataLoader(dataset, sampler=sampler, batch_size=256)
-
     with h5py.File(output_file, "w") as h5file:
         with torch.no_grad():
             input_chans = utils.get_input_chans(ch_names)
@@ -49,8 +49,7 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, freqs=None
                     for name, window in settings.METRIC_WINDOWS.items():
                         cut_output = core_utils.cut_to_timewindow(trial_output, settings.TIME_WINDOW, window, settings.RSFREQ)
                         cut_target = core_utils.cut_to_timewindow(trial_target, settings.TIME_WINDOW, window, settings.RSFREQ)
-                        window_metrics[name] = core_utils.get_inference_metrics(cut_output, cut_target, freqs=freqs,
-                                                                   freq_bands=freq_bands, eps=settings.EPS)
+                        window_metrics[name] = core_utils.get_inference_metrics(cut_output, cut_target, band_indices=band_indices, eps=settings.EPS)
                     save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, window_metrics)
 
 
@@ -80,7 +79,7 @@ def main(opts):
     # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
     ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
 
-    bands = settings.FREQ_BANDS if opts.target_mode in ["wavelet", "superlet"] else None
+    band_indices = settings.FREQ_BAND_INDICES if opts.target_mode in ["wavelet", "superlet"] else None
 
     for i, fold in enumerate(folds):
         start_time = time.time()
@@ -115,9 +114,10 @@ def main(opts):
 
         output_path = settings.INFERENCE_DIR / opts.model_name / str(i + 1)
         baseline_file = output_path / "baseline_reconstruction.h5"
+        shutil.rmtree(output_path, ignore_errors=True) # delete existing output directory for this fold if it exists
         output_path.mkdir(parents=True, exist_ok=True)
         print("Running baseline reconstruction...")
-        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, settings.FREQS, bands)
+        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, band_indices)
         print("Baseline reconstruction finished.")
 
         # run reconstruction on postpatch data if enabled (on the same subjects as the baseline reconstruction)
@@ -128,7 +128,7 @@ def main(opts):
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
             postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.WINDOW_SIZE, log=True, normalize=True)
             print("Running post-patch reconstruction...")
-            run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, settings.FREQS, bands)
+            run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, band_indices)
             print("Post-patch reconstruction finished.")
         fold_time = time.time() - start_time
         print(f"Fold time: {str(datetime.timedelta(seconds=int(fold_time)))}")

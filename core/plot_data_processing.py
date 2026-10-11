@@ -11,6 +11,38 @@ from collections import defaultdict
 
 ALL_BANDS = "all bands"
 
+TIME_SERIES_METRICS = {
+    'mae': lambda target, recon: np.abs(target - recon),
+    'error': lambda target, recon: target - recon,
+    'target': lambda target, recon: target,
+    'recon': lambda target, recon: recon,
+}
+
+def calc_metric_time_series(trial: Trial, metric_name: str, band_indices: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """
+    Calculates the time series of metric_name (a key of TIME_SERIES_METRICS) for every band and "all bands" of the given trial.
+    The metric is computed on the full (channels, frequencies, time) tensors, then averaged over the band's frequency bins.
+    Expects band_indices as {band name: indices of the band's frequency bins}, e.g. settings.FREQ_BAND_INDICES.
+    Returns {band: array of shape (channels, time)}, average over the channels for the time series of the whole head.
+    The output can be saved with io.save_time_series_metrics_hdf and read back with trial.time_series(metric_name) in the same format.
+    """
+    return calc_time_series_metrics(trial, [metric_name], band_indices)[metric_name]
+
+def calc_time_series_metrics(trial: Trial, metric_names: List[str], band_indices: Dict[str, np.ndarray]) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    Calculates the time series of several metrics like calc_metric_time_series, reading the trial's target and reconstruction only once.
+    Returns {metric: {band: array of shape (channels, time)}}, the input format of io.save_time_series_metrics_hdf.
+    """
+    target, recon = trial.target_data, trial.recon_data
+    metrics_time_series = {}
+    for metric_name in metric_names:
+        values = TIME_SERIES_METRICS[metric_name](target, recon)
+        metric_time_series = {ALL_BANDS: values.mean(axis=1)}
+        for band, indices in band_indices.items():
+            metric_time_series[band] = values[:, indices, :].mean(axis=1)
+        metrics_time_series[metric_name] = metric_time_series
+    return metrics_time_series
+
 def calc_subject_adjusted_metric(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, float]]:
     """
     Calculates volatility-adjusted subject means of metric_name for the whole tensor (every band and "all bands").
@@ -235,6 +267,40 @@ def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metri
         band_sems[b] = sem(means)
 
     return band_means, band_sems
+
+def calc_subjectwise_time_series(trial_list: List[Trial], metric_name: str, band: str, channels: List[int] = None) -> Dict[str, np.ndarray]:
+    """
+    Calculates the mean time series of metric_name in band for each subject, averaged over the subject's trials and the given channels.
+    Expects trials loaded with a time series file. channels: indices into the channel dimension, None averages all channels.
+    Returns {subject: array of shape (time,)}.
+    """
+    subjectwise_series = {}
+    for subject, trials in _group_by(trial_list, 'subject').items():
+        series = np.stack([trial.time_series(metric_name, bands=[band])[band] for trial in trials])  # (trials, channels, time)
+        if channels is not None:
+            series = series[:, channels, :]
+        subjectwise_series[subject] = series.mean(axis=(0, 1))
+    return subjectwise_series
+
+def get_subjectwise_time_series_mean(trial_list: List[Trial], metric_name: str, band: str, channels: List[int] = None) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Calculates the time series of metric_name for each subject (see calc_subjectwise_time_series), then the mean and SEM of those over subjects.
+    Returns the mean and SEM, both of shape (time,), and the number of subjects.
+    """
+    subject_series = np.stack(list(calc_subjectwise_time_series(trial_list, metric_name, band, channels).values()))
+    return subject_series.mean(axis=0), sem(subject_series, axis=0), subject_series.shape[0]
+
+def get_subjectwise_time_series_difference(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, band: str, channels: List[int] = None) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Calculates each subject's post - baseline difference of their mean time series (see calc_subjectwise_time_series),
+    then the mean and SEM of those differences over subjects. Only subjects with both sessions are used.
+    Returns the mean and SEM, both of shape (time,), and the number of subjects.
+    """
+    b_series = calc_subjectwise_time_series(b_trial_list, metric_name, band, channels)
+    p_series = calc_subjectwise_time_series(p_trial_list, metric_name, band, channels)
+    subjects = [s for s in b_series if s in p_series]
+    diffs = np.stack([p_series[s] - b_series[s] for s in subjects])
+    return diffs.mean(axis=0), sem(diffs, axis=0), len(subjects)
 
 def calc_subjectwise_channel_d(b_metrics: Dict[str, Dict[str, Dict[str, float]]], p_metrics: Dict[str, Dict[str, Dict[str, float]]], group_by_bands: bool, ddof: int = 1, effect_size: str = "d_z") -> Dict[str, Dict[str, float]]:
     """
