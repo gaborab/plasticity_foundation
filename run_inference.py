@@ -47,8 +47,8 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, band_indic
 
                     window_metrics = {}
                     for name, window in settings.METRIC_WINDOWS.items():
-                        cut_output = core_utils.cut_to_timewindow(trial_output, settings.TIME_WINDOW, window, settings.RSFREQ)
-                        cut_target = core_utils.cut_to_timewindow(trial_target, settings.TIME_WINDOW, window, settings.RSFREQ)
+                        cut_output = core_utils.cut_to_timewindow(trial_output, settings.TARGET_TIME_WINDOW, window, settings.RSFREQ)
+                        cut_target = core_utils.cut_to_timewindow(trial_target, settings.TARGET_TIME_WINDOW, window, settings.RSFREQ)
                         window_metrics[name] = core_utils.get_inference_metrics(cut_output, cut_target, band_indices=band_indices, eps=settings.EPS)
                     save_inference_trial_hdf(subject, condition, idx, h5file, trial_target, trial_output, window_metrics)
 
@@ -126,7 +126,7 @@ def main(opts):
             postpatch_file = output_path / "postpatch_reconstruction.h5"
 
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
-            postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.WINDOW_SIZE, log=True, normalize=True)
+            postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.TARGET_WINDOW_SIZE, log=True, normalize=True)
             print("Running post-patch reconstruction...")
             run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, band_indices)
             print("Post-patch reconstruction finished.")

@@ -47,18 +47,22 @@ INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ["STMD67", "STMD71"]
 NO_PRESS_FROM_SUBJECT = 59
 RECORDINGS_PER_CONDITION = None
-TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
-EXTENDED_OFFSET = 1.5
-PAD_TIME = 1.5
+INPUT_TIME_WINDOW = (-1.4, -0.4)  # 1 second (200 sample) time window for model input
+TARGET_TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
+EXTENDED_INPUT_OFFSET = 0
+EXTENDED_TARGET_OFFSET = 0.5
+PAD_TIME = 0.3
 PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targets
-EXTENDED_TIME_WINDOW = (TIME_WINDOW[0] - EXTENDED_OFFSET, TIME_WINDOW[1] + EXTENDED_OFFSET)  # Extended time window for wavelet/superlet targets
-WINDOW_SIZE = int((TIME_WINDOW[1] - TIME_WINDOW[0]) * RSFREQ)
+EXTENDED_INPUT_TIME_WINDOW = (INPUT_TIME_WINDOW[0] - EXTENDED_INPUT_OFFSET, INPUT_TIME_WINDOW[1] + EXTENDED_INPUT_OFFSET)  # Extended time window for epoch inputs
+EXTENDED_TARGET_TIME_WINDOW = (TARGET_TIME_WINDOW[0] - EXTENDED_TARGET_OFFSET, TARGET_TIME_WINDOW[1] + EXTENDED_TARGET_OFFSET)  # Extended time window for wavelet/superlet targets
+WHOLE_EPOCH_WINDOW = (EXTENDED_INPUT_TIME_WINDOW[0], EXTENDED_TARGET_TIME_WINDOW[1])  # Whole epoch time window for preprocessing
+TARGET_WINDOW_SIZE = int((TARGET_TIME_WINDOW[1] - TARGET_TIME_WINDOW[0]) * RSFREQ)
 ANALYSIS_WINDOW = (0.0, 0.4)
-BUTTON_WINDOW = (ANALYSIS_WINDOW[1], TIME_WINDOW[1])
-REFERENCE_WINDOW = (TIME_WINDOW[0], ANALYSIS_WINDOW[0])
+BUTTON_WINDOW = (ANALYSIS_WINDOW[1], TARGET_TIME_WINDOW[1])
+REFERENCE_WINDOW = (TARGET_TIME_WINDOW[0], ANALYSIS_WINDOW[0])
 
 METRIC_WINDOWS = {
-    'full': TIME_WINDOW,
+    'full': TARGET_TIME_WINDOW,
     'analysis': ANALYSIS_WINDOW,
     'button': BUTTON_WINDOW,
     'reference': REFERENCE_WINDOW,
@@ -82,7 +86,7 @@ ICLABEL_THRESHOLDS = {
 }
 
 AUTOREJECT_MARGIN = 0.4
-AUTOREJECT_WINDOW = (TIME_WINDOW[0] - AUTOREJECT_MARGIN, TIME_WINDOW[1] + AUTOREJECT_MARGIN)
+AUTOREJECT_WINDOW = (TARGET_TIME_WINDOW[0] - AUTOREJECT_MARGIN, TARGET_TIME_WINDOW[1] + AUTOREJECT_MARGIN)
 AUTOREJECT_PARAMS = {
     'random_state': SEED,
     'n_jobs': 4,
@@ -105,8 +109,8 @@ AUTO_BAD_CHANNEL_PARAMS = {
 QC_MAX_DROPPED_SHARE = 1/3
 QC_MAX_DROPPED_CHANS = 12
 
-EPOCHS_DIR_NAME = "epochs"
-SUPERLET_DIR_NAME = "superlet_targets"
+INPUT_EPOCHS_DIR_NAME = "input_epochs"
+TARGET_EPOCHS_DIR_NAME = "target_epochs"
 WAVELET_DIR_NAME = "wavelet_targets"
 # Base directories
 #CORE_DIR = Path(__file__).parent # get path to core directory
@@ -116,13 +120,13 @@ PROCESS_DIR = BASE_DIR / "data" / "processed"
 CACHE_DIR = PROCESS_DIR / "cache"
 
 FINETUNE_DIR = PROCESS_DIR / "pre_patching"
-FINETUNE_EPOCHS_DIR = FINETUNE_DIR / EPOCHS_DIR_NAME
-FINETUNE_SUPERLET_DIR = FINETUNE_DIR / SUPERLET_DIR_NAME
+FINETUNE_INPUT_EPOCHS_DIR = FINETUNE_DIR / INPUT_EPOCHS_DIR_NAME
+FINETUNE_TARGET_EPOCHS_DIR = FINETUNE_DIR / TARGET_EPOCHS_DIR_NAME
 FINETUNE_WAVELET_DIR = FINETUNE_DIR / WAVELET_DIR_NAME
 
 PATCH_DIR = PROCESS_DIR / "post_patching"
-PATCH_EPOCHS_DIR = PATCH_DIR / EPOCHS_DIR_NAME
-PATCH_SUPERLET_DIR = PATCH_DIR / SUPERLET_DIR_NAME
+PATCH_INPUT_EPOCHS_DIR = PATCH_DIR / INPUT_EPOCHS_DIR_NAME
+PATCH_TARGET_EPOCHS_DIR = PATCH_DIR / TARGET_EPOCHS_DIR_NAME
 PATCH_WAVELET_DIR = PATCH_DIR / WAVELET_DIR_NAME
 
 FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
@@ -140,7 +144,7 @@ LABRAM_VERSION = 'labram_base_patch200_200'
 
 AUTOENCODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'target_dim': WINDOW_SIZE,
+    'target_dim': TARGET_WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
 }
 
@@ -149,12 +153,18 @@ SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'freq_window': (2, 60),
     'n_freqs': N_FREQS,
-    'target_dim': N_FREQS*WINDOW_SIZE,
+    'target_dim': N_FREQS * TARGET_WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
-    'wavelet': 'cmor1.5-1.0'
 }
 
 FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
+
+# complex Morlet wavelet targets, fewer cycles below split_freq shorten the low-frequency wavelets in time
+WAVELET_PARAMS = {
+    'low_cycles': 3,
+    'high_cycles': 2 * np.pi * np.sqrt(1.5 / 2),  # ~5.44 cycles, same as the previous cmor1.5-1.0
+    'split_freq': 3.5,
+}
 
 FREQ_BANDS = {
     'delta (2-4Hz)': (2, 4),

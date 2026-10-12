@@ -189,7 +189,7 @@ def main(opts):
         # initialize samplers
         print(f"Initializing datasets with {opts.target_mode} target mode...")
         train_dataset, val_dataset, test_dataset = fold.initialize_datasets(target_mode=opts.target_mode,
-                                                                            window_size=settings.WINDOW_SIZE,
+                                                                            window_size=settings.TARGET_WINDOW_SIZE,
                                                                             wavelet_dir=settings.FINETUNE_WAVELET_DIR,
                                                                             superlet_dir=settings.FINETUNE_SUPERLET_DIR)
 

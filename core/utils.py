@@ -11,22 +11,46 @@ import pandas as pd
 def subject_paradigm(subject: str, thresh: int):
     return "no_press" if int(subject.removeprefix("STMD")) >= thresh else "press"
 
-def calc_wavelet(tensor_data, fs, freq_window, n_freqs, wavelet, freqs, pad, **kwargs):
+def morlet_cycles(freqs, low_cycles, high_cycles, split_freq):
     """
-    Calculates the wavelet coefficients for a given EEG epoch tensor and returns the magnitude of the coefficients along with the corresponding frequencies in a geometric scale within the specified frequency window.
+    Returns the number of Morlet wavelet cycles for each frequency: low_cycles below split_freq, high_cycles from split_freq up.
     """
-    # normalize frequencies by sampling frequency
-    freqs_norm = freqs / fs
+    return np.where(np.asarray(freqs) < split_freq, low_cycles, high_cycles)
 
-    scales = pywt.frequency2scale(wavelet, freqs_norm)
+
+def wavelet_time_sd(freqs, n_cycles):
+    """
+    Returns the temporal SD (s) of the Gaussian envelope of a Morlet wavelet with n_cycles at each frequency.
+    The wavelet effectively uses data within ~3 SD of each time point.
+    """
+    return np.asarray(n_cycles) / (2 * np.pi * np.asarray(freqs))
+
+
+def calc_wavelet(tensor_data, fs, freqs, pad, low_cycles, high_cycles, split_freq):
+    """
+    Calculates the complex Morlet wavelet magnitudes of an EEG epoch tensor (channels, time) at freqs and returns them as (freqs, channels, time) along with freqs.
+    Frequencies below split_freq use a wavelet of low_cycles cycles, the rest one of high_cycles cycles (pywt cmorB-1.0 has 2*pi*sqrt(B/2) cycles).
+    Both wavelets give the same magnitude for a sinusoid, while broadband activity gets ~sqrt(high_cycles / low_cycles) times larger magnitudes
+    from the wider frequency band of the shorter wavelet.
+    """
     np_data = tensor_data.numpy()
     # Pad the data to avoid edge effects in the wavelet transform
-    np_data = np.pad(np_data, pad_width=((0, 0), (pad, pad)), mode='reflect')
-    coeffs, _ = pywt.cwt(np_data, scales, wavelet)
-    mag = np.abs(coeffs)
+    if pad > 0:
+        np_data = np.pad(np_data, pad_width=((0, 0), (pad, pad)), mode='reflect')
+
+    cycles = morlet_cycles(freqs, low_cycles, high_cycles, split_freq)
+    mag = np.empty((len(freqs), *np_data.shape))
+    for n in np.unique(cycles):
+        idx = np.where(cycles == n)[0]
+        wavelet = f"cmor{2 * (n / (2 * np.pi)) ** 2}-1.0"
+        # normalize frequencies by sampling frequency
+        scales = pywt.frequency2scale(wavelet, freqs[idx] / fs)
+        coeffs, _ = pywt.cwt(np_data, scales, wavelet)
+        mag[idx] = np.abs(coeffs)
+
     # Remove the padding from the magnitude array
-    mag = mag[:, :, pad:-pad]
-    print("mag shape after padding removal:", mag.shape)
+    if pad > 0:
+        mag = mag[:, :, pad:-pad]
     return mag, freqs
 
 
@@ -37,8 +61,8 @@ def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tupl
         Expects time to be the last dimension.
     """
 
-    from_index =  int((new_window[0] - original_window[0]) * fs)
-    to_index = int((new_window[1] - original_window[0]) * fs)
+    from_index =  round((new_window[0] - original_window[0]) * fs)
+    to_index = round((new_window[1] - original_window[0]) * fs)
 
     if from_index < 0 or to_index > tensor.shape[-1]:
         raise ValueError(f"Requested window {new_window} is outside original window {original_window} range.")
