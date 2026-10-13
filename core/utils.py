@@ -11,11 +11,12 @@ import pandas as pd
 def subject_paradigm(subject: str, thresh: int):
     return "no_press" if int(subject.removeprefix("STMD")) >= thresh else "press"
 
-def morlet_cycles(freqs, low_cycles, high_cycles, split_freq):
+def morlet_cycles(freqs, max_cycles, max_reach):
     """
-    Returns the number of Morlet wavelet cycles for each frequency: low_cycles below split_freq, high_cycles from split_freq up.
+    Returns the number of Morlet wavelet cycles for each frequency: as many as possible up to max_cycles while the wavelet's
+    3 SD reach (see wavelet_reach) stays within max_reach seconds, n(f) = min(max_cycles, 2*pi*f*max_reach/3).
     """
-    return np.where(np.asarray(freqs) < split_freq, low_cycles, high_cycles)
+    return np.minimum(max_cycles, 2 * np.pi * np.asarray(freqs) * max_reach / 3)
 
 
 def wavelet_time_sd(freqs, n_cycles):
@@ -26,20 +27,42 @@ def wavelet_time_sd(freqs, n_cycles):
     return np.asarray(n_cycles) / (2 * np.pi * np.asarray(freqs))
 
 
-def calc_wavelet(tensor_data, fs, freqs, pad, low_cycles, high_cycles, split_freq):
+def wavelet_reach(freqs, max_cycles, max_reach, n_sd: float = 3):
+    """
+    Returns how far (s) the wavelet of each frequency reaches from its time point: n_sd SDs of its Gaussian envelope.
+    At 3 SD the envelope weight has dropped to ~1% of its peak.
+    """
+    return n_sd * wavelet_time_sd(freqs, morlet_cycles(freqs, max_cycles, max_reach))
+
+
+def valid_wavelet_bins(freqs, patch_window, target_window, fs, max_cycles, max_reach):
+    """
+    Returns a (freqs, time) boolean mask over the samples of one patch (patch_window, sampled at fs from its start):
+    True where the sample lies in target_window and the wavelet of that frequency reaches no further than the patch edges,
+    i.e. the bin is computed from real data of the patch only, not from its reflect padding.
+    """
+    n_samples = round((patch_window[1] - patch_window[0]) * fs)
+    times = patch_window[0] + np.arange(n_samples) / fs
+    reach = wavelet_reach(freqs, max_cycles, max_reach)[:, None]
+    in_target = (times >= target_window[0] - 1e-9) & (times <= target_window[1] + 1e-9)
+    inside_patch = (times - reach >= patch_window[0] - 1e-9) & (times + reach <= patch_window[1] + 1e-9)
+    return in_target[None, :] & inside_patch
+
+
+def calc_wavelet(tensor_data, fs, freqs, pad, max_cycles, max_reach):
     """
     Calculates the complex Morlet wavelet magnitudes of an EEG epoch tensor (channels, time) at freqs and returns them as (freqs, channels, time) along with freqs.
-    Frequencies below split_freq use a wavelet of low_cycles cycles, the rest one of high_cycles cycles (pywt cmorB-1.0 has 2*pi*sqrt(B/2) cycles).
-    Both wavelets give the same magnitude for a sinusoid, while broadband activity gets ~sqrt(high_cycles / low_cycles) times larger magnitudes
-    from the wider frequency band of the shorter wavelet.
+    The number of cycles per frequency follows morlet_cycles (pywt cmorB-1.0 has 2*pi*sqrt(B/2) cycles).
+    All wavelets give the same magnitude for a sinusoid, while broadband activity gets ~sqrt(max_cycles / n) times larger magnitudes
+    from the wider frequency band of a wavelet with n < max_cycles cycles.
     """
     np_data = tensor_data.numpy()
     # Pad the data to avoid edge effects in the wavelet transform
     if pad > 0:
         np_data = np.pad(np_data, pad_width=((0, 0), (pad, pad)), mode='reflect')
 
-    # Use lower cycle count for lower frequencies to shorten the wavelet in time and reduce edge effects
-    cycles = morlet_cycles(freqs, low_cycles, high_cycles, split_freq)
+    # Use fewer cycles for low frequencies to keep their wavelets within max_reach
+    cycles = morlet_cycles(freqs, max_cycles, max_reach)
     mag = np.empty((len(freqs), *np_data.shape))
     for n in np.unique(cycles):
         idx = np.where(cycles == n)[0]

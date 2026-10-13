@@ -48,7 +48,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
                         if mags is None:
                             print(f"WARNING: wavelet target not found for subject: {subj}, condition: {cond}, id: {idx}")
                             continue
-                        mags_data = mags.clone().detach()
+                        mags_data = mags.clone().detach().float()  # targets are stored as float16
                         mags_data = utils.cut_to_size(mags_data, window_size)
                         # log scale wavelet magnitudes
                         if log: mags_data = 20*torch.log10(mags_data + 1e-7) # add small value to avoid log(0)

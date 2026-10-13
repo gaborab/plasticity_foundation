@@ -1,7 +1,7 @@
 # EEG Foundation Model Fine-Tuning & Plasticity Analysis Pipeline
 
-> **Project status: active development.**
-> The pipeline works end to end, but the architecture and code are still being cleaned up. See [Known issues & caveats](#known-issues--caveats) before running anything.
+> **Project status: active development, design change in progress.**
+> The dataset step (`make_dataset.py`) builds the data for the new **pre/post patch design** (see [Design change](#design-change-prepost-patches-and-masked-channel-reconstruction)). Training, inference and the analysis notebooks (steps 2–4 below) still describe and implement the previous single-window design and are being adapted. See [Known issues & caveats](#known-issues--caveats) before running anything.
 
 ---
 
@@ -17,13 +17,25 @@ The idea:
 
 The pipeline covers preprocessing, subject-wise k-fold fine-tuning, inference with per-trial metrics, and interactive analysis in Jupyter.
 
+### Design change: pre/post patches and masked-channel reconstruction
+
+The previous model learnt the wavelet transform of its own input, so its error could not depend on brain state, and its window edges were computed from data it never saw. The new design:
+
+- **Masked-channel reconstruction.** The model sees the EEG of all channels except a masked one (or a neighbourhood around it) and predicts the masked channel's wavelet target. Interpolated channels are never targets.
+- **Two patches per trial.** Every trial is split into a **pre-stimulus patch** (−1.3 … −0.3 s) and a **post-stimulus patch** (−0.3 … 0.7 s), one LaBraM patch (1 s, 200 samples) each. They go through the model in **separate forward passes** and get **separately computed wavelet targets**, so the two share no data.
+- **Scored windows.** Post 0 … 0.4 s (before any button press), pre −1.0 … −0.7 s. With the wavelet cycles used (≤ 0.29 s reach), every scored bin is computed from real data of its own patch only.
+- **Pre-stimulus correction.** The pre-patch error serves as a reference for the post-patch error of the same model, which cancels cap-refit and session effects to first order. Within-session contrasts across the four recording blocks of a session give a cap-free check.
+- **Within-subject folds** (`KFoldSplitter.split_within_subjects`), so a subject label can be given to the model.
+
+Only the dataset step implements this so far. Training (`run_general_finetune.py`), inference (`run_inference.py`) and the notebooks still follow the previous design.
+
 ```mermaid
 flowchart LR
     RAW[("data/raw/STMD_data<br/>EDF + NPZ triggers")] --> MD["make_dataset.py<br/>preprocess · clean · epoch · CWT"]
     MD --> QC[("outputs/qc<br/>bad channels · ICA · autoreject reports")]
     MD <--> CACHE[("data/processed/cache/ica<br/>fitted ICAs + ICLabel scores")]
-    MD --> PRE[("data/processed/pre_patching<br/>epochs + wavelet_targets + manifest")]
-    MD --> POST[("data/processed/post_patching<br/>epochs + wavelet_targets + manifest")]
+    MD --> PRE[("data/processed/pre_patching<br/>input_epochs + wavelet_targets + manifest")]
+    MD --> POST[("data/processed/post_patching<br/>input_epochs + wavelet_targets + manifest")]
     PRE --> FT["run_general_finetune.py<br/>6-fold subject-wise CV"]
     FT --> CKPT[("outputs/finetune_outputs/{model}/{fold}<br/>checkpoints · logs · metadata")]
     CKPT --> INF["run_inference.py"]
@@ -56,7 +68,7 @@ uv run python run_inference.py --model_name my_model --target_mode wavelet --pos
 Then open the notebooks in `notebooks/` (see [Analysis notebooks](#4-analysis-notebooks)).
 
 **Before re-running `make_dataset.py`:**
-- **Delete `data/processed/pre_patching` and `data/processed/post_patching`.** Autoreject drops epochs and the file numbering restarts at 1, so old files with higher numbers would otherwise survive and mix into the new dataset.
+- **Empty `input_epochs/` and `wavelet_targets/` in `data/processed/pre_patching` and `post_patching`** (or delete both folders). Inputs and targets are paired by file name only, so files of an earlier run would mix into the new dataset. `make_dataset.py` refuses to start while these folders contain `.pt` files (see [Guard and consistency check](#guard-and-consistency-check)).
 - **Keep `data/processed/cache`.** It holds the fitted ICAs, and without it every recording is refitted.
 
 The first run fits one ICA per recording (about 15 s each, roughly 40 min in total). Later runs load them from the cache. Build the final dataset from a run that loads the cached ICAs; see [Reproducibility](#reproducibility).
@@ -82,19 +94,20 @@ For preprocessing:
 ## Repository structure
 
 ```text
-├── make_dataset.py              # Step 1: preprocessing, epoching, wavelet targets -> .pt files
+├── make_dataset.py              # Step 1: preprocessing, epoching, fast-press exclusion, pre/post patch wavelet targets -> .pt files
 ├── run_general_finetune.py      # Step 2: subject-wise k-fold fine-tuning of LaBraM + regression head
 ├── run_inference.py             # Step 3: reconstruction of held-out trials, per-trial metrics -> HDF5
 ├── make_h5dataset_for_pretrain.py  # Auxiliary/experimental: HDF5 export for LaBraM pretraining (not part of the main pipeline)
 ├── qc_bad_channels.py           # QC: runs the automatic bad channel detector on all recordings -> outputs/qc/
-├── reaction_times.py            # Analysis: button-press reaction times, baseline vs post-patching -> outputs/reaction_times/
+├── reaction_times.py            # Analysis: button-press reaction times, baseline vs post-patching -> outputs/reaction_times/ (its trigger-code loader is used by make_dataset.py)
+├── stimulus_intervals.py        # Analysis: time between consecutive stimuli -> outputs/stimulus_intervals/
 ├── pyproject.toml / uv.lock     # Environment definition
 │
 ├── core/                        # Project package
 │   ├── settings.py              # ALL global configuration (paths, preprocessing, model and wavelet params, bands)
 │   ├── architectures.py         # EEGAutoencoder / EEGSpectralDecoder (LaBraM backbone + MLP head)
-│   ├── datasets.py              # FinetuneDataset, FinetuneSplits, KFoldSplitter
-│   ├── utils.py                 # Wavelet transform, cropping, metric calculation
+│   ├── datasets.py              # FinetuneDataset, FinetuneSplits, KFoldSplitter (subject-wise and within-subject folds)
+│   ├── utils.py                 # Wavelet transform and validity masks, cropping, metric calculation
 │   ├── io.py                    # EpochIO (.pt I/O), training-log loading, inference HDF5 read/write
 │   ├── io_models.py             # Trial / Metrics dataclasses (lazy views on inference HDF5)
 │   ├── io_utils.py              # Filename conventions, figure saving
@@ -136,10 +149,15 @@ Every script and notebook reads its configuration from this module at import tim
 | `INCLUDED_CONDITIONS` | `['baseline', 'post-patching']` | Session folders to process (case-insensitive) |
 | `EXCLUDED_SUBJECTS` | `STMD67`, `STMD71` | Skipped entirely |
 | `RECORDINGS_PER_CONDITION` | `None` | Use all recording folders per session (otherwise last *n* baseline / first *n* post-patching) |
-| `TIME_WINDOW` | (−0.2, 0.8) s | Window seen by the model (200 samples) |
-| `EXTENDED_OFFSET` | 1.5 s | Extra context on both sides → `EXTENDED_TIME_WINDOW` = (−1.7, 2.3) s |
-| `PAD_TIME` → `PADDING` | 1.5 s → 300 samples | Reflect padding added before the CWT |
-| `WINDOW_SIZE` | 200 | Samples per model input |
+| `PRE_WINDOW`, `POST_WINDOW` | (−1.3, −0.3) s, (−0.3, 0.7) s | The two patches of a trial, one LaBraM patch (200 samples) each, meeting at −0.3 s. Each goes through the model in its own forward pass |
+| `EPOCH_WINDOW` = `WHOLE_EPOCH_WINDOW` | (−1.3, 0.7) s | Epoching window, and the window of the saved input epoch and wavelet target (both patches together, split during training) |
+| `PATCH_SIZE` = `TARGET_WINDOW_SIZE` | 200 | Samples per patch, and per predicted wavelet target |
+| `PRE_TARGET_WINDOW` | (−1.0, −0.7) s | Scored part of the pre patch. Wavelet support −1.29 … −0.41 s |
+| `POST_TARGET_WINDOW` | (0.0, 0.4) s | Scored part of the post patch, before any button press. Wavelet support −0.29 … 0.69 s |
+| `PAD_TIME` → `PADDING` | 0.3 s → 60 samples | Reflect padding of each patch for its CWT. It only reaches bins outside the scored windows |
+| `BASELINE_WINDOW` | `None` | No baseline correction: a baseline window would shift each patch by data of the other one. The 0.1 Hz high-pass removes drift |
+| `MIN_REACTION_TIME` | 0.5 s | Trials with a button press earlier than this after onset are dropped (about 1.4 % of trials) |
+| `METRIC_WINDOWS` | `full`, `analysis` = (0, 0.4) s, `reference` = (−1.0, −0.7) s | Time windows the metrics are computed on (`button` was removed) |
 | `CHORDER_STANDARD`, `N_CHANNELS` | 23 channels | Channel order used everywhere (see table below) |
 | `SEED` | 42 | `torch.manual_seed`, fold shuffling, ICA and autoreject |
 | `EPS` | 1e-8 | Numerical guard in metrics |
@@ -151,7 +169,7 @@ Every script and notebook reads its configuration from this module at import tim
 | `AUTO_BAD_CHANNEL_PARAMS` | see [automatic bad channel detection](#automatic-bad-channel-detection) | Clipping > 0.5 % of samples, flat < 1 µV, noisy > 10× median. Line-noise criterion off |
 | `ICA_PARAMS` | 15 components, extended infomax, `random_state=SEED` | ICA fitted per recording for ICLabel |
 | `ICLABEL_THRESHOLDS` | eye ≥ 0.7 · heart, line noise, channel noise ≥ 0.8 · muscle ≥ 0.9 | A component is removed if ICLabel's probability for any of these classes reaches its threshold. Brain and "other" are never removed |
-| `AUTOREJECT_WINDOW` | `TIME_WINDOW` ± `AUTOREJECT_MARGIN` (0.4 s) = (−0.6, 1.2) s | Part of each epoch on which autoreject judges artifacts |
+| `AUTOREJECT_WINDOW` | `WHOLE_EPOCH_WINDOW` = (−1.3, 0.7) s | Part of each epoch on which autoreject judges artifacts: every sample the inputs and wavelet targets are made of |
 | `AUTOREJECT_PARAMS` | `random_state=SEED`, `n_jobs=4`, `n_interpolate=[1, 2, 4, 8]` | Local autoreject. At most 8 channels are interpolated per epoch. `n_jobs` changes the result, so keep it fixed |
 
 ### Model / targets
@@ -159,22 +177,22 @@ Every script and notebook reads its configuration from this module at import tim
 | Setting | Value | Meaning |
 |---|---|---|
 | `LABRAM_VERSION` | `labram_base_patch200_200` | 12 blocks, embed dim 200, 10 heads, patch size 200 |
-| `SPECTRAL_DECODER_PARAMS['freq_window']` | (2, 60) Hz | Wavelet frequency range |
+| `SPECTRAL_DECODER_PARAMS['freq_window']` | (5, 60) Hz | Wavelet frequency range. Below 5 Hz the wavelets reach further than a patch allows |
 | `N_FREQS` | 50 | Number of wavelet frequencies |
-| `FREQS` | `np.geomspace(2, 60, 50)` | Log-spaced frequency axis |
-| `SPECTRAL_DECODER_PARAMS['wavelet']` | `cmor1.5-1.0` | Complex Morlet, bandwidth 1.5, centre frequency 1.0 |
-| `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 200 = 10 000 | Head output size per channel token |
+| `FREQS` | `np.geomspace(5, 60, 50)` | Log-spaced frequency axis |
+| `WAVELET_PARAMS` | `max_cycles` = `MORLET_CYCLES` ≈ 5.44, `max_reach` ≈ 0.286 s | Complex Morlet (`cmorB-1.0`). Cycles per frequency `n(f) = min(5.44, 2π·f·max_reach/3)`: 3 cycles at 5 Hz (`MIN_CYCLES`), rising to 5.44 (the previous `cmor1.5-1.0`) from about 9.1 Hz. Every wavelet reaches at most 0.286 s (3 SD) |
+| `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 200 = 10 000 | Head output size per channel token: one patch's wavelet target |
 | `AUTOENCODER_PARAMS['target_dim']` | 200 | Head output size per channel token (raw-signal mode) |
-| `FREQ_BANDS` | δ 2–4, θ 4–8, α 8–12, β 12–30, γ 30–60 Hz | Bands used for band-wise metrics (edges inclusive). The 3 Hz notch lowers power at about 48.5–51.5 Hz inside the γ band, identically in both sessions |
-| `FREQ_BAND_INDICES` | δ 0–9, θ 10–19, α 20–25, β 26–39, γ 40–49 | Indices of the `FREQS` bins in each `FREQ_BANDS` band, computed once from the two. Passed to the metric and time series functions to index the frequency axis of the (23, 50, 200) tensors |
+| `FREQ_BANDS` | θ 5–8, α 8–12, β 12–30, γ 30–60 Hz | Bands used for band-wise metrics (edges inclusive). The 3 Hz notch lowers power at about 48.5–51.5 Hz inside the γ band, identically in both sessions |
+| `FREQ_BAND_INDICES` | θ 0–9, α 10–17, β 18–35, γ 36–49 | Indices of the `FREQS` bins in each `FREQ_BANDS` band, computed once from the two. Passed to the metric and time series functions to index the frequency axis of the (23, 50, …) tensors |
 
 ### Paths
 
 | Setting | Path |
 |---|---|
 | `DATA_ROOT` | `data/raw/STMD_data` |
-| `FINETUNE_DIR` (baseline) | `data/processed/pre_patching/{epochs, wavelet_targets, superlet_targets}` |
-| `PATCH_DIR` (post-patching) | `data/processed/post_patching/{epochs, wavelet_targets, superlet_targets}` |
+| `FINETUNE_DIR` (baseline) | `data/processed/pre_patching/{input_epochs, wavelet_targets}` (`FINETUNE_INPUT_EPOCHS_DIR`, `FINETUNE_WAVELET_DIR`) |
+| `PATCH_DIR` (post-patching) | `data/processed/post_patching/{input_epochs, wavelet_targets}` (`PATCH_INPUT_EPOCHS_DIR`, `PATCH_WAVELET_DIR`) |
 | `CACHE_DIR` | `data/processed/cache` (fitted ICAs in `ica/`) |
 | `QC_DIR` | `outputs/qc` (preprocessing reports) |
 | `FINETUNE_OUTPUT_DIR` | `outputs/finetune_outputs` |
@@ -213,14 +231,14 @@ In the code, channel names look like `EEG FP1-REF`. The scripts strip them to `F
 
 - **Session**: `baseline` (pre-patching) or `post-patching`. The session is encoded by the **directory** a file lives in (`pre_patching/` vs `post_patching/`), not by the filename.
 - **Condition / stimulus type**: the epoch category *within* a session, named `{side}_{eccentricity}` for local mismatch stimuli plus `global`. The current data contains `left_1–3`, `center_2–3`, `right_1–3` and `global`. In `FinetuneDataset` metadata, in the inference HDF5 paths and in the notebooks' `conditions` filter, "condition" means this stimulus type.
-- **Trial / epoch id**: 1-based running index of the epoch within a subject × stimulus type, counted **after** autoreject. Ids follow time order: recordings in chronological order, onsets within a recording. Global stimuli have about 5 trials per recording (1–5 after autoreject), so ids 1–5 are roughly the first recording, but rejected epochs shift the boundaries. The `epochs_manifest.csv` links each id to its recording, onset and interpolated channels; use its `recording` column, not id ranges, to select runs. Ids are only stable for one `make_dataset.py` run: re-running it can renumber the epochs, so inference outputs and manifest must come from the same dataset version.
+- **Trial / epoch id**: 1-based running index of the epoch within a subject × stimulus type, counted **after** autoreject and the fast-press exclusion. Ids follow time order: recordings in chronological order, onsets within a recording. Global stimuli have about 5 trials per recording (1–5 after autoreject), so ids 1–5 are roughly the first recording, but rejected epochs shift the boundaries. The `epochs_manifest.csv` links each id to its recording, onset and interpolated channels; use its `recording` column, not id ranges, to select runs. Ids are only stable for one `make_dataset.py` run: re-running it can renumber the epochs, so inference outputs and manifest must come from the same dataset version.
 - **Recording**: one EDF file (one recording folder). A session consists of several recordings, usually 4.
 
 ---
 
 ### 1. Dataset creation: `make_dataset.py`
 
-Converts raw EDF recordings into cleaned, per-epoch PyTorch tensors: one file for the EEG epoch and one for its wavelet target. It also writes QC reports and a manifest that records the origin and interpolated channels of every saved epoch.
+Converts raw EDF recordings into cleaned, per-trial PyTorch tensors: one file for the EEG input epoch (pre and post patch together) and one for its wavelet target (both patches' targets together). It also writes QC reports and a manifest that records the origin and interpolated channels of every saved epoch.
 
 **Expected input layout**
 
@@ -260,15 +278,18 @@ Per subject × session:
 |---|---|---|---|
 | 9 | Concatenate | `process_subjects` | All recording folders of the session |
 | 10 | Resample | `make_dataset.main` | 200 Hz on the continuous data |
-| 11 | Epoching | `_epoch_by_side` | **All onset triggers together** (DIN21 left, DIN31 center, DIN41 right, DIN51 global) in one `mne.Epochs`. Window `EXTENDED_TIME_WINDOW` (−1.7, 2.3) s, MNE baseline (−0.2, 0) s |
+| 11 | Epoching | `_epoch_by_side` | **All onset triggers together** (DIN21 left, DIN31 center, DIN41 right, DIN51 global) in one `mne.Epochs`. Window `EPOCH_WINDOW` (−1.3, 0.7) s (401 samples), **no baseline correction** |
 | 12 | Local autoreject | `_epoch_by_side` | Once per session on the pooled epochs (see below). Bad channels are interpolated per epoch, and epochs that can't be repaired are dropped |
 | 13 | Metadata + split | `_attach_trial_metadata`, `_split_by_both` | Per epoch: `eccentricity`, `recording`, `onset_s`, `rec_interpolated`, `ar_interpolated`. Then split into `{side}_{ecc}` (eccentricity 0 excluded) and `global` |
-| 14 | Channel match & order | `match_and_order` | On the epochs, **after** autoreject, so autoreject interpolates from all 65 channels. Keeps the 23 mapped channels, renamed to 10-20 names and ordered as `CHORDER_STANDARD`. If a mapped channel is missing, it raises an error and the dataset build stops, instead of saving epochs with a wrong channel order |
-| 15 | Unit conversion | `rescale_to_uv` | V → **µV** (×1e6), as LaBraM expects |
-| 16 | Wavelet target | `save_dataset` → `utils.calc_wavelet` | CWT of the **full extended epoch** (801 samples), reflect-padded by 300 samples per side, magnitude, padding removed, cropped to `TIME_WINDOW` → **(23, 50, 200)** |
-| 17 | EEG epoch | `save_dataset` | Cropped to `TIME_WINDOW` (samples 300:500 of the extended epoch) → **(23, 200)** µV |
+| 14 | Fast-press exclusion | `make_dataset.drop_fast_presses` | Drops epochs whose first button press (DIN14, before the next onset of the same recording) comes earlier than `MIN_REACTION_TIME` (0.5 s) after onset, as such presses fall into the post-stimulus wavelet targets. Reaction times come from the trigger annotations of the same preprocessed session, so they match the epochs exactly (checked against `reaction_times.py`: ≤ 4 ms apart, the 200 Hz resampling). Epochs without a press are kept. Report: `fast_press_report.csv` |
+| 15 | Channel match & order | `match_and_order` | On the epochs, **after** autoreject, so autoreject interpolates from all 65 channels. Keeps the 23 mapped channels, renamed to 10-20 names and ordered as `CHORDER_STANDARD`. If a mapped channel is missing, it raises an error and the dataset build stops, instead of saving epochs with a wrong channel order |
+| 16 | Unit conversion | `rescale_to_uv` | V → **µV** (×1e6), as LaBraM expects |
+| 17 | Input epoch | `save_dataset` | Cropped to `EPOCH_WINDOW` (the last MNE sample dropped) → **(23, 400)** µV: pre patch = samples 0:200, post patch = 200:400 |
+| 18 | Wavelet target | `save_dataset` → `patch_wavelet_target` → `utils.calc_wavelet` | **Each patch transformed separately** from its own 200 samples, reflect-padded by 60 samples per side, magnitude, padding removed, and only then joined → **(23, 50, 400)**, stored as float16 |
 
-The extended window and the extra padding give the low-frequency wavelets enough context. At 2 Hz, the `cmor1.5-1.0` wavelet reaches about ±0.87 s. Without them, edge effects would contaminate the 1 s analysis window.
+**Why the patches are transformed separately.** A wavelet bin near the patch boundary would otherwise contain data of the other patch, and the pre and post errors would no longer be independent. With the cycles of `WAVELET_PARAMS`, every wavelet reaches at most 0.286 s (3 SD; 3 cycles at 5 Hz, 0.13 s at 20 Hz, 0.065 s at 40 Hz). The scored windows keep that distance from their patch edges, so every scored bin is computed from real data of its own patch, and the reflect padding only reaches bins that are never scored. `utils.valid_wavelet_bins(freqs, patch_window, target_window, fs, **WAVELET_PARAMS)` returns this as a (freqs, 200) mask per patch: a bin is valid if it lies in the target window and its wavelet stays inside the patch. With the current settings it equals the scored windows at every frequency; it guards against settings changes that would let bins reach the padding.
+
+**float16 targets.** Storing the magnitudes as float16 halves the size (0.92 MB per trial). Converted back to float32 before the log, the dB values differ from float32 storage by at most 0.004 dB (checked on real epochs; magnitudes 2·10⁻⁴ … 47, well inside the float16 range). Always convert to float32 before taking the log.
 
 #### Automatic bad channel detection
 
@@ -304,11 +325,11 @@ The extended window and the extra padding give the low-frequency wavelets enough
 - ρ is chosen from `AUTOREJECT_PARAMS['n_interpolate']` = `[1, 2, 4, 8]`, and κ from 0, 0.1, …, 1, by cross-validation **per session**.
 
 Implementation details:
-- **Fitted on a 1 Hz high-passed copy.** The copy is epoched identically, then cropped to `AUTOREJECT_WINDOW` (−0.6, 1.2) s. Slow drifts below 1 Hz would otherwise inflate peak-to-peak amplitude on many channels at once and cause drops that aren't artifacts. The decisions (`reject_log`) are then applied to the real full-length epochs with `ar.transform(epochs, reject_log=...)`.
+- **Fitted on a 1 Hz high-passed copy.** The copy is epoched identically, then cropped to `AUTOREJECT_WINDOW` (the whole epoch, −1.3 … 0.7 s). Slow drifts below 1 Hz would otherwise inflate peak-to-peak amplitude on many channels at once and cause drops that aren't artifacts. The decisions (`reject_log`) are then applied to the real full-length epochs with `ar.transform(epochs, reject_log=...)`.
 - **Pooled per session.** All stimulus types are cleaned together, because 20 global epochs per session would be too few for cross-validation.
 - **At most 8 of 65 channels are interpolated per epoch.** The default search range would allow up to 32.
 
-Results:
+Results (from the previous build with the (−0.6, 1.2) s autoreject window; re-check them after rebuilding with the new window):
 - **Drops.** 490 of 6 840 epochs were dropped (7.2 %). Per session the median is 5.6 %, and 28 of 38 sessions drop ≤ 10 %.
 - **Dropped epochs are whole-cap artifacts.** A dropped epoch has a median of 24–56 of 65 channels over threshold, and it's large before the stimulus too.
 - **Responses aren't being removed.** Dropped global epochs don't have a larger post- than pre-stimulus amplitude than kept ones (posterior ratio 1.00 vs 1.01).
@@ -318,19 +339,18 @@ Results:
 
 ```text
 data/processed/{pre_patching|post_patching}/
-├── epochs/              {subject}_{stimulus}_epoch{id}.pt     e.g. STMD11_center_2_epoch1.pt    (23, 200) float32, µV
-├── wavelet_targets/     {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 200) float32, linear magnitude
-├── superlet_targets/    (created, but superlets are not implemented)
+├── input_epochs/        {subject}_{stimulus}_input{id}.pt     e.g. STMD11_center_2_input1.pt    (23, 400) float32, µV, −1.3 … 0.7 s
+├── wavelet_targets/     {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 400) float16, linear magnitude
 └── epochs_manifest.csv  one row per saved epoch (see below)
 ```
 
-Filenames are parsed back by splitting at the *first* underscore (subject) and the *last* marker (`_epoch`). Subject names must therefore not contain underscores. The `id` is a running number per subject × stimulus **after** autoreject, so it doesn't identify the original trial. The manifest does.
+Samples 0:200 of both files are the pre patch (−1.3 … −0.3 s), samples 200:400 the post patch (−0.3 … 0.7 s). Filenames are parsed back by splitting at the *first* underscore (subject) and the *last* marker (`_input`, `_wavelet`). Subject names must therefore not contain underscores. Load the inputs with `EpochIO.load_all_epochs(directory, marker='_input')`. The `id` is a running number per subject × stimulus **after** autoreject and the fast-press exclusion, so it doesn't identify the original trial. The manifest does.
 
 **`epochs_manifest.csv`**: one row per saved file.
 
 | Column | Content |
 |---|---|
-| `subject`, `stimulus`, `id` | Identify the files `{subject}_{stimulus}_epoch{id}.pt` / `…_wavelet{id}.pt`, and the inference HDF5 path `{subject}/{stimulus}/{id}` |
+| `subject`, `stimulus`, `id` | Identify the files `{subject}_{stimulus}_input{id}.pt` / `…_wavelet{id}.pt`, and the inference HDF5 path `{subject}/{stimulus}/{id}` |
 | `recording` | EDF stem the epoch came from |
 | `onset_s` | Onset within the concatenated session (s) |
 | `rec_interpolated` | Model channel indices (`ch_i`) interpolated for the **whole recording** (manual + automatic), `;`-separated |
@@ -345,6 +365,16 @@ Use the two interpolation columns to mask interpolated channels in channel-level
 | `auto_bad_chans.csv` | channel × recording | Detector metrics (`clip_fraction`, `raw_std_uv`, `noise_ratio`, `line_db`, …) and `reasons` (empty = good) |
 | `ica_report.csv` | ICA component × recording | ICLabel probabilities for the 7 classes and `excluded` |
 | `autoreject_report.csv` | session | `n_epochs`, `n_dropped`, `mean_interp_per_kept_epoch`, `max_interp_per_kept_epoch`, the chosen `n_interpolate` / `consensus`, subject and session |
+| `fast_press_report.csv` | subject × session × stimulus | `n_epochs` (after autoreject) and `n_dropped` by the fast-press exclusion |
+
+#### Guard and consistency check
+
+Inputs and wavelet targets are paired by file name only, so leftovers of an earlier run could be paired with new epochs. Two checks prevent that:
+
+- **Guard** (`check_output_dirs_empty`): runs at the start of `main`, before any preprocessing. It raises a `RuntimeError` if `input_epochs/` or `wavelet_targets/` of either session already contains `.pt` files. It deletes nothing.
+- **Consistency check** (`check_saved_consistency`): runs after saving. It compares the `(subject, stimulus, id)` keys of `input_epochs/`, `wavelet_targets/` and `epochs_manifest.csv` per session, prints missing and extra keys, and ends the run with a `RuntimeError` if they differ. This catches stimulus groups that a failure inside `save_dataset` cut short (each subject × stimulus is saved inside one `try` block).
+
+Together they guarantee that an input and a target with the same key come from the same trial of the same run.
 
 **CLI**
 
@@ -352,6 +382,8 @@ Use the two interpolation columns to mask interpolated channels in channel-level
 |---|---|---|
 | `--save_wavelet` | `True` | Compute and save wavelet targets (currently cannot be switched off from the CLI) |
 | `--save_superlet` | `False` | Placeholder, does nothing |
+
+`make_dataset.py` imports `load_trigger_codes` from `reaction_times.py`, so run it from the repository root.
 
 #### Reproducibility
 
@@ -361,7 +393,7 @@ Use the two interpolation columns to mask interpolated channels in channel-level
 
 #### Preprocessing QC summary
 
-Baseline vs post-patching, per subject (19 subjects, paired Wilcoxon):
+Baseline vs post-patching, per subject (19 subjects, paired Wilcoxon; from the previous build, re-check after rebuilding):
 
 | Step | Baseline | Post-patching | p |
 |---|---|---|---|
@@ -380,6 +412,8 @@ Post-patching data receives slightly more cleaning throughout, though no step sh
 
 Trains one model per cross-validation fold on **baseline** epochs only.
 
+> **Not yet adapted to the pre/post patch design.** This section describes the previous single-window training: one 200-sample input per trial predicting its own wavelet target. The new dataset needs a dataset class that splits each trial into a pre and a post sample, masks channels, and applies the validity masks of `utils.valid_wavelet_bins` in the loss.
+
 **CLI**
 
 | Argument | Default | Meaning |
@@ -396,17 +430,23 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 
 #### 2.1 Data split: `core.datasets.KFoldSplitter.split_by_subject`
 
-- Loads all baseline epochs from `FINETUNE_EPOCHS_DIR` into `{subject: {stimulus: [(id, tensor), …]}}`.
+- Loads all baseline epochs from `FINETUNE_INPUT_EPOCHS_DIR` into `{subject: {stimulus: [(id, tensor), …]}}`.
 - Shuffles the subject list with `random.Random(SEED)` and deals subjects into *k* folds (`subjects[i::k]`).
 - For fold *i*, the **test** set is fold *i*'s subjects. The remaining subjects keep their shuffled order: the first `len // 5` (≈20 %) form the **validation** set and the rest the **training** set.
 - The split is **subject-disjoint**: no subject appears in more than one of train/val/test in a fold. Each subject is a test subject in exactly one fold. With k = 6 this gives roughly 67 / 17 / 17 % of subjects. With the current 19 subjects: 12–13 train, 3 val, 3–4 test.
+
+**Within-subject folds: `KFoldSplitter.split_within_subjects`** (for models that get a subject label). Every subject is in the training, validation and test data of every fold:
+- Epochs are identified by `(subject, stimulus, id)` keys. The keys of every subject × stimulus group are shuffled with `random.Random(SEED)` and concatenated, and fold *i* is every *k*-th key (`keys[i::k]`), like `split_by_subject`. Each fold therefore holds about 1/k of every subject's every stimulus type, and every epoch is a test epoch in exactly one fold.
+- For fold *i*, the test set is fold *i*. From the remaining epochs, 20 % (`len // 5`) of every subject × stimulus group is shuffled into the validation set, the rest is the training set, so training and validation are stratified too.
+- `_select(keys)` turns the key lists back into the `{subject: {stimulus: [(id, tensor), …]}}` dicts of `FinetuneSplits`.
+- On the 3 201 baseline epochs of the previous build (19 subjects, 171 subject × stimulus groups, 9–20 epochs each): about 2 183 train / 484 val / 534 test epochs per fold, every group in all three sets of every fold.
 
 #### 2.2 Dataset and target transforms: `core.datasets.FinetuneDataset`
 
 Each sample is `(eeg, target, metadata)`, with `metadata = {"subject", "condition", "id"}`. All samples are loaded into memory at construction.
 
-- **EEG input**: the (23, 200) µV epoch, trimmed to a multiple of `WINDOW_SIZE` (`cut_to_size`). In `train_one_epoch`, `evaluate` and inference it is **divided by 100** (LaBraM's 0.1 mV input convention) and rearranged to `(B, 23, 1, 200)`, i.e. 23 channels × 1 patch × 200 samples.
-- **Wavelet target** (`target_mode='wavelet'`): the matching `…_wavelet{id}.pt` is loaded from `wavelet_dir`, and then:
+- **EEG input**: the (23, 200) µV epoch, trimmed to a multiple of `TARGET_WINDOW_SIZE` (`cut_to_size`). In `train_one_epoch`, `evaluate` and inference it is **divided by 100** (LaBraM's 0.1 mV input convention) and rearranged to `(B, 23, 1, 200)`, i.e. 23 channels × 1 patch × 200 samples.
+- **Wavelet target** (`target_mode='wavelet'`): the matching `…_wavelet{id}.pt` is loaded from `wavelet_dir`, converted from float16 to float32, and then:
   1. `log=True`: converted to dB, `20·log10(mag + 1e-7)`
   2. `normalize=True`: **per-trial z-score** over the whole (23, 50, 200) tensor, `(x − mean) / std`
 
@@ -501,6 +541,8 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 Reconstructs every fold's **held-out test subjects** with that fold's best checkpoint, for baseline and (optionally) post-patching data. It stores targets, reconstructions and per-trial metrics.
 
+> **Not yet adapted to the pre/post patch design.** This section describes the previous single-window inference, and `run_inference.py` still uses the removed `TARGET_TIME_WINDOW` and `FINETUNE_EPOCHS_DIR`, so it fails with the current settings. The windows below are those of the old files.
+
 **CLI**
 
 | Argument | Default | Meaning |
@@ -534,7 +576,7 @@ baseline_reconstruction.h5   /   postpatch_reconstruction.h5
                 └── {window}_channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
 ```
 
-`{window}` is every key of `METRIC_WINDOWS` in `core/settings.py`: `full` (`TIME_WINDOW`, −0.2–0.8 s), `analysis` (`ANALYSIS_WINDOW`, 0–0.4 s), `button` (0.4–0.8 s) and `reference` (−0.2–0 s). For each window, `run_reconstruction` crops target and output with `cut_to_timewindow` and computes the metrics on the crop. The crops are *not* re-normalised: only the full window is z-scored. Files written before the window metrics were added only contain `metrics_json` / `channel_metrics_json`, and the current `Trial` class can't read them, so re-run inference for such models.
+`{window}` is every key of `METRIC_WINDOWS` in `core/settings.py`. Files of the previous design contain `full` (−0.2–0.8 s), `analysis` (0–0.4 s), `button` (0.4–0.8 s) and `reference` (−0.2–0 s). The current `METRIC_WINDOWS` has `full` and `analysis` (both the post target, 0–0.4 s) and `reference` (the pre target, −1.0 … −0.7 s); `button` was removed, so `Trial` can no longer select it. For each window, `run_reconstruction` crops target and output with `cut_to_timewindow` and computes the metrics on the crop. The crops are *not* re-normalised: only the full window is z-scored. Files written before the window metrics were added only contain `metrics_json` / `channel_metrics_json`, and the current `Trial` class can't read them, so re-run inference for such models.
 
 (In `autoencoder` mode, `target`/`output` are (23, 200) µV and there are no band-wise metrics.)
 
@@ -576,7 +618,7 @@ t.target_data, t.recon_data            # np.ndarray, read lazily from HDF5 on ev
 t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # selected window (here: analysis)
 t.channel_metrics["ch_8"].nmae         # O1, selected window
 t.full_metrics.mae                     # a specific window, independent of t.window
-t.reference_channel_metrics["ch_8"].mae  # {full,analysis,button,reference}_metrics / _channel_metrics
+t.reference_channel_metrics["ch_8"].mae  # {full,analysis,reference}_metrics / _channel_metrics
 ```
 
 `Trial` is a lazy view on an open HDF5 group. Every window's metrics are available as `{window}_metrics` / `{window}_channel_metrics`, parsed from the JSON attributes into `Metrics` dataclasses on first access and cached. `metrics` / `channel_metrics` return the metrics of the trial's `window` (default `"full"`), i.e. the same cached objects as `{window}_metrics` / `{window}_channel_metrics`. All analysis helpers read `metrics` / `channel_metrics`, so the window passed to `load_inference_trials` selects the window of the whole analysis, including the volatility corrections. An unknown window raises a `ValueError` when the trial is created.
@@ -618,6 +660,8 @@ t.time_series("mae", bands=["alpha (8-12Hz)"])   # read only these bands
 
 ### 4. Analysis notebooks
 
+> The notebooks analyse outputs of the previous single-window design. `plasticity_tensor_analysis.ipynb` builds its time axis from the removed `TARGET_TIME_WINDOW`, and `plasticity_plotting.ipynb`'s `time_window = "button"` no longer exists.
+
 All notebooks read their configuration from `core.settings`. Each figure has a **filename box + "Save Figure" button** (`plotting.save_button`) that writes a 300 dpi PNG to the listed directory. In all time–frequency plots, the time axis is **epoch-relative**: 0 ms is −200 ms pre-stimulus, so stimulus onset falls at 200 ms. The frequency axis is logarithmic.
 
 #### `micro_evaluation.ipynb`: per-sample reconstruction viewer
@@ -655,7 +699,7 @@ Requires `run_inference.py --postpatch` outputs. The configuration cell sets:
 - `exclude_left_patched`: excludes the left-eye-dominant subjects of `eye_dominance.csv` (patched on the left eye)
 - `exclude_right_patched_lefties`: excludes the left-eye-dominant subjects of `rightpatch_eye_dominance.csv` (from STMD35 on, every subject was patched on the right eye)
 - `exclude_button_press`: excludes subjects of the button-press paradigm (before `NO_PRESS_FROM_SUBJECT`)
-- `time_window`: `full`, `analysis`, `button` or `reference`. Passed to `load_inference_trials`, so every plot, statistic and volatility correction of the notebook uses that window's metrics. It also sets the `window_*` file name suffix
+- `time_window`: `full`, `analysis` or `reference` (`button` was removed from `METRIC_WINDOWS`). Passed to `load_inference_trials`, so every plot, statistic and volatility correction of the notebook uses that window's metrics. It also sets the `window_*` file name suffix
 - `topomap_vlim`: colour scale of the effect-size topomaps. `None` uses one symmetric scale per figure from its largest absolute value, a number (e.g. `0.5`) the same fixed scale in all topomap figures
 
 The subjects in `settings.EXCLUDED_SUBJECTS` are always excluded. Folds 1–6 are loaded and merged into `baseline_merged` / `postpatch_merged` lists of `Trial`s, and `fill_corrected_maes` adds the volatility-corrected MAE right after loading (it prints the global slopes and the range of the channel slopes per band).
@@ -701,10 +745,10 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 |---|---|
 | `settings.py` | All configuration (see [Configuration](#configuration-coresettingspy)) |
 | `architectures.py` | `BaseMLPWrapper` (LaBraM + MLP head, exposes `get_num_layers` / `no_weight_decay` for the optimiser). `EEGSpectralDecoder` and `EEGAutoencoder` with `forward` (flattened output) and `get_unflattened_output` (per-channel shaped output) |
-| `datasets.py` | `FinetuneDataset` (loads samples, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter` (subject-wise k-fold split) |
-| `utils.py` | `calc_wavelet` (padded CWT magnitude), `cut_to_timewindow` (crop by seconds), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
+| `datasets.py` | `FinetuneDataset` (loads samples, converts float16 targets to float32, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter`: `split_by_subject` (subject-wise k-fold split), `split_within_subjects` (stratified within-subject k-fold split on `(subject, stimulus, id)` keys), `_select` (keys → nested epoch dict) |
+| `utils.py` | `calc_wavelet` (padded CWT magnitude, cycles per frequency from `morlet_cycles`), `morlet_cycles` (`min(max_cycles, 2π·f·max_reach/3)`), `wavelet_time_sd` (envelope SD in s), `wavelet_reach` (3 SD reach in s), `valid_wavelet_bins` ((freqs, time) mask of the bins of a patch that lie in a target window and are computed from real data of the patch only), `cut_to_timewindow` (crop by seconds, sample indices rounded), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
 | `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `save_time_series_metrics_hdf` (per-band time series, see [Time series metrics](#time-series-metrics)), `load_inference_trials` (filters for subjects, conditions and trial ids as ints or strings, `exclude_subjects`, the time `window` of the returned trials, and an optional `time_series_path`). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` |
-| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,button,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
+| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
 | `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
 | `plot_data_processing.py` | Time series: `calc_metric_time_series` / `calc_time_series_metrics` (`{band: (23, 200)}` of `TIME_SERIES_METRICS` metrics, see [Time series metrics](#time-series-metrics)), `calc_subjectwise_time_series`, `get_subjectwise_time_series_mean` (mean ± SEM over subjects), `get_subjectwise_time_series_difference` (paired post − baseline difference per subject, mean ± SEM). Volatility correction: `fill_corrected_maes` (see [Metric definitions](#metric-definitions-coreutilsget_inference_metrics--calculate_bandwise_metrics)). Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM with `ddof=1`, SD with `ddof=0`). Subject level: `calc_subjectwise_metric_stats`, `calc_subjectwise_channel_metric_stats` (`group_by='channel'` returns `{channel: {subject: {band}}}`), `get_subjectwise_metric_mean` (mean ± SEM of subject means). Subject-level volatility adjustment: `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric` (baseline and adjusted post-patching subject means, slopes). `calc_subjectwise_channel_d` (subject-level Cohen's d_z or Glass's Δ per channel and band, selectable `ddof`). `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta` (pooled-trial Glass's Δ, no longer used in the notebook). `rename_chans_to_mne`, `create_topomap_info` (mne.Info in model channel order with 10-20 labels at the positions of the recording EGI HydroCel-65 electrodes, `VREF` = Cz). Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
 | `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `session_correlation_plot` (bands × metrics grid, one colour and fitted line per session, adjustable point size), `save_button`, `save_heatmap`, `save_line_plot`, `plot_time_series` (lines with ±SEM bands, optional vertical and horizontal markers), `plot_time_series_grid` (one `plot_time_series` panel per band, separate y-axes). `plot_grouped_bar` places the bars of a group side by side for any number of series |
@@ -764,7 +808,14 @@ Only local autoreject was ported.
   - The median press is at about 710 ms in both sessions. Only 0.1–0.2 % of presses fall before 400 ms, and about 68 % before 800 ms.
   - There's no session difference (Wilcoxon over subject medians, p = 0.84).
   - Global stimuli get no button presses.
+  - 1.4 % of presses come before 500 ms (`MIN_REACTION_TIME`, the fast-press exclusion of `make_dataset.py`), 7.5 % before 550 ms, about 49 % before 700 ms.
 - **Options.** `--include_all` also analyses eccentricity-0 onsets. `--max_rt_ms` treats later presses as no response.
+- `make_dataset.py` imports its `load_trigger_codes`, but computes reaction times itself from the preprocessed recordings.
+
+**`stimulus_intervals.py`**: time between consecutive stimuli, with the same subjects, sessions and recordings as `reaction_times.py` (whose helpers it imports).
+- **Method.** Within each recording, for every stimulus onset: onset to next onset, and the stimulus's offset (onset code + 2) to the next onset. Every shown stimulus counts, also eccentricity-0 ones. Intervals never cross recordings.
+- **Outputs.** `outputs/stimulus_intervals/stimulus_intervals.csv` (one row per interval), summaries per session, stimulus type and subject, the 10 shortest intervals, and `outputs/plots/stimulus_intervals/soa_distribution.png`. It also counts intervals shorter than the end and the length of `EPOCH_WINDOW`.
+- **Results (29 subjects).** Onset to next onset: mean 6.66 s (SD 1.09), minimum 4.06 s; offset to next onset: mean 4.15 s, minimum 2.02 s. Stimuli last 1.98–3.01 s. Sessions are matched (6.68 vs 6.63 s), and each session has 4 recordings of 44 stimuli about 7 min apart. The previous stimulus's offset comes less than 2.3 s before onset in 1.6 % of trials, so the epoch window (−1.3 … 0.7 s) never contains another stimulus.
 
 **`qc_bad_channels.py`**: runs the automatic bad channel detector on every recording without the full preprocessing, and compares it with the manual selections. Outputs are `outputs/qc/auto_bad_channels_metrics.csv` (every channel) and `auto_bad_channels.csv` (flagged channels, with a `manually_flagged` column). Use it to review or retune `AUTO_BAD_CHANNEL_PARAMS`.
 
@@ -777,13 +828,16 @@ Only local autoreject was ported.
 
 ## Known issues & caveats
 
+**Design change in progress**
+- `run_general_finetune.py`, `run_inference.py` and the notebooks are not yet adapted to the pre/post patch dataset: no dataset class splits the trials into patches, masks channels or applies `valid_wavelet_bins`. `run_inference.py` and `plasticity_tensor_analysis.ipynb` still use the removed `TARGET_TIME_WINDOW` and fail with the current settings.
+
 **Data preparation**
-- **Delete `data/processed/pre_patching` and `post_patching` (not `cache/`) before re-running.** Otherwise old epoch files with higher ids survive and mix into the new dataset.
+- **Empty `input_epochs/` and `wavelet_targets/` (not `cache/`) before re-running.** The guard stops `make_dataset.py` otherwise; see [Guard and consistency check](#guard-and-consistency-check).
 - **The ICA cache key has no `cache_version` entry.** Changes to the *code* before the ICA fit (e.g. a different fitting filter or step order) don't change the key, so outdated ICAs would still be loaded. Add a version number to the key, or clear `data/processed/cache/ica/`, after such changes.
 - **Loading `bad_ch_selection.pkl` yourself doesn't apply it.** The pkl is keyed by EDF **file name**, but `preprocess_dir` looks it up by **path**. If you pass it directly to `preprocess_dir` (e.g. in test scripts), the manual bad channels are silently not applied, and new ICA cache files are created. `process_subjects` handles this correctly.
 - **Autoreject thresholds are learned per session**, from all of its recordings pooled. A recording that's uniformly noisier than the others loses many epochs (STMD34 post-patching tunnel1: 32 of 45).
 - **Recordings without an NPZ file** fall back to EDF annotations. Those have no eccentricity or recording tag, so their local stimuli are dropped and `recording` is empty in the manifest.
-- Changing `N_FREQS`, `freq_window`, `EXTENDED_OFFSET`, `PAD_TIME`, the wavelet or `TIME_WINDOW` requires regenerating all targets and retraining. Models trained with a different `N_FREQS` cannot be loaded (head shape mismatch).
+- Changing `N_FREQS`, `freq_window`, `WAVELET_PARAMS`, `PAD_TIME`, `PRE_WINDOW`, `POST_WINDOW` or `MIN_REACTION_TIME` requires regenerating all targets and retraining. Models trained with a different `N_FREQS` cannot be loaded (head shape mismatch). After changing the windows or the wavelet, check with `valid_wavelet_bins` that the scored windows still don't reach the padding.
 - `--save_wavelet` uses `store_true` with `default=True`, so it cannot be disabled from the CLI. Superlet targets (`--save_superlet`, `--target_mode superlet`) are not implemented: a superlet dataset is empty.
 
 **Training**
@@ -793,7 +847,7 @@ Only local autoreject was ported.
 - The no-weight-decay list (`pos_embed`, `cls_token`, `time_embed`) is matched against unprefixed names, but the wrapper's parameters are named `model.pos_embed` etc. These embeddings therefore do receive weight decay.
 
 **Fold reproducibility**
-- Inference and the notebooks rebuild the folds from the *current* contents of `FINETUNE_EPOCHS_DIR`. The subject order comes from filesystem glob order and is not sorted before seeded shuffling. Adding or removing subjects, or moving the data to another filesystem, can change the splits. Test sets would then no longer match training.
+- Inference and the notebooks rebuild the folds from the *current* contents of the baseline epoch folder (`FINETUNE_INPUT_EPOCHS_DIR`). The subject order comes from filesystem glob order and is not sorted before seeded shuffling. Adding or removing subjects, or moving the data to another filesystem, can change the splits. Test sets would then no longer match training.
 
 **Inference / metrics**
 - In the trial-level and band-wise NMAE, `EPS` is added to the ratio (`mae / std + eps`), not to the denominator. The channel-level NMAE adds it to the denominator.

@@ -3,6 +3,11 @@ import hashlib
 import h5py
 from typing import Dict, Any
 
+import yaml
+
+from core.settings import TRIGGER_MAPPING
+
+
 def vars_from_filename(stem, marker):
     """
     Extracts the numeric ID from a filename based on a specified marker. For example, if the filename is "subject_condition_epoch5.pt" and the marker is "_epoch", this function will return 5.
@@ -58,3 +63,20 @@ def generate_hash(input_dict: dict, return_length: int = 10) -> str:
     """
 
     return hashlib.sha256(json.dumps(input_dict).encode()).hexdigest()[:return_length]
+
+
+def load_trigger_codes():
+    """Returns ({onset_code: side}, button_press_code, mismatch_hit_code) from trigger_mapping.yaml."""
+    with open(TRIGGER_MAPPING, "r") as f:
+        mapping = yaml.safe_load(f)["trigger_mappings"]
+    onsets = {}
+    button, hit = None, None
+    for din, name in mapping.items():
+        code = int(din.replace("DIN", ""))
+        if name.endswith("_onset"):
+            onsets[code] = name.replace("_onset", "")
+        elif name == "button_press":
+            button = code
+        elif name == "mismatch_hit":
+            hit = code
+    return onsets, button, hit

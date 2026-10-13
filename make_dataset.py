@@ -13,8 +13,11 @@ import mne
 import pandas as pd
 import torch
 
+import numpy as np
+
 from core.io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
+from core.io_utils import load_trigger_codes
 from core import settings, io, io_utils
 from core import utils
 from typing import Dict, Any, Tuple, List
@@ -113,12 +116,83 @@ def rescale_to_uv(epochs: Dict[str, Dict[str, Dict[str, Any]]]):
 
 
 
+def press_reaction_times(raw: mne.io.Raw, onset_codes, button_code: int) -> Dict[Tuple[str, int], float]:
+    """
+    Returns {(recording, onset sample): reaction time (s)} for every stimulus onset in a preprocessed session raw:
+    the time to the first button press before the next stimulus onset of the same recording (no entry for onsets without a press).
+    Uses the 'DIN<code>/rec_<stem>' trigger annotations of the raw, the onset sample counts from raw.first_samp like epochs.metadata['onset_s'].
+    """
+    events, event_id = mne.events_from_annotations(raw, verbose=False)
+    desc_of = {code: desc for desc, code in event_id.items()}
+    by_recording = {}
+    for sample, _, code in events:
+        desc = desc_of[code]
+        if '/rec_' not in desc:
+            continue
+        din = int(desc.split('/')[0].removeprefix('DIN'))
+        recording = desc.split('/rec_')[1].split('/')[0]
+        by_recording.setdefault(recording, []).append((sample - raw.first_samp, din))
+
+    rts = {}
+    sfreq = raw.info['sfreq']
+    for recording, triggers in by_recording.items():
+        triggers.sort()
+        onsets = [sample for sample, din in triggers if din in onset_codes]
+        presses = np.array([sample for sample, din in triggers if din == button_code])
+        for k, onset in enumerate(onsets):
+            next_onset = onsets[k + 1] if k + 1 < len(onsets) else np.inf
+            in_window = presses[(presses > onset) & (presses < next_onset)]
+            if len(in_window):
+                rts[(recording, onset)] = (in_window[0] - onset) / sfreq
+    return rts
+
+
+def drop_fast_presses(all_epochs: Dict[str, Dict[str, Dict[str, mne.Epochs]]], preproc_data: Dict[str, Dict[str, mne.io.Raw]],
+                      min_reaction_time: float) -> List[Dict[str, Any]]:
+    """
+    Drops, in place, every epoch whose first button press comes earlier than min_reaction_time after stimulus onset,
+    as such presses fall into the post-stimulus wavelet targets. Epochs without a press are kept.
+    Returns one report row per subject, session and condition.
+    """
+    onset_codes, button_code, _ = load_trigger_codes()
+    report = []
+    for subj, sessions in all_epochs.items():
+        for session, conds in sessions.items():
+            raw = preproc_data[subj][session]
+            rts = press_reaction_times(raw, onset_codes, button_code)
+            for cond, epochs in conds.items():
+                onset_samples = np.round(epochs.metadata['onset_s'].to_numpy() * raw.info['sfreq']).astype(int)
+                fast = [i for i, (recording, onset) in enumerate(zip(epochs.metadata['recording'], onset_samples))
+                        if rts.get((recording, onset), np.inf) < min_reaction_time]
+                n_epochs = len(epochs)
+                epochs.drop(fast, reason='fast button press', verbose=False)
+                report.append({'subject': subj, 'session': session, 'condition': cond, 'n_epochs': n_epochs, 'n_dropped': len(fast)})
+    return report
+
+
+def patch_wavelet_target(tensor_data: torch.Tensor) -> torch.Tensor:
+    """
+    Computes the wavelet target of a full-length trial (channels, time over settings.WHOLE_EPOCH_WINDOW) as (channels, freqs, time over settings.EPOCH_WINDOW).
+    The pre- and post-stimulus patches are transformed separately, each from its own data with reflect padding, and only then joined
+    at their shared edge, so no wavelet bin contains data of the other patch.
+    Returned as float16 to halve the storage, convert it to float32 before taking the log.
+    """
+    patch_targets = []
+    for patch_window in (settings.PRE_WINDOW, settings.POST_WINDOW):
+        patch_data = utils.cut_to_timewindow(tensor_data, settings.WHOLE_EPOCH_WINDOW, patch_window, settings.RSFREQ)
+        mag, _ = utils.calc_wavelet(patch_data, fs=settings.RSFREQ, freqs=settings.FREQS, pad=settings.PADDING, **settings.WAVELET_PARAMS)
+        # reorder to (channels, freqs, time) for LaBraM compatibility
+        patch_targets.append(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2))
+    return torch.cat(patch_targets, dim=-1).to(torch.float16)
+
+
 def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handler: EpochIO,
                  save_superlet: bool, save_wavelet: bool,
-                 scale_to_uv: Optional[bool] = True, save_target_epochs: Optional[bool] = False):
+                 scale_to_uv: Optional[bool] = True):
     """
     Dumps all epochs found in epochs, named according to which subject and which condition(side and eccentricity) it belongs to.
-    Also saves wavelets as targets for spectral prediction if specified.
+    Every trial is saved as one input epoch over settings.EPOCH_WINDOW (pre- and post-stimulus patch together, split at onset during training).
+    Also saves the wavelets of both patches as one target for spectral prediction if specified, see patch_wavelet_target.
     :param scale_to_uv: if set to True, scales mne content to use uV instead of V (required by LaBraM)
     :param epochs: preprocessed dictionary containing epochs of either baseline or post-patching data separated by subject and condition
     :param path: save folder path
@@ -148,27 +222,15 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
                                      'ar_interpolated': to_idx(row.ar_interpolated)})
 
                     tensor_data = torch.tensor(epoch, dtype=torch.float32)
-                    input_data = utils.cut_to_timewindow(tensor_data, settings.WHOLE_EPOCH_WINDOW, settings.EXTENDED_INPUT_TIME_WINDOW, settings.RSFREQ)
-                    target_data = utils.cut_to_timewindow(tensor_data, settings.WHOLE_EPOCH_WINDOW, settings.EXTENDED_TARGET_TIME_WINDOW, settings.RSFREQ)
-
-                    # save extended input data
+                    # pre- and post-stimulus patch together, the last MNE sample (at EPOCH_WINDOW[1]) is dropped
+                    input_data = utils.cut_to_timewindow(tensor_data, settings.WHOLE_EPOCH_WINDOW, settings.EPOCH_WINDOW, settings.RSFREQ)
                     io_handler.save(tensor_data=input_data, directory=input_epoch_path, subject=subj, condition=cond,
                                     epoch_id=id, saved_type='input')
 
-                    if save_target_epochs:
-                        target_epoch_path = path / settings.TARGET_EPOCHS_DIR_NAME
-                        target_epoch_path.mkdir(parents=True, exist_ok=True)
-                        io_handler.save(tensor_data=target_data, directory=target_epoch_path, subject=subj, condition=cond,
-                                        epoch_id=id, saved_type='target')
-
                     if save_wavelet:
                         print(f"Computing wavelet transform for epoch {id} for {subj} {cond}")
-                        mag, freqs = utils.calc_wavelet(target_data, fs=settings.RSFREQ, freqs=settings.FREQS, pad=settings.PADDING, **settings.WAVELET_PARAMS)
-                        wavelet_tensor = torch.tensor(mag, dtype=torch.float32)
-                        wavelet_tensor = wavelet_tensor.permute(1, 0, 2) # reorder to (channels, freqs, time) for LaBraM compatibility
-                        print(f"Original wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
-                        wavelet_tensor = utils.cut_to_timewindow(wavelet_tensor, settings.EXTENDED_TARGET_TIME_WINDOW, settings.TARGET_TIME_WINDOW, settings.RSFREQ)
-                        print(f"Cut wavelet tensor shape (channels, freqs, time): {wavelet_tensor.shape}")
+                        wavelet_tensor = patch_wavelet_target(tensor_data)
+                        print(f"Wavelet target shape (channels, freqs, time): {wavelet_tensor.shape}")
 
                         io_handler.save(tensor_data=wavelet_tensor, directory=wavelet_path, subject=subj, condition=cond,
                                         epoch_id=id, saved_type='wavelet')
@@ -182,15 +244,13 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
     io.save_report(manifest, "epochs_manifest.csv", path)
 
 
-def epoch_file_dirs(path: Path, save_wavelet: bool, save_target_epochs: bool) -> Dict[str, Tuple[Path, str]]:
+def epoch_file_dirs(path: Path, save_wavelet: bool) -> Dict[str, Tuple[Path, str]]:
     """
     Returns the folders save_dataset writes epoch files to under path as {name: (folder, filename marker)}.
     """
     dirs = {"input epochs": (path / settings.INPUT_EPOCHS_DIR_NAME, "_input")}
     if save_wavelet:
         dirs["wavelet targets"] = (path / settings.WAVELET_DIR_NAME, "_wavelet")
-    if save_target_epochs:
-        dirs["target epochs"] = (path / settings.TARGET_EPOCHS_DIR_NAME, "_target")
     return dirs
 
 
@@ -205,14 +265,14 @@ def check_output_dirs_empty(dirs: List[Path]):
                            f"Empty or remove them before running make_dataset.py: {', '.join(non_empty)}")
 
 
-def check_saved_consistency(path: Path, save_wavelet: bool, save_target_epochs: bool) -> bool:
+def check_saved_consistency(path: Path, save_wavelet: bool) -> bool:
     """
-    Checks that the input epochs, the wavelet targets / target epochs (if saved) and epochs_manifest.csv under path hold exactly the same (subject, condition, id) keys.
+    Checks that the input epochs, the wavelet targets (if saved) and epochs_manifest.csv under path hold exactly the same (subject, condition, id) keys.
     Prints the mismatching keys and returns True if all key sets are equal.
     """
     manifest = pd.read_csv(path / "epochs_manifest.csv")
     key_sets = {"manifest": set(zip(manifest["subject"].astype(str), manifest["stimulus"].astype(str), manifest["id"].astype(int)))}
-    for name, (directory, marker) in epoch_file_dirs(path, save_wavelet, save_target_epochs).items():
+    for name, (directory, marker) in epoch_file_dirs(path, save_wavelet).items():
         keys = set()
         for f in directory.glob("*.pt"):
             _, idx, subject, cond = io_utils.vars_from_filename(f.stem, marker=marker)
@@ -239,7 +299,7 @@ def main(opts):
     # stop before the preprocessing if files of an earlier run could be mixed with the new ones
     session_dirs = [settings.FINETUNE_DIR, settings.PATCH_DIR]
     check_output_dirs_empty([directory for path in session_dirs
-                             for directory, _ in epoch_file_dirs(path, opts.save_wavelet, opts.save_target_epochs).values()])
+                             for directory, _ in epoch_file_dirs(path, opts.save_wavelet).values()])
 
     io_handler = EpochIO(ext='.pt')
 
@@ -253,7 +313,7 @@ def main(opts):
         iclabel_thresholds=settings.ICLABEL_THRESHOLDS,
         bad_channels='interpolate',
         time_window=settings.WHOLE_EPOCH_WINDOW,
-        baseline_win=(settings.EXTENDED_INPUT_TIME_WINDOW[0], settings.EXTENDED_INPUT_TIME_WINDOW[0] + 0.2),
+        baseline_win=settings.BASELINE_WINDOW,
         split_by='both',
         re_reference='average',
         auto_bad_channel_params=settings.AUTO_BAD_CHANNEL_PARAMS,
@@ -261,7 +321,7 @@ def main(opts):
         cache_dir=settings.CACHE_DIR,
         autoreject_mode="local",
         autoreject_params=settings.AUTOREJECT_PARAMS,
-        autoreject_window=settings.WHOLE_EPOCH_WINDOW,
+        autoreject_window=settings.AUTOREJECT_WINDOW,
         interactive_selection=False
     )
 
@@ -279,9 +339,15 @@ def main(opts):
     print(f"Resampled to {settings.RSFREQ} Hz for all data")
 
 
-    # extract epochs (MNE built-in baselining)
+    # extract epochs (no baseline correction, see settings.BASELINE_WINDOW)
     all_epochs = preprocessor.create_subject_epochs(preproc_data, output_format='epochs', manual_baseline=False)
     io.save_report(preprocessor.autoreject_report, "autoreject_report.csv", settings.QC_DIR)
+
+    # drop trials with a button press inside the post-stimulus wavelet targets
+    fast_press_report = drop_fast_presses(all_epochs, preproc_data, settings.MIN_REACTION_TIME)
+    io.save_report(fast_press_report, "fast_press_report.csv", settings.QC_DIR)
+    print(f"Dropped {sum(r['n_dropped'] for r in fast_press_report)} epochs with a button press earlier than "
+          f"{settings.MIN_REACTION_TIME} s after onset.")
 
     # match channels to labram and reorder (for compatibility with electrode localization)
     for subj in all_epochs.keys():
@@ -307,10 +373,10 @@ def main(opts):
     # dump epochs data for finetuning (pre-patching)
 
     save_dataset(epochs=baseline_epochs, path=settings.FINETUNE_DIR, io_handler=io_handler, scale_to_uv=True,
-                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet, save_target_epochs=opts.save_target_epochs)
+                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
     # dump epochs data for plasticity analysis (post-patching)
     save_dataset(epochs=patch_epochs, path=settings.PATCH_DIR, io_handler=io_handler, scale_to_uv=True,
-                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet, save_target_epochs=opts.save_target_epochs)
+                 save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
 
     print(f"Preprocessed epochs saved to {settings.FINETUNE_DIR} and {settings.PATCH_DIR}.")
 
@@ -318,7 +384,7 @@ def main(opts):
     run_qc_check(settings.QC_MAX_DROPPED_SHARE, settings.QC_MAX_DROPPED_CHANS, False)
 
     print("Checking that inputs, targets and manifest hold the same epochs...")
-    consistent = [check_saved_consistency(path, opts.save_wavelet, opts.save_target_epochs) for path in session_dirs]
+    consistent = [check_saved_consistency(path, opts.save_wavelet) for path in session_dirs]
     if not all(consistent):
         raise RuntimeError("Saved epochs are inconsistent, see the errors above. Do not train on this dataset.")
 
@@ -329,8 +395,6 @@ if __name__ == "__main__":
                         help='Whether to save superlet targets for spectral prediction')
     parser.add_argument('--save_wavelet', action='store_true', default=True,
                         help='Whether to save wavelet targets for spectral prediction')
-    parser.add_argument('--save_target_epochs', action='store_true', default=False,
-                        help='Whether to save target epochs next to wavelets for further analysis or autoencoder models')
 
     args = parser.parse_args()
     main(args)

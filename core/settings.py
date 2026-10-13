@@ -47,24 +47,29 @@ INCLUDED_CONDITIONS = ['baseline', 'post-patching']
 EXCLUDED_SUBJECTS = ["STMD67", "STMD71"]
 NO_PRESS_FROM_SUBJECT = 59
 RECORDINGS_PER_CONDITION = None
-INPUT_TIME_WINDOW = (-1.4, -0.4)  # 1 second (200 sample) time window for model input
-TARGET_TIME_WINDOW = (-0.2, 0.8)#  1 second (200 sample) time window for labram compatibility
-EXTENDED_INPUT_OFFSET = 0
-EXTENDED_TARGET_OFFSET = 0.5
-PAD_TIME = 0.3
+# Every trial is split into a pre- and a post-stimulus patch of one LaBraM patch (1 s, 200 samples) each, meeting at -0.3 s.
+# The patches go through the model in separate forward passes and get their own wavelet targets. The scored targets keep their
+# ~0.29 s wavelet reach inside their own patch, so every scored bin is computed from real data of its patch only (no padding),
+# and the pre and post errors share no data. The post patch starts before onset to give the early post-stimulus bins real data.
+PRE_WINDOW = (-1.3, -0.3)
+POST_WINDOW = (-0.3, 0.7)
+EPOCH_WINDOW = (PRE_WINDOW[0], POST_WINDOW[1])  # saved input epoch and wavelet target: both patches, split during training
+PATCH_SIZE = round((POST_WINDOW[1] - POST_WINDOW[0]) * RSFREQ)
+TARGET_WINDOW_SIZE = PATCH_SIZE  # the model predicts the wavelet target of one patch
+# scored parts of the patches, bins whose wavelet reaches outside their patch are masked as well (utils.valid_wavelet_bins)
+PRE_TARGET_WINDOW = (-1.0, -0.7)  # wavelet support -1.29 to -0.41 s
+POST_TARGET_WINDOW = (0.0, 0.4)  # wavelet support -0.29 to 0.69 s at 5 Hz
+MIN_REACTION_TIME = 0.5  # s, trials with a button press earlier than this after onset are dropped in make_dataset.py (~1.4% of trials)
+PAD_TIME = 0.3  # reflect padding of each patch for its wavelet transform, only reaches bins outside the scored targets
 PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targets
-EXTENDED_INPUT_TIME_WINDOW = (INPUT_TIME_WINDOW[0] - EXTENDED_INPUT_OFFSET, INPUT_TIME_WINDOW[1] + EXTENDED_INPUT_OFFSET)  # Extended time window for epoch inputs
-EXTENDED_TARGET_TIME_WINDOW = (TARGET_TIME_WINDOW[0] - EXTENDED_TARGET_OFFSET, TARGET_TIME_WINDOW[1] + EXTENDED_TARGET_OFFSET)  # Extended time window for wavelet/superlet targets
-WHOLE_EPOCH_WINDOW = (EXTENDED_INPUT_TIME_WINDOW[0], EXTENDED_TARGET_TIME_WINDOW[1])  # Whole epoch time window for preprocessing
-TARGET_WINDOW_SIZE = int((TARGET_TIME_WINDOW[1] - TARGET_TIME_WINDOW[0]) * RSFREQ)
-ANALYSIS_WINDOW = (0.0, 0.4)
-BUTTON_WINDOW = (ANALYSIS_WINDOW[1], TARGET_TIME_WINDOW[1])
-REFERENCE_WINDOW = (TARGET_TIME_WINDOW[0], ANALYSIS_WINDOW[0])
+WHOLE_EPOCH_WINDOW = EPOCH_WINDOW  # Whole epoch time window for preprocessing
+BASELINE_WINDOW = None  # no MNE baseline correction: a baseline window would shift each patch by data of the other one
+ANALYSIS_WINDOW = POST_TARGET_WINDOW  # before every button press
+REFERENCE_WINDOW = PRE_TARGET_WINDOW
 
 METRIC_WINDOWS = {
-    'full': TARGET_TIME_WINDOW,
+    'full': POST_TARGET_WINDOW,
     'analysis': ANALYSIS_WINDOW,
-    'button': BUTTON_WINDOW,
     'reference': REFERENCE_WINDOW,
 }
 
@@ -85,8 +90,7 @@ ICLABEL_THRESHOLDS = {
     'muscle artifact': 0.9,
 }
 
-AUTOREJECT_MARGIN = 0.4
-AUTOREJECT_WINDOW = (TARGET_TIME_WINDOW[0] - AUTOREJECT_MARGIN, TARGET_TIME_WINDOW[1] + AUTOREJECT_MARGIN)
+AUTOREJECT_WINDOW = WHOLE_EPOCH_WINDOW  # autoreject checks every sample the model input and the wavelet targets are made of
 AUTOREJECT_PARAMS = {
     'random_state': SEED,
     'n_jobs': 4,
@@ -109,8 +113,9 @@ AUTO_BAD_CHANNEL_PARAMS = {
 QC_MAX_DROPPED_SHARE = 1/3
 QC_MAX_DROPPED_CHANS = 12
 
+TRIGGER_MAPPING = Path("libs") / "unscrambly" / "preprocessing" / "trigger_mapping.yaml"
+
 INPUT_EPOCHS_DIR_NAME = "input_epochs"
-TARGET_EPOCHS_DIR_NAME = "target_epochs"
 WAVELET_DIR_NAME = "wavelet_targets"
 # Base directories
 #CORE_DIR = Path(__file__).parent # get path to core directory
@@ -121,12 +126,10 @@ CACHE_DIR = PROCESS_DIR / "cache"
 
 FINETUNE_DIR = PROCESS_DIR / "pre_patching"
 FINETUNE_INPUT_EPOCHS_DIR = FINETUNE_DIR / INPUT_EPOCHS_DIR_NAME
-FINETUNE_TARGET_EPOCHS_DIR = FINETUNE_DIR / TARGET_EPOCHS_DIR_NAME
 FINETUNE_WAVELET_DIR = FINETUNE_DIR / WAVELET_DIR_NAME
 
 PATCH_DIR = PROCESS_DIR / "post_patching"
 PATCH_INPUT_EPOCHS_DIR = PATCH_DIR / INPUT_EPOCHS_DIR_NAME
-PATCH_TARGET_EPOCHS_DIR = PATCH_DIR / TARGET_EPOCHS_DIR_NAME
 PATCH_WAVELET_DIR = PATCH_DIR / WAVELET_DIR_NAME
 
 FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
@@ -151,7 +154,7 @@ AUTOENCODER_PARAMS = {
 N_FREQS = 50
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'freq_window': (2, 60),
+    'freq_window': (5, 60),  # below 5 Hz the wavelets reach further than the 1 s target window
     'n_freqs': N_FREQS,
     'target_dim': N_FREQS * TARGET_WINDOW_SIZE,
     'model_version': LABRAM_VERSION,
@@ -159,16 +162,17 @@ SPECTRAL_DECODER_PARAMS = {
 
 FREQS = np.geomspace(SPECTRAL_DECODER_PARAMS["freq_window"][0], SPECTRAL_DECODER_PARAMS["freq_window"][1], N_FREQS)
 
-# complex Morlet wavelet targets, fewer cycles below split_freq shorten the low-frequency wavelets in time
+# complex Morlet wavelet targets: as many cycles as possible up to max_cycles while the 3 SD reach stays within max_reach,
+# n(f) = min(max_cycles, 2*pi*f*max_reach/3), i.e. MIN_CYCLES at the lowest frequency rising to max_cycles at ~9 Hz
+MORLET_CYCLES = 2 * np.pi * np.sqrt(1.5 / 2)  # ~5.44 cycles, same as the previous cmor1.5-1.0
+MIN_CYCLES = 3  # cycles at the lowest frequency
 WAVELET_PARAMS = {
-    'low_cycles': 3,
-    'high_cycles': 2 * np.pi * np.sqrt(1.5 / 2),  # ~5.44 cycles, same as the previous cmor1.5-1.0
-    'split_freq': 3.5,
+    'max_cycles': MORLET_CYCLES,
+    'max_reach': 3 * MIN_CYCLES / (2 * np.pi * FREQS[0]),  # ~0.29 s, the 3 SD reach of MIN_CYCLES at the lowest frequency
 }
 
 FREQ_BANDS = {
-    'delta (2-4Hz)': (2, 4),
-    'theta (4-8Hz)': (4, 8),
+    'theta (5-8Hz)': (5, 8),
     'alpha (8-12Hz)': (8, 12),
     'beta (12-30Hz)': (12, 30),
     'gamma (30-60Hz)': (30, 60)
