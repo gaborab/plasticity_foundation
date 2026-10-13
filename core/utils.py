@@ -38,6 +38,7 @@ def calc_wavelet(tensor_data, fs, freqs, pad, low_cycles, high_cycles, split_fre
     if pad > 0:
         np_data = np.pad(np_data, pad_width=((0, 0), (pad, pad)), mode='reflect')
 
+    # Use lower cycle count for lower frequencies to shorten the wavelet in time and reduce edge effects
     cycles = morlet_cycles(freqs, low_cycles, high_cycles, split_freq)
     mag = np.empty((len(freqs), *np_data.shape))
     for n in np.unique(cycles):
@@ -53,7 +54,24 @@ def calc_wavelet(tensor_data, fs, freqs, pad, low_cycles, high_cycles, split_fre
         mag = mag[:, :, pad:-pad]
     return mag, freqs
 
+def normalize_wavelet(mags, by=Optional[Path], save_path: Optional[Path] = None):
+    """
+    Normalizes the wavelet magnitudes by the mean and std of the training set, or by the mean and std of the current data if no path is provided.
+    Expects mags to be (freqs, channels, time).
+    Returns normalized mags and the mean and std used for normalization.
+    """
+    if by is not None:
+        # Load mean and std from file
+        stats = np.load(by)
+        mean = stats['mean']
+        std = stats['std']
+    else:
+        # Calculate mean and std from current data
+        mean = np.mean(mags, axis=(1, 2), keepdims=True)
+        std = np.std(mags, axis=(1, 2), keepdims=True)
 
+    normalized_mags = (mags - mean) / (std + 1e-8)  # Add small value to avoid division by zero
+    return normalized_mags, mean, std
 
 def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tuple[int, int], fs:int):
     """

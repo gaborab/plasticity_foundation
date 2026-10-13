@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core import utils
 from core.io import EpochIO
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import torch
 
 
@@ -96,16 +96,17 @@ class KFoldSplitter:
     and `settings.FINETUNE_DIR`.
     """
 
-    def __init__(self, data_dir: Optional[Path], seed: int, all_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6, no_press_threshold: int = 59):
-        if all_data is None:
+    def __init__(self, input_data_dir: Optional[Path], target_data_dir: Optional[Path], seed: int, input_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6, no_press_threshold: int = 59):
+        if input_data is None:
             io_handler = EpochIO(ext='.pt')
             # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
-            if data_dir is None:
+            if input_data_dir is None:
                 print("WARNING: data_dir not provided, unable to load epochs for KFoldSplitter.")
                 self.all_data = {}
 
-            all_data = io_handler.load_all_epochs(data_dir)
-        self.all_data = all_data
+            input_data = io_handler.load_all_epochs(input_data_dir)
+            target_data = io_handler.load_all_epochs(target_data_dir)
+        self.all_data = input_data
         self.k_folds = k_folds
         self.seed = seed
         self.no_press_threshold = no_press_threshold
@@ -146,3 +147,55 @@ class KFoldSplitter:
             splits.append(FinetuneSplits(training_dict=train, validation_dict=val, testing_dict=test))
 
         return splits
+
+    def split_within_subjects(self) -> List[FinetuneSplits]:
+        """
+        Splits the epochs of every subject into K folds for cross-validation within subjects, so every subject is in the training, validation and testing data of each fold.
+        Epochs are identified by (subject, condition, id) keys. Split by slicing like split_by_subject, stratified by (subject, condition) group:
+        the keys are shuffled within every group and concatenated, so slicing every K-th key puts ~1/K of every subject's every condition into each fold.
+        In fold i, fold i is the test set and 20% of every group's remaining epochs is the validation set.
+        Used for fine-tuning personalized models.
+        Returns: a list of `FinetuneSplits` instances, one per fold.
+        """
+        rng = random.Random(self.seed)
+        # Shuffle the epoch keys within every (subject, condition) group
+        groups = {}
+        for subject in sorted(self.all_data):
+            for cond in sorted(self.all_data[subject]):
+                # collect subject, cond, idx as identifiers grouped by (subject, cond) for stratification
+                groups[(subject, cond)] = [(subject, cond, idx) for idx, _ in self.all_data[subject][cond]]
+        grouped_shuffle_keys = []
+        for group_keys in groups.values():
+            rng.shuffle(group_keys)
+            grouped_shuffle_keys.extend(group_keys)
+
+        folds = [grouped_shuffle_keys[i::self.k_folds] for i in range(self.k_folds)]
+        # Iterate over folds to create train/val/test splits for each fold
+        splits = []
+        for i in range(self.k_folds):
+            test_keys = folds[i]
+            test_set = set(test_keys)
+            val_keys = []
+            for group_keys in groups.values():
+                group_train_val = [key for key in group_keys if key not in test_set]
+                rng.shuffle(group_train_val)
+                val_keys.extend(group_train_val[:len(group_train_val)//5])  # 20% for validation
+            val_set = set(val_keys)
+            train_keys = [key for key in grouped_shuffle_keys if key not in test_set and key not in val_set]
+            splits.append(FinetuneSplits(training_dict=self._select(train_keys), validation_dict=self._select(val_keys),
+                                         testing_dict=self._select(test_keys)))
+        return splits
+
+    def _select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
+        """
+        Returns the epochs with the given (subject, condition, id) keys in the {subject: {condition: [(id, epoch), ...]}} format of FinetuneDataset.
+        """
+        keys = set(keys)
+        selected = {}
+        for subject, conds in self.all_data.items():
+            for cond, epoch_list in conds.items():
+                kept = [(idx, epoch) for idx, epoch in epoch_list if (subject, cond, idx) in keys]
+                if kept:
+                    selected.setdefault(subject, {})[cond] = kept
+        return selected
+

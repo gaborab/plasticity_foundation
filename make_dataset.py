@@ -15,9 +15,9 @@ import torch
 
 from core.io import EpochIO
 from libs.unscrambly.preprocessing import DataPreprocessor
-from core import settings, io
+from core import settings, io, io_utils
 from core import utils
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 import argparse
 from pathlib import PureWindowsPath
 
@@ -182,9 +182,64 @@ def save_dataset(epochs: Dict[str, Dict[str, mne.Epochs]], path: Path, io_handle
     io.save_report(manifest, "epochs_manifest.csv", path)
 
 
+def epoch_file_dirs(path: Path, save_wavelet: bool, save_target_epochs: bool) -> Dict[str, Tuple[Path, str]]:
+    """
+    Returns the folders save_dataset writes epoch files to under path as {name: (folder, filename marker)}.
+    """
+    dirs = {"input epochs": (path / settings.INPUT_EPOCHS_DIR_NAME, "_input")}
+    if save_wavelet:
+        dirs["wavelet targets"] = (path / settings.WAVELET_DIR_NAME, "_wavelet")
+    if save_target_epochs:
+        dirs["target epochs"] = (path / settings.TARGET_EPOCHS_DIR_NAME, "_target")
+    return dirs
+
+
+def check_output_dirs_empty(dirs: List[Path]):
+    """
+    Raises a RuntimeError if any of dirs already contains .pt files.
+    Inputs and targets are paired by file name only, so files left from an earlier run would be paired with new epochs or mixed into the dataset.
+    """
+    non_empty = [str(d) for d in dirs if d.exists() and any(d.glob("*.pt"))]
+    if non_empty:
+        raise RuntimeError("Output folders already contain epoch files from an earlier run. "
+                           f"Empty or remove them before running make_dataset.py: {', '.join(non_empty)}")
+
+
+def check_saved_consistency(path: Path, save_wavelet: bool, save_target_epochs: bool) -> bool:
+    """
+    Checks that the input epochs, the wavelet targets / target epochs (if saved) and epochs_manifest.csv under path hold exactly the same (subject, condition, id) keys.
+    Prints the mismatching keys and returns True if all key sets are equal.
+    """
+    manifest = pd.read_csv(path / "epochs_manifest.csv")
+    key_sets = {"manifest": set(zip(manifest["subject"].astype(str), manifest["stimulus"].astype(str), manifest["id"].astype(int)))}
+    for name, (directory, marker) in epoch_file_dirs(path, save_wavelet, save_target_epochs).items():
+        keys = set()
+        for f in directory.glob("*.pt"):
+            _, idx, subject, cond = io_utils.vars_from_filename(f.stem, marker=marker)
+            keys.add((subject, cond, idx))
+        key_sets[name] = keys
+
+    reference = key_sets["input epochs"]
+    consistent = True
+    for name, keys in key_sets.items():
+        missing, extra = sorted(reference - keys), sorted(keys - reference)
+        if missing or extra:
+            consistent = False
+            print(f"ERROR: {name} in {path} do not match the input epochs: {len(missing)} missing (first: {missing[:5]}), "
+                  f"{len(extra)} extra (first: {extra[:5]})")
+    if consistent:
+        print(f"Consistency check passed for {path}: {len(reference)} epochs, identical keys in {', '.join(key_sets)}.")
+    return consistent
+
+
 def main(opts):
     print("Preparing preprocessed dataset...")
     # root to dataset
+
+    # stop before the preprocessing if files of an earlier run could be mixed with the new ones
+    session_dirs = [settings.FINETUNE_DIR, settings.PATCH_DIR]
+    check_output_dirs_empty([directory for path in session_dirs
+                             for directory, _ in epoch_file_dirs(path, opts.save_wavelet, opts.save_target_epochs).values()])
 
     io_handler = EpochIO(ext='.pt')
 
@@ -261,6 +316,11 @@ def main(opts):
 
     print("Running quality check for bad channel rejection and autoreject...")
     run_qc_check(settings.QC_MAX_DROPPED_SHARE, settings.QC_MAX_DROPPED_CHANS, False)
+
+    print("Checking that inputs, targets and manifest hold the same epochs...")
+    consistent = [check_saved_consistency(path, opts.save_wavelet, opts.save_target_epochs) for path in session_dirs]
+    if not all(consistent):
+        raise RuntimeError("Saved epochs are inconsistent, see the errors above. Do not train on this dataset.")
 
 
 if __name__ == "__main__":
