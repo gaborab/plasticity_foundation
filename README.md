@@ -101,6 +101,7 @@ For preprocessing:
 ├── qc_bad_channels.py           # QC: runs the automatic bad channel detector on all recordings -> outputs/qc/
 ├── reaction_times.py            # Analysis: button-press reaction times, baseline vs post-patching -> outputs/reaction_times/ (its trigger-code loader is used by make_dataset.py)
 ├── stimulus_intervals.py        # Analysis: time between consecutive stimuli -> outputs/stimulus_intervals/
+├── ridge_leakage.py             # Check: linear masked-channel prediction (leakage), build comparison, gain injection -> outputs/ridge_leakage/
 ├── pyproject.toml / uv.lock     # Environment definition
 │
 ├── core/                        # Project package
@@ -129,7 +130,7 @@ For preprocessing:
 ├── data/                        # (not tracked)
 │   ├── raw/STMD_data/           # EDF recordings, NPZ triggers, manual bad channel selections
 │   └── processed/               # pre_patching/, post_patching/ (dataset) and cache/ica/ (fitted ICAs)
-└── outputs/                     # (not tracked) finetune_outputs/, inference_outputs/, plots/, qc/, reaction_times/
+└── outputs/                     # (not tracked) finetune_outputs/, inference_outputs/, plots/, qc/, reaction_times/, ridge_leakage/
 ```
 
 ---
@@ -382,8 +383,16 @@ Together they guarantee that an input and a target with the same key come from t
 |---|---|---|
 | `--save_wavelet` | `True` | Compute and save wavelet targets (currently cannot be switched off from the CLI) |
 | `--save_superlet` | `False` | Placeholder, does nothing |
+| `--no_ica` | off | Skip ICA (`ica_method=None`): no components are removed, every other step is unchanged. Used to measure what ICA contributes (see `ridge_leakage.py`) |
+| `--output_dir` | `data/processed` (`PROCESS_DIR`) | Folder for the `pre_patching/` and `post_patching/` dataset folders. A build outside `PROCESS_DIR` writes its QC reports to `<output_dir>/qc` instead of `outputs/qc`, so it doesn't overwrite the main build's reports. Training and inference only read `PROCESS_DIR` |
 
-`make_dataset.py` imports `load_trigger_codes` from `reaction_times.py`, so run it from the repository root.
+`make_dataset.py` imports `load_trigger_codes` from `reaction_times.py`, so run it from the repository root. A second build, e.g. without ICA, next to the main one:
+
+```bash
+uv run python make_dataset.py --no_ica --output_dir data/processed_no_ica
+```
+
+The guard and the consistency check apply to every build, each in its own folders.
 
 #### Reproducibility
 
@@ -816,6 +825,28 @@ Only local autoreject was ported.
 - **Method.** Within each recording, for every stimulus onset: onset to next onset, and the stimulus's offset (onset code + 2) to the next onset. Every shown stimulus counts, also eccentricity-0 ones. Intervals never cross recordings.
 - **Outputs.** `outputs/stimulus_intervals/stimulus_intervals.csv` (one row per interval), summaries per session, stimulus type and subject, the 10 shortest intervals, and `outputs/plots/stimulus_intervals/soa_distribution.png`. It also counts intervals shorter than the end and the length of `EPOCH_WINDOW`.
 - **Results (29 subjects).** Onset to next onset: mean 6.66 s (SD 1.09), minimum 4.06 s; offset to next onset: mean 4.15 s, minimum 2.02 s. Stimuli last 1.98–3.01 s. Sessions are matched (6.68 vs 6.63 s), and each session has 4 recordings of 44 stimuli about 7 min apart. The previous stimulus's offset comes less than 2.3 s before onset in 1.6 % of trials, so the epoch window (−1.3 … 0.7 s) never contains another stimulus.
+
+**`ridge_leakage.py`**: linear check of masked-channel prediction on the input epochs of a `make_dataset.py` build, with optional build comparison and gain injection. It answers whether a masked channel can be rebuilt from the visible ones regardless of brain state (leakage through average reference, ICA or interpolation), and how sensitive masked prediction is to a stronger visual source.
+
+- **Masked prediction** (always), per build, session and subject:
+  - Trials of all stimulus types are pooled and split in half (seeded): fit on one half, test on the other. The whole input epoch (−1.3 … 0.7 s) is band-passed per band (5–60 Hz and the four `FREQ_BANDS`), and every time sample is one observation.
+  - One ridge model per band, target channel and masking scheme predicts the target channel's sample from the visible channels' samples at the same time. **single**: the target is hidden (22 visible). **cluster**: the target and its 4 nearest electrodes (HydroCel-65 positions) are hidden (18 visible). Only the target channel is predicted and scored.
+  - Models are fitted on training trials where the target channel is intact (manifest). Test trials are scored separately for an intact and an interpolated target channel (≥ 10 trials each), so the per subject × channel difference shows how much interpolation makes a channel predictable.
+  - The penalty is tiny (1e-3 × the mean variance of the visible channels), so an exact linear dependency would show up as R² ≈ 1. The eigenvalue check reports the smallest / largest eigenvalue of the 23-channel covariance (an exact dependency gives ~1e-12 or less).
+- **Build comparison** (`--compare_root DIR --compare_label NAME`): the same analysis on a second build (e.g. `--no_ica`), plus R² (main) − R² (second) per session, subject, band, scheme and channel. Subjects are paired, not trials: autoreject decides differently in each build, so their trial sets and ids differ.
+- **Gain injection** (`--inject GAIN [GAIN …]`), on the main build's baseline only:
+  - Each subject's baseline trials are split in half into a pseudo-baseline and a pseudo-post session. The models are fitted on all pseudo-baseline trials and scored only on the pseudo-post trials, so no scored trial was seen in training.
+  - In the pseudo-post trials, the activity of a visual-cortex source, estimated with the least-squares spatial filter of its topography g (`s = g·x / g·g`), is made 1 + gain times stronger after stimulus onset (20 ms raised-cosine ramp): `x + gain · g · s(t)`. Everything else is unchanged.
+  - Source (`--head_model fsaverage`, default): all sources of the `--inject_labels` aparc labels (default `pericalcarine`, i.e. primary visual cortex, both hemispheres) on the MNE `fsaverage` template, normal to the cortex with equal amplitude, through the 3-layer fsaverage BEM; the HydroCel-65 electrodes are aligned by their fiducials. **fsaverage (~200 MB) is downloaded into the MNE data folder on first use.** `--head_model sphere` uses a radial occipital dipole in a 3-shell sphere model instead, with no download. The topography is average-referenced over the 65 electrodes, then the 23 model channels are taken.
+  - Every model is scored on the same pseudo-post trials with and without the injection (0 … 0.4 s): signal power change of the target channel versus error change of its masked prediction. An error change much smaller than the signal change means masked prediction absorbs the gain change. The table reports the 4 channels where the source is strongest.
+- **Outputs** (`outputs/ridge_leakage/<label>/`): `report.md` (method and report-ready markdown tables), `summary.csv`, `per_channel.csv` (interpolation rate per session and median R²), `interpolation.csv`, `eigenvalues.csv`, `r2_subject_channel.csv`, and with the options `comparison_<compare_label>.csv` and `injection.csv`. The second build gets its own complete folder. **Topomaps** (`outputs/plots/ridge_leakage/<label>/`), one row per band as in `plasticity_plotting.ipynb`: R² per scheme and session, the interpolation gain, the R² difference between builds, the injected source topography, and the signal and error change per gain.
+- **Run** after `make_dataset.py` (and the second build, if compared); about 6–7 min for the main analysis on the full dataset:
+
+```bash
+uv run python ridge_leakage.py --compare_root data/processed_no_ica --compare_label no_ica --inject 0.1 0.25 0.5
+```
+
+- **Indicative results** (4 subjects, a test conversion of the previous epochs): R² ≈ 0.6 (single) and 0.45 (cluster) at 5–60 Hz, highest in alpha; interpolated channels only slightly more predictable (median +0.02 … +0.09); no exact linear dependency (eigenvalue ratio ≥ 1.5·10⁻³). With the sphere-model source, +25 % gain raised the signal power at O1/O2/T5/T6 by about 30 % but the masked prediction error only by about 5 % (single) and 14 % (cluster).
 
 **`qc_bad_channels.py`**: runs the automatic bad channel detector on every recording without the full preprocessing, and compares it with the manual selections. Outputs are `outputs/qc/auto_bad_channels_metrics.csv` (every channel) and `auto_bad_channels.csv` (flagged channels, with a `manually_flagged` column). Use it to review or retune `AUTO_BAD_CHANNEL_PARAMS`.
 

@@ -97,16 +97,18 @@ class KFoldSplitter:
     """
 
     def __init__(self, input_data_dir: Optional[Path], target_data_dir: Optional[Path], seed: int, input_data: Optional[Dict[str, Dict[str, list]]] = None, k_folds: int = 6, no_press_threshold: int = 59):
+        target_data = None
         if input_data is None:
             io_handler = EpochIO(ext='.pt')
             # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
             if input_data_dir is None:
                 print("WARNING: data_dir not provided, unable to load epochs for KFoldSplitter.")
-                self.all_data = {}
+                self.input_data = {}
 
             input_data = io_handler.load_all_epochs(input_data_dir)
             target_data = io_handler.load_all_epochs(target_data_dir)
-        self.all_data = input_data
+        self.input_data = input_data
+        self.target_data = target_data
         self.k_folds = k_folds
         self.seed = seed
         self.no_press_threshold = no_press_threshold
@@ -121,7 +123,7 @@ class KFoldSplitter:
         rng = random.Random(self.seed)
         # Split subjects into K folds, stratify by button press paradigm
         groups = {}
-        for subject in sorted(self.all_data.keys()):
+        for subject in sorted(self.input_data.keys()):
             button_press = subject_paradigm(subject, thresh=self.no_press_threshold)
             groups.setdefault(button_press, []).append(subject)
         grouped_shuffle_subjects = []
@@ -141,9 +143,9 @@ class KFoldSplitter:
                 rng.shuffle(paradigm_subj)
                 val_subj.extend(paradigm_subj[:len(paradigm_subj)//5])  # 20% for validation
             train_subj = [s for s in train_val_subj if s not in val_subj]
-            train = {subject: self.all_data[subject] for subject in train_subj}
-            val = {subject: self.all_data[subject] for subject in val_subj}
-            test = {subject: self.all_data[subject] for subject in test_subj}
+            train = {subject: self.input_data[subject] for subject in train_subj}
+            val = {subject: self.input_data[subject] for subject in val_subj}
+            test = {subject: self.input_data[subject] for subject in test_subj}
             splits.append(FinetuneSplits(training_dict=train, validation_dict=val, testing_dict=test))
 
         return splits
@@ -160,10 +162,10 @@ class KFoldSplitter:
         rng = random.Random(self.seed)
         # Shuffle the epoch keys within every (subject, condition) group
         groups = {}
-        for subject in sorted(self.all_data):
-            for cond in sorted(self.all_data[subject]):
+        for subject in sorted(self.input_data):
+            for cond in sorted(self.input_data[subject]):
                 # collect subject, cond, idx as identifiers grouped by (subject, cond) for stratification
-                groups[(subject, cond)] = [(subject, cond, idx) for idx, _ in self.all_data[subject][cond]]
+                groups[(subject, cond)] = [(subject, cond, idx) for idx, _ in self.input_data[subject][cond]]
         grouped_shuffle_keys = []
         for group_keys in groups.values():
             rng.shuffle(group_keys)
@@ -192,7 +194,7 @@ class KFoldSplitter:
         """
         keys = set(keys)
         selected = {}
-        for subject, conds in self.all_data.items():
+        for subject, conds in self.input_data.items():
             for cond, epoch_list in conds.items():
                 kept = [(idx, epoch) for idx, epoch in epoch_list if (subject, cond, idx) in keys]
                 if kept:

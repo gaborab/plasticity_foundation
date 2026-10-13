@@ -25,15 +25,15 @@ import argparse
 from pathlib import PureWindowsPath
 
 
-def load_autoreject():
-    ar = pd.read_csv(settings.QC_DIR / "autoreject_report.csv")
+def load_autoreject(qc_dir: Path):
+    ar = pd.read_csv(qc_dir / "autoreject_report.csv")
     ar = ar.rename(columns={"subject_name": "subject", "conditions": "session"})
     ar["dropped_share"] = ar["n_dropped"] / ar["n_epochs"]
     return ar[["subject", "session", "n_epochs", "n_dropped", "dropped_share", "mean_interp_per_kept_epoch"]]
 
 
-def load_auto_bad_channels():
-    bc = pd.read_csv(settings.QC_DIR / "auto_bad_chans.csv")
+def load_auto_bad_channels(qc_dir: Path):
+    bc = pd.read_csv(qc_dir / "auto_bad_chans.csv")
     # data\raw\STMD_data\<subject>\<session>\<recording folder>\<file>.edf
     parts = bc["recording"].map(lambda p: PureWindowsPath(p).parts)
     bc["subject"], bc["session"], bc["rec"] = parts.str[-4], parts.str[-3], parts.str[-2]
@@ -52,9 +52,9 @@ def print_hits(title, df, cols):
     print(df[cols].round(2).to_string(index=False))
     print(f"-> subjects: {', '.join(sorted(df['subject'].unique(), key=lambda s: int(s.removeprefix('STMD'))))}")
 
-def run_qc_check(max_dropped_share, max_channels, show_all):
-    ar = load_autoreject()
-    per_rec, per_session = load_auto_bad_channels()
+def run_qc_check(qc_dir: Path, max_dropped_share, max_channels, show_all):
+    ar = load_autoreject(qc_dir)
+    per_rec, per_session = load_auto_bad_channels(qc_dir)
     sessions = ar.merge(per_session, on=["subject", "session"], how="outer")
     sessions["combined_mean"] = sessions["auto_mean_per_recording"].fillna(0) + sessions[
         "mean_interp_per_kept_epoch"].fillna(0)
@@ -296,8 +296,14 @@ def main(opts):
     print("Preparing preprocessed dataset...")
     # root to dataset
 
+    # the default build goes to settings.PROCESS_DIR with its QC reports in settings.QC_DIR, any other build keeps both in its own folder
+    output_dir = Path(opts.output_dir)
+    finetune_dir, patch_dir = output_dir / settings.FINETUNE_DIR.name, output_dir / settings.PATCH_DIR.name
+    qc_dir = settings.QC_DIR if output_dir.resolve() == settings.PROCESS_DIR.resolve() else output_dir / "qc"
+    print(f"Writing the dataset to {output_dir} (QC reports: {qc_dir}), ICA: {'off' if opts.no_ica else 'on'}")
+
     # stop before the preprocessing if files of an earlier run could be mixed with the new ones
-    session_dirs = [settings.FINETUNE_DIR, settings.PATCH_DIR]
+    session_dirs = [finetune_dir, patch_dir]
     check_output_dirs_empty([directory for path in session_dirs
                              for directory, _ in epoch_file_dirs(path, opts.save_wavelet).values()])
 
@@ -308,7 +314,7 @@ def main(opts):
         directory=settings.DATA_ROOT,  # Root containing subject folders
         filter_params={'highpass': settings.L_FREQ, 'lowpass': settings.H_FREQ, 'notch': 50, 'notch_width': settings.NOTCH_WIDTH},
         ica_n_components=15,
-        ica_method='iclabel',
+        ica_method=None if opts.no_ica else 'iclabel',
         ica_params=settings.ICA_PARAMS,
         iclabel_thresholds=settings.ICLABEL_THRESHOLDS,
         bad_channels='interpolate',
@@ -317,7 +323,7 @@ def main(opts):
         split_by='both',
         re_reference='average',
         auto_bad_channel_params=settings.AUTO_BAD_CHANNEL_PARAMS,
-        qc_dir=settings.QC_DIR,
+        qc_dir=qc_dir,
         cache_dir=settings.CACHE_DIR,
         autoreject_mode="local",
         autoreject_params=settings.AUTOREJECT_PARAMS,
@@ -329,8 +335,8 @@ def main(opts):
     preproc_data = preprocessor.process_subjects(included_conditions=settings.INCLUDED_CONDITIONS,
                                                  excluded_subjects=settings.EXCLUDED_SUBJECTS,
                                                  recordings_per_condition=settings.RECORDINGS_PER_CONDITION)
-    io.save_report(preprocessor.auto_bad_channel_report, "auto_bad_chans.csv", settings.QC_DIR)
-    io.save_report(preprocessor.ica_report, "ica_report.csv", settings.QC_DIR)
+    io.save_report(preprocessor.auto_bad_channel_report, "auto_bad_chans.csv", qc_dir)
+    io.save_report(preprocessor.ica_report, "ica_report.csv", qc_dir)
 
     # resample
     for subject in preproc_data.keys():
@@ -341,11 +347,11 @@ def main(opts):
 
     # extract epochs (no baseline correction, see settings.BASELINE_WINDOW)
     all_epochs = preprocessor.create_subject_epochs(preproc_data, output_format='epochs', manual_baseline=False)
-    io.save_report(preprocessor.autoreject_report, "autoreject_report.csv", settings.QC_DIR)
+    io.save_report(preprocessor.autoreject_report, "autoreject_report.csv", qc_dir)
 
     # drop trials with a button press inside the post-stimulus wavelet targets
     fast_press_report = drop_fast_presses(all_epochs, preproc_data, settings.MIN_REACTION_TIME)
-    io.save_report(fast_press_report, "fast_press_report.csv", settings.QC_DIR)
+    io.save_report(fast_press_report, "fast_press_report.csv", qc_dir)
     print(f"Dropped {sum(r['n_dropped'] for r in fast_press_report)} epochs with a button press earlier than "
           f"{settings.MIN_REACTION_TIME} s after onset.")
 
@@ -372,16 +378,16 @@ def main(opts):
 
     # dump epochs data for finetuning (pre-patching)
 
-    save_dataset(epochs=baseline_epochs, path=settings.FINETUNE_DIR, io_handler=io_handler, scale_to_uv=True,
+    save_dataset(epochs=baseline_epochs, path=finetune_dir, io_handler=io_handler, scale_to_uv=True,
                  save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
     # dump epochs data for plasticity analysis (post-patching)
-    save_dataset(epochs=patch_epochs, path=settings.PATCH_DIR, io_handler=io_handler, scale_to_uv=True,
+    save_dataset(epochs=patch_epochs, path=patch_dir, io_handler=io_handler, scale_to_uv=True,
                  save_superlet=opts.save_superlet, save_wavelet=opts.save_wavelet)
 
-    print(f"Preprocessed epochs saved to {settings.FINETUNE_DIR} and {settings.PATCH_DIR}.")
+    print(f"Preprocessed epochs saved to {finetune_dir} and {patch_dir}.")
 
     print("Running quality check for bad channel rejection and autoreject...")
-    run_qc_check(settings.QC_MAX_DROPPED_SHARE, settings.QC_MAX_DROPPED_CHANS, False)
+    run_qc_check(qc_dir, settings.QC_MAX_DROPPED_SHARE, settings.QC_MAX_DROPPED_CHANS, False)
 
     print("Checking that inputs, targets and manifest hold the same epochs...")
     consistent = [check_saved_consistency(path, opts.save_wavelet) for path in session_dirs]
@@ -395,6 +401,11 @@ if __name__ == "__main__":
                         help='Whether to save superlet targets for spectral prediction')
     parser.add_argument('--save_wavelet', action='store_true', default=True,
                         help='Whether to save wavelet targets for spectral prediction')
+    parser.add_argument('--no_ica', action='store_true', default=False,
+                        help='Skip ICA (no components removed), e.g. to measure what ICA contributes; everything else is unchanged')
+    parser.add_argument('--output_dir', default=str(settings.PROCESS_DIR),
+                        help='Folder for the pre_patching/ and post_patching/ dataset folders. Builds outside settings.PROCESS_DIR '
+                             'keep their QC reports in <output_dir>/qc. Training and inference read settings.PROCESS_DIR')
 
     args = parser.parse_args()
     main(args)
