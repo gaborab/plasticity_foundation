@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import argparse
+import json
 import mne
 import pandas as pd
 import torch
@@ -53,6 +54,10 @@ def print_hits(title, df, cols):
     print(f"-> subjects: {', '.join(sorted(df['subject'].unique(), key=lambda s: int(s.removeprefix('STMD'))))}")
 
 def run_qc_check(qc_dir: Path, max_dropped_share, max_channels, show_all):
+    missing = [name for name in ("autoreject_report.csv", "auto_bad_chans.csv") if not (qc_dir / name).exists()]
+    if missing:
+        print(f"QC check skipped: {', '.join(missing)} not written (autoreject or automatic bad channel detection is off).")
+        return
     ar = load_autoreject(qc_dir)
     per_rec, per_session = load_auto_bad_channels(qc_dir)
     sessions = ar.merge(per_session, on=["subject", "session"], how="outer")
@@ -300,7 +305,13 @@ def main(opts):
     output_dir = Path(opts.output_dir)
     finetune_dir, patch_dir = output_dir / settings.FINETUNE_DIR.name, output_dir / settings.PATCH_DIR.name
     qc_dir = settings.QC_DIR if output_dir.resolve() == settings.PROCESS_DIR.resolve() else output_dir / "qc"
-    print(f"Writing the dataset to {output_dir} (QC reports: {qc_dir}), ICA: {'off' if opts.no_ica else 'on'}")
+    build = {"ica": not opts.no_ica, "auto_bad_channels": not opts.no_auto_bad_chans,
+             "bad_channel_interpolation": not opts.no_interpolation, "autoreject": not opts.no_autoreject}
+    print(f"Writing the dataset to {output_dir} (QC reports: {qc_dir}), "
+          + ", ".join(f"{step}: {'on' if on else 'off'}" for step, on in build.items()))
+    # record the preprocessing steps of this build, ridge_leakage.py reports them
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "build_info.json").write_text(json.dumps(build, indent=2), encoding="utf-8")
 
     # stop before the preprocessing if files of an earlier run could be mixed with the new ones
     session_dirs = [finetune_dir, patch_dir]
@@ -317,15 +328,15 @@ def main(opts):
         ica_method=None if opts.no_ica else 'iclabel',
         ica_params=settings.ICA_PARAMS,
         iclabel_thresholds=settings.ICLABEL_THRESHOLDS,
-        bad_channels='interpolate',
+        bad_channels=None if opts.no_interpolation else 'interpolate',
         time_window=settings.WHOLE_EPOCH_WINDOW,
         baseline_win=settings.BASELINE_WINDOW,
         split_by='both',
         re_reference='average',
-        auto_bad_channel_params=settings.AUTO_BAD_CHANNEL_PARAMS,
+        auto_bad_channel_params=None if opts.no_auto_bad_chans else settings.AUTO_BAD_CHANNEL_PARAMS,
         qc_dir=qc_dir,
         cache_dir=settings.CACHE_DIR,
-        autoreject_mode="local",
+        autoreject_mode=None if opts.no_autoreject else "local",
         autoreject_params=settings.AUTOREJECT_PARAMS,
         autoreject_window=settings.AUTOREJECT_WINDOW,
         interactive_selection=False
@@ -403,6 +414,13 @@ if __name__ == "__main__":
                         help='Whether to save wavelet targets for spectral prediction')
     parser.add_argument('--no_ica', action='store_true', default=False,
                         help='Skip ICA (no components removed), e.g. to measure what ICA contributes; everything else is unchanged')
+    parser.add_argument('--no_interpolation', action='store_true', default=False,
+                        help='Leave the manual and automatically detected bad channels of a recording in the data instead of interpolating them '
+                             '(autoreject still interpolates per epoch, add --no_autoreject for no interpolation at all)')
+    parser.add_argument('--no_auto_bad_chans', action='store_true', default=False,
+                        help='Skip the automatic bad channel detection (manual selections are still handled)')
+    parser.add_argument('--no_autoreject', action='store_true', default=False,
+                        help='Skip autoreject: no epochs are dropped or repaired (per-epoch interpolation) for artifacts')
     parser.add_argument('--output_dir', default=str(settings.PROCESS_DIR),
                         help='Folder for the pre_patching/ and post_patching/ dataset folders. Builds outside settings.PROCESS_DIR '
                              'keep their QC reports in <output_dir>/qc. Training and inference read settings.PROCESS_DIR')

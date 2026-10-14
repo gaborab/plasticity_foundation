@@ -6,7 +6,7 @@ Questions:
     1. Leakage: how much of a masked channel's EEG signal can a linear combination of the visible channels predict?
        Average reference, ICA and interpolation mix channels over the 65-channel cap. If the 23 model channels inherited an
        exact linear dependency, a masked channel could be rebuilt from the others regardless of brain state (R² ~ 1).
-    2. Preprocessing (--compare_root): the same analysis on a second build, e.g. one made with make_dataset.py --no_ica,
+    2. Preprocessing (--compare_root): the same analysis on a second build, e.g. a raw build (make_dataset.py --no_ica --no_auto_bad_chans --no_interpolation --no_autoreject),
        and the per subject and channel difference of R² between the builds.
     3. Sensitivity (--inject): does the masked prediction error change when a visual-cortex source gets stronger?
 
@@ -63,9 +63,10 @@ Outputs (outputs/ridge_leakage/<label>/ and outputs/plots/ridge_leakage/<label>/
     topomaps_injection_{error_single|error_cluster|signal}_gain{gain}.png
 
 Run from the repository root after make_dataset.py, e.g.
-    python ridge_leakage.py --compare_root data/processed_no_ica --compare_label no_ica --inject 0.1 0.25 0.5
+    python ridge_leakage.py --compare_root data/processed_raw --compare_label raw --inject 0.1 0.25 0.5
 """
 import argparse
+import json
 import textwrap
 from pathlib import Path
 
@@ -132,6 +133,17 @@ def subject_trials(inputs, subject, interp):
     return np.stack(X), np.stack(bad)
 
 
+def build_description(root):
+    """The preprocessing steps of a make_dataset.py build, from its build_info.json (written since the step flags exist)."""
+    path = Path(root) / "build_info.json"
+    if not path.exists():
+        return "preprocessing steps not recorded: built before make_dataset.py wrote build_info.json"
+    steps = json.loads(path.read_text(encoding="utf-8"))
+    names = {"ica": "ICA", "auto_bad_channels": "automatic bad channel detection",
+             "bad_channel_interpolation": "bad channel interpolation", "autoreject": "autoreject"}
+    return ", ".join(f"{names.get(step, step)} {'on' if on else 'off'}" for step, on in steps.items())
+
+
 def subject_number(subject):
     return int(subject.removeprefix("STMD"))
 
@@ -168,7 +180,8 @@ def evaluate(stats, sel, target, a, mu):
     centred = S - np.outer(m, mu) - np.outer(mu, m) + n * np.outer(mu, mu)
     mse = (a @ centred @ a) / n
     var = S[target, target] / n - (m[target] / n) ** 2
-    return mse, 1 - mse / var, var
+    r2 = 1 - mse / var if var > 1e-12 else np.nan  # a flat channel (e.g. disconnected, in a build without interpolation) has no R²
+    return mse, r2, var
 
 
 def masking_schemes(c, neighbours):
@@ -416,7 +429,7 @@ def run_build(root, label, neighbours, info):
     per_channel.to_csv(out_dir / "per_channel.csv", index=False)
 
     report = [f"# Ridge-regression check of masked-channel prediction ({label})", "",
-              f"Build: `{root}`. Subjects: {r2.subject.nunique()}. Input epochs {settings.EPOCH_WINDOW[0]} to {settings.EPOCH_WINDOW[1]} s, "
+              f"Build: `{root}` ({build_description(root)}). Subjects: {r2.subject.nunique()}. Input epochs {settings.EPOCH_WINDOW[0]} to {settings.EPOCH_WINDOW[1]} s, "
               "band-passed per band, every time sample one observation, trials of all stimulus types pooled and split in half "
               f"per subject and session (fit / test). single = target channel hidden (22 visible); cluster = target and its "
               f"{N_NEIGHBOURS} nearest electrodes hidden ({N_CH - 1 - N_NEIGHBOURS} visible); only the target channel is predicted. "
@@ -453,7 +466,7 @@ def run_build(root, label, neighbours, info):
     return r2, out_dir, plot_dir
 
 
-def compare_builds(r2_main, r2_compare, label, compare_label, out_dir, plot_dir, info):
+def compare_builds(r2_main, r2_compare, label, compare_label, main_root, compare_root, out_dir, plot_dir, info):
     """Per session, subject, band, scheme and channel: R² of both builds (intact target channels) and main - compare."""
     keys = ["session", "subject", "band", "scheme", "channel"]
     main = r2_main[r2_main.test_set == "intact"].set_index(keys)["r2"].rename(f"r2_{label}")
@@ -469,9 +482,12 @@ def compare_builds(r2_main, r2_compare, label, compare_label, out_dir, plot_dir,
     table = table.reindex(index=[b for b in BANDS if b in table.index])
     table.columns = [f"{session}, {scheme}" for session, scheme in table.columns]
     section = [f"## R² of {label} minus {compare_label}", "",
+               f"- {label}: `{main_root}` ({build_description(main_root)})",
+               f"- {compare_label}: `{compare_root}` ({build_description(compare_root)})", "",
                f"Same analysis on both builds; per subject the mean over channels of R² ({label}) - R² ({compare_label}), "
                "intact target channels, subjects in both builds: median [quartiles]. The trial sets of the builds differ "
-               "(e.g. autoreject decides differently without ICA), so subjects, not trials, are paired.", "", markdown_table(table), ""]
+               "(e.g. autoreject drops and repairs different epochs, or none), so subjects, not trials, are paired.", "",
+               markdown_table(table), ""]
 
     flat = both.reset_index()
     for session in SESSIONS:
@@ -555,7 +571,7 @@ def main(opts):
     extra = []
     if opts.compare_root:
         r2_compare, _, _ = run_build(opts.compare_root, opts.compare_label, neighbours, info)
-        extra += compare_builds(r2, r2_compare, opts.label, opts.compare_label, out_dir, plot_dir, info)
+        extra += compare_builds(r2, r2_compare, opts.label, opts.compare_label, opts.data_root, opts.compare_root, out_dir, plot_dir, info)
     if opts.inject:
         extra += injection_test(opts.data_root, opts.inject, opts.head_model, opts.inject_labels, neighbours, info, out_dir, plot_dir)
     if extra:
@@ -570,8 +586,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser("Ridge-regression check of masked-channel prediction")
     parser.add_argument("--data_root", default=str(settings.PROCESS_DIR), help="make_dataset.py build: folder with pre_patching/ and post_patching/")
     parser.add_argument("--label", default="dataset", help="output subfolder of the build")
-    parser.add_argument("--compare_root", default=None, help="second build analysed the same way and compared, e.g. data/processed_no_ica")
-    parser.add_argument("--compare_label", default="no_ica", help="output subfolder of the second build")
+    parser.add_argument("--compare_root", default=None, help="second build analysed the same way and compared, e.g. data/processed_raw")
+    parser.add_argument("--compare_label", default="raw", help="output subfolder of the second build")
     parser.add_argument("--inject", type=float, nargs="+", default=None,
                         help="gain injection test on the baseline, e.g. --inject 0.1 0.25 0.5 (visual source 10/25/50 %% stronger after onset)")
     parser.add_argument("--head_model", choices=["fsaverage", "sphere"], default="fsaverage",
