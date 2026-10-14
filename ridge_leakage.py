@@ -35,8 +35,12 @@ Gain injection (--inject GAIN [GAIN ...], baseline session of the main build onl
       fiducials. fsaverage (~200 MB) is downloaded into the MNE data folder on first use.
       --head_model sphere: radial dipole at SOURCE_DEPTH of the head radius towards the midpoint of O1 and O2, 3-shell sphere
       model fitted to the electrodes, no download
+    - --mixed_injection: every MIXED_INJECT label is a separate fsaverage source with its own gain (e.g. +10 % V1, -10 %
+      lingual), injected at once; each --inject value scales all gains (default 1). The sources' activity is estimated
+      jointly by least squares, and the report gives the overlap of their topographies (cosine similarity, condition number).
+      --check_sources only computes the topographies and their overlap, without EEG data
     - the topography is average-referenced over the 65 channels (as in the preprocessing), then the 23 model channels are
-      taken; the table reports the N_SOURCE_ROI channels where it is strongest
+      taken; the table reports the N_SOURCE_ROI channels where the injected change is strongest
     - every subject's baseline trials are split in half into a pseudo-baseline A and a pseudo-post session B; the models are
       fitted on all of A and scored on B only, so no scored trial was seen in training
     - in B, the source's activity s(t) is estimated with the least-squares spatial filter of its topography g,
@@ -96,6 +100,10 @@ ONSET_RAMP = 0.02  # s, raised-cosine ramp of the injected gain after stimulus o
 N_SOURCE_ROI = 4  # the injection table reports the channels where the injected source is strongest (largest |g|)
 FSAVERAGE_LABELS = ["pericalcarine"]  # aparc labels of the injected fsaverage source (pericalcarine = primary visual cortex)
 QUARTILES = dict(median="median", q1=lambda v: v.quantile(0.25), q3=lambda v: v.quantile(0.75))
+# --mixed_injection: fsaverage aparc labels injected as separate sources and their gains; each --inject value scales all of them
+MIXED_INJECT = {"pericalcarine": 0.1, "lateraloccipital": 0.25, "lingual": -0.1}
+MAX_COSINE = 0.9  # source pairs with a more similar topography (|cosine|) are flagged as overlapping in the report
+MAX_CONDITION = 10  # source sets with a larger condition number are flagged: their activity cannot be separated reliably
 
 
 # ---------------------------------------------------------------- data
@@ -238,30 +246,52 @@ def model_channel_topography(gain, info):
     return g / np.abs(g).max()
 
 
-def fsaverage_topography(labels):
+def fsaverage_label_gains(labels):
     """
-    Scalp topography of visual cortex on the MNE fsaverage template: every source of the given aparc labels (both hemispheres),
+    Scalp field of every given aparc label (both hemispheres) on the MNE fsaverage template: the sum over the label's sources,
     oriented normal to the cortex with equal amplitude, through the 3-layer fsaverage BEM, HydroCel-65 electrodes aligned
     with the template by their fiducials (trans='fsaverage'). Folded cortex partly cancels itself, as in real EEG.
+    Returns ({label: 65-channel field}, {label: number of sources}, info of the 65 channels).
     Downloads fsaverage (~200 MB) into the MNE data folder on the first call.
     """
     fs_dir = Path(mne.datasets.fetch_fsaverage(verbose=False))
-    subjects_dir = fs_dir.parent
     info, _ = hydrocel_info()
     fwd = mne.make_forward_solution(info, trans="fsaverage", src=fs_dir / "bem" / "fsaverage-ico-5-src.fif",
                                     bem=fs_dir / "bem" / "fsaverage-5120-5120-5120-bem-sol.fif", meg=False, eeg=True, verbose=False)
     fwd = mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=True, verbose=False)
-    annotation = mne.read_labels_from_annot("fsaverage", parc="aparc", subjects_dir=subjects_dir, verbose=False)
-    gain, offset, columns = fwd["sol"]["data"], 0, []
-    for hemi, src in zip(["lh", "rh"], fwd["src"]):
-        vertices = np.concatenate([lab.vertices for lab in annotation if lab.name in {f"{name}-{hemi}" for name in labels}] or [[]])
-        columns.append(offset + np.where(np.isin(src["vertno"], vertices))[0])
-        offset += len(src["vertno"])
-    columns = np.concatenate(columns)
-    if len(columns) == 0:
-        raise ValueError(f"No fsaverage source in the aparc labels {labels}")
-    return model_channel_topography(gain[:, columns].sum(axis=1), info), \
-        f"{', '.join(labels)} (aparc, both hemispheres, {len(columns)} sources normal to the cortex), fsaverage BEM"
+    annotation = mne.read_labels_from_annot("fsaverage", parc="aparc", subjects_dir=fs_dir.parent, verbose=False)
+    fields, counts = {}, {}
+    for name in labels:
+        offset, columns = 0, []
+        for hemi, src in zip(["lh", "rh"], fwd["src"]):
+            vertices = np.concatenate([lab.vertices for lab in annotation if lab.name == f"{name}-{hemi}"] or [[]])
+            columns.append(offset + np.where(np.isin(src["vertno"], vertices))[0])
+            offset += len(src["vertno"])
+        columns = np.concatenate(columns)
+        if len(columns) == 0:
+            raise ValueError(f"No fsaverage source in the aparc label {name!r}")
+        fields[name], counts[name] = fwd["sol"]["data"][:, columns].sum(axis=1), len(columns)
+    return fields, counts, info
+
+
+def fsaverage_topography(labels):
+    """Scalp topography (23 model channels, max |g| = 1) of the given aparc labels as one source, and its description."""
+    fields, counts, info = fsaverage_label_gains(labels)
+    return model_channel_topography(sum(fields.values()), info), \
+        f"{', '.join(labels)} (aparc, both hemispheres, {sum(counts.values())} sources normal to the cortex), fsaverage BEM"
+
+
+def source_overlap(topographies):
+    """
+    How distinguishable the injected sources are on the 23 model channels: pairwise cosine similarity of their topographies
+    (1 = identical shape, -1 = identical but inverted) and the condition number of their matrix (largest / smallest
+    singular value; large values mean their activity cannot be told apart and the joint estimate is unstable).
+    """
+    names = list(topographies)
+    G = np.stack([topographies[name] for name in names], axis=1)
+    unit = G / np.linalg.norm(G, axis=0)
+    singular = np.linalg.svd(G, compute_uv=False)
+    return pd.DataFrame(unit.T @ unit, index=names, columns=names), singular[0] / singular[-1]
 
 
 def sphere_topography():
@@ -287,8 +317,13 @@ def visual_source_topography(head_model, labels):
     return fsaverage_topography(labels) if head_model == "fsaverage" else sphere_topography()
 
 
-def inject_subject(subject, X, bad, g, gains, neighbours, rng):
-    """Injection rows of one subject's baseline: error and signal change per gain, band, scheme and target channel."""
+def inject_subject(subject, X, bad, G, gain_sets, neighbours, rng):
+    """
+    Injection rows of one subject's baseline: error and signal change per injection, band, scheme and target channel.
+    G: (23, n_sources) topographies of the injected sources; gain_sets: {key: (n_sources,) gains}, one injection per key.
+    The sources' activity is estimated jointly by least squares, S = pinv(G) x, so activity shared by overlapping
+    topographies is not counted twice; source k then gets gains[k] * G[:, k] * S_k(t) added after onset.
+    """
     n = len(X)
     perm = rng.permutation(n)
     pseudo_baseline, pseudo_post = perm[: n // 2], perm[n // 2:]
@@ -300,16 +335,16 @@ def inject_subject(subject, X, bad, g, gains, neighbours, rng):
     times = settings.EPOCH_WINDOW[0] + np.arange(X.shape[-1]) / settings.RSFREQ
     ramp = 0.5 - 0.5 * np.cos(np.pi * np.clip(times / ONSET_RAMP, 0, 1))  # 0 before onset, 1 from ONSET_RAMP s on
     window = (times >= settings.POST_TARGET_WINDOW[0] - 1e-9) & (times <= settings.POST_TARGET_WINDOW[1] + 1e-9)
-    source = np.einsum("c,nct->nt", g, X) / (g @ g)  # least-squares estimate of the source's activity per trial
+    sources = np.einsum("kc,nct->nkt", np.linalg.pinv(G), X)  # least-squares estimate of every source's activity per trial
 
     rows = []
     for band, edges in BANDS.items():
         Xf = band_filter(X, edges)
         train_stats, orig_stats = trial_stats(Xf), trial_stats(Xf[:, :, window])
         injected_stats = {}
-        for gain in gains:
+        for gain, source_gains in gain_sets.items():
             Xi = X.copy()
-            Xi[in_post] += gain * g[None, :, None] * (source[in_post] * ramp)[:, None, :]
+            Xi[in_post] += np.einsum("ck,k,nkt->nct", G, source_gains, sources[in_post] * ramp)
             injected_stats[gain] = trial_stats(band_filter(Xi, edges)[:, :, window])
         for c in range(N_CH):
             fit_sel, test_sel = train & ~bad[:, c], in_post & ~bad[:, c]
@@ -318,7 +353,7 @@ def inject_subject(subject, X, bad, g, gains, neighbours, rng):
             for scheme, visible in masking_schemes(c, neighbours).items():
                 a, mu = fit_ridge(train_stats, fit_sel, c, visible)
                 mse_o, r2_o, var_o = evaluate(orig_stats, test_sel, c, a, mu)
-                for gain in gains:
+                for gain in gain_sets:
                     mse_i, r2_i, var_i = evaluate(injected_stats[gain], test_sel, c, a, mu)
                     rows.append({"gain": gain, "subject": subject, "band": band, "scheme": scheme, "channel": CHANNEL_NAMES[c],
                                  "n_test_trials": int(test_sel.sum()), "mse_original": mse_o, "mse_injected": mse_i,
@@ -501,16 +536,64 @@ def compare_builds(r2_main, r2_compare, label, compare_label, main_root, compare
     return section
 
 
-def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, plot_dir):
+
+def injected_sources(head_model, labels, mixed_injection):
+    """
+    The sources of the injection: ({name: topography (23 model channels, max |g| = 1)}, {name: gain at --inject 1},
+    description). Mixed: every MIXED_INJECT label is a source with its own gain; otherwise one source (--inject_labels or the
+    sphere dipole) whose gain is the --inject value itself.
+    """
+    if mixed_injection:
+        if head_model != "fsaverage":
+            raise ValueError("--mixed_injection needs --head_model fsaverage: its sources are aparc labels")
+        fields, counts, info65 = fsaverage_label_gains(list(MIXED_INJECT))
+        topographies = {name: model_channel_topography(field, info65) for name, field in fields.items()}
+        description = "; ".join(f"{name} {100 * gain:+g} % ({counts[name]} sources)" for name, gain in MIXED_INJECT.items())
+        return topographies, dict(MIXED_INJECT), f"mixed injection: {description} (aparc, both hemispheres, fsaverage BEM)"
+    g, description = visual_source_topography(head_model, labels)
+    return {"source": g}, {"source": 1.0}, description
+
+
+def source_report(topographies, relative_gains, info, plot_dir):
+    """Topomaps of the injected sources (and their net pattern if mixed) and the overlap lines of the report."""
+    values = {name: pd.Series(g, index=CHANNEL_NAMES) for name, g in topographies.items()}
+    if len(topographies) > 1:
+        net = sum(relative_gains[name] * g for name, g in topographies.items())
+        values["net change (--inject 1)"] = pd.Series(net / np.abs(net).max(), index=CHANNEL_NAMES)
+    plot_topomap_row(values, info, (-1, 1), "RdBu_r", "relative potential",
+                     "Injected source topographies (23 model channels, average reference over the 65 HydroCel electrodes)",
+                     plot_dir / "injected_source_topographies.png")
+    if len(topographies) == 1:
+        return []
+    cosine, condition = source_overlap(topographies)
+    names = list(topographies)
+    pairs = [(a, b, cosine.loc[a, b]) for i, a in enumerate(names) for b in names[i + 1:]]
+    lines = ["Overlap of the source topographies on the 23 model channels (cosine similarity: 1 = same shape, -1 = same "
+             f"shape inverted; pairs above |{MAX_COSINE:g}| are hard to tell apart):", ""]
+    lines += [f"- {a} vs {b}: {cos:+.2f}" + ("  **overlapping**" if abs(cos) > MAX_COSINE else "") for a, b, cos in pairs]
+    lines += ["", f"Condition number of the {len(names)} topographies: {condition:.1f}"
+              + (f" (above {MAX_CONDITION}: their activity cannot be separated reliably, the joint estimate is unstable)"
+                 if condition > MAX_CONDITION else f" (below {MAX_CONDITION}: separable)"), ""]
+    print("\n".join(lines))
+    return lines
+
+
+def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, plot_dir, mixed_injection=False):
     """Gain injection on the baseline session of the build: writes injection.csv and topomaps, returns the report section."""
-    g, source_description = visual_source_topography(head_model, labels)
-    roi = [CHANNEL_NAMES[c] for c in np.argsort(-np.abs(g))[:N_SOURCE_ROI]]
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    im, _ = mne.viz.plot_topomap(g, info, axes=ax, show=False, vlim=(-1, 1), cmap="RdBu_r")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="relative potential")
-    ax.set_title("Injected visual-cortex source\n" + textwrap.fill(source_description, 45), pad=10)
-    fig.savefig(plot_dir / "injected_source_topography.png", dpi=300, bbox_inches="tight")
-    plt.close(fig)
+    topographies, relative_gains, source_description = injected_sources(head_model, labels, mixed_injection)
+    names = list(topographies)
+    G = np.stack([topographies[name] for name in names], axis=1)
+    relative = np.array([relative_gains[name] for name in names])
+    gain_sets = {gain: gain * relative for gain in gains}
+    net = G @ relative  # injected pattern per unit of --inject: the channels where it is strongest are reported
+    roi = [CHANNEL_NAMES[c] for c in np.argsort(-np.abs(net))[:N_SOURCE_ROI]]
+    overlap_lines = source_report(topographies, relative_gains, info, plot_dir)
+    if mixed_injection:
+        gain_label = lambda gain: f"mixed ×{gain:g}"
+        gain_file = lambda gain: f"mixed{gain:g}"
+    else:
+        gain_label = lambda gain: f"{100 * gain:+g} %"
+        gain_file = lambda gain: f"gain{gain:g}"
 
     directory = Path(root) / SESSIONS["baseline"]
     interp = interpolated_channels(directory / "epochs_manifest.csv")
@@ -519,9 +602,10 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
     for subject in sorted(inputs, key=subject_number):
         X, bad = subject_trials(inputs, subject, interp)
         rng = np.random.default_rng([settings.SEED, subject_number(subject), 2])
-        rows += inject_subject(subject, X, bad, g, gains, neighbours, rng)
+        rows += inject_subject(subject, X, bad, G, gain_sets, neighbours, rng)
         print(f"[injection] {subject}: done")
     inj = pd.DataFrame(rows)
+    inj["mixed"] = mixed_injection
     # a flat target channel (e.g. disconnected, in a build without interpolation) has no defined change
     flat = (inj.mse_original <= 1e-12) | (inj.var_original <= 1e-12)
     inj["error_change"] = np.where(flat, np.nan, np.log(inj.mse_injected / inj.mse_original.where(~flat, 1.0)))
@@ -533,7 +617,7 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
     for gain in gains:
         for band in BANDS:
             sel = inj[(inj.gain == gain) & (inj.band == band) & inj.channel.isin(roi)]
-            row = {"gain": f"{100 * gain:+g} %", "band": band}
+            row = {"gain": gain_label(gain), "band": band}
             signal = sel[sel.scheme == "single"].groupby("subject")["signal_change"].mean().agg(**QUARTILES)
             row[f"signal power change ({', '.join(roi)})"] = fmt(pct(signal["median"]), pct(signal.q1), pct(signal.q3), unit=" %")
             for scheme in ["single", "cluster"]:
@@ -549,23 +633,43 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
             values = {band: pct(part[part.band == band].groupby("channel")[f"{kind}_change"].median()) for band in BANDS}
             lim = symmetric_limit(values, default=1.0)
             what = "Target channel power change" if kind == "signal" else f"Masked prediction error change ({scheme} masking)"
+            change = f"the {gain_label(gain)} injection" if mixed_injection else f"a {gain_label(gain)} visual-cortex source gain"
             plot_topomap_row(values, info, (-lim, lim), "RdBu_r", "change (%)",
-                             f"{what} after a {100 * gain:+g} % visual-cortex source gain (median over N={n_subjects} subjects)",
-                             plot_dir / f"topomaps_injection_{kind}{'' if kind == 'signal' else '_' + scheme}_gain{gain:g}.png")
+                             f"{what} after {change} (median over N={n_subjects} subjects)",
+                             plot_dir / f"topomaps_injection_{kind}{'' if kind == 'signal' else '_' + scheme}_{gain_file(gain)}.png")
 
+    if mixed_injection:
+        what_changed = (f"the activity of {len(names)} visual-cortex sources ({source_description}; their activity estimated "
+                        "jointly by least squares from the 23 model channels) was changed by its own gain, scaled by each "
+                        "--inject value (×1 = the listed gains), after stimulus onset")
+    else:
+        what_changed = (f"the activity of a visual-cortex source ({source_description}; average reference over the 65 HydroCel "
+                        "electrodes, then the 23 model channels) was made 1 + gain times stronger after stimulus onset")
     return ["## Gain injection", "",
-            f"Pseudo-sessions from the baseline: in half of every subject's trials, the activity of a visual-cortex source "
-            f"({source_description}; average reference over the 65 HydroCel electrodes, then the 23 model channels) "
-            f"was made 1 + gain times stronger after stimulus onset. The models (fitted on the other half, the pseudo-baseline) were scored on the same "
-            f"trials with and without the injection, {settings.POST_TARGET_WINDOW[0]} to {settings.POST_TARGET_WINDOW[1]} s. "
-            f"Values: per subject the mean over {', '.join(roi)} (where the source is strongest), median [quartiles] over "
-            "subjects. Signal power change = variance of the target channel; error change = MSE of its masked prediction. "
-            "An error change much smaller than the signal change means the masked prediction absorbs the gain change.", "",
+            f"Pseudo-sessions from the baseline: in half of every subject's trials, {what_changed}. The models (fitted on the "
+            "other half, the pseudo-baseline) were scored on the same trials with and without the injection, "
+            f"{settings.POST_TARGET_WINDOW[0]} to {settings.POST_TARGET_WINDOW[1]} s. Values: per subject the mean over "
+            f"{', '.join(roi)} (where the injected change is strongest), median [quartiles] over subjects. Signal power change = "
+            "variance of the target channel; error change = MSE of its masked prediction. An error change much smaller than the "
+            "signal change means the masked prediction absorbs the gain change.", "",
+            *overlap_lines,
             markdown_table(pd.DataFrame(table_rows), index=False), ""]
+
 
 
 def main(opts):
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes
+    if opts.check_sources:
+        # only the injected sources: their topographies and overlap, no EEG data needed
+        plot_dir = PLOT_ROOT / opts.label
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        topographies, relative_gains, description = injected_sources(opts.head_model, opts.inject_labels, opts.mixed_injection)
+        print(description)
+        source_report(topographies, relative_gains, info, plot_dir)
+        print(f"Topographies saved to {plot_dir / 'injected_source_topographies.png'}")
+        return
+    if opts.mixed_injection and not opts.inject:
+        opts.inject = [1.0]  # the MIXED_INJECT gains as they are
     neighbours = nearest_electrodes(info, N_NEIGHBOURS)
     print("Nearest electrodes: " + "; ".join(f"{CHANNEL_NAMES[c]}: {', '.join(CHANNEL_NAMES[j] for j in nb)}" for c, nb in neighbours.items()))
 
@@ -575,7 +679,7 @@ def main(opts):
         r2_compare, _, _ = run_build(opts.compare_root, opts.compare_label, neighbours, info)
         extra += compare_builds(r2, r2_compare, opts.label, opts.compare_label, opts.data_root, opts.compare_root, out_dir, plot_dir, info)
     if opts.inject:
-        extra += injection_test(opts.data_root, opts.inject, opts.head_model, opts.inject_labels, neighbours, info, out_dir, plot_dir)
+        extra += injection_test(opts.data_root, opts.inject, opts.head_model, opts.inject_labels, neighbours, info, out_dir, plot_dir, opts.mixed_injection)
     if extra:
         with open(out_dir / "report.md", "a", encoding="utf-8") as f:
             f.write("\n".join(extra))
@@ -596,4 +700,9 @@ if __name__ == "__main__":
                         help="head model of the injected source: fsaverage template (downloads ~200 MB on first use) or an offline 3-shell sphere")
     parser.add_argument("--inject_labels", nargs="+", default=FSAVERAGE_LABELS,
                         help="aparc labels of the fsaverage source, e.g. pericalcarine lateraloccipital")
+    parser.add_argument("--mixed_injection", action="store_true", default=False,
+                        help="inject the MIXED_INJECT sources at once, each with its own gain; --inject values scale all gains "
+                             "(default 1 = the gains as listed). Needs --head_model fsaverage")
+    parser.add_argument("--check_sources", action="store_true", default=False,
+                        help="only compute the injected sources' topographies and their overlap (no EEG data needed), then exit")
     main(parser.parse_args())

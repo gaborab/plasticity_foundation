@@ -96,8 +96,10 @@ def main(opts):
                    "mean dR²": d_r2.mean(), "d_z": d_r2.mean() / d_r2.std(ddof=1), "t": t, "p t-test": p_t}
             for name, delta in deltas.items():
                 both = pd.concat([d_r2.rename("d_r2"), delta], axis=1).dropna()
+                if len(both) < len(d_r2):
+                    print(f"WARNING: {band}, {scheme}: only {len(both)} of {len(d_r2)} subjects have the {name} difference")
                 rho, p_rho = stats.spearmanr(both["d_r2"], both[delta.name])
-                row[f"rho dR² vs d {name}"], row[f"p rho {name}"], row[f"n {name}"] = rho, p_rho, len(both)
+                row[f"rho dR² vs d {name}"], row[f"p rho {name}"] = rho, p_rho
             rows.append(row)
 
     result = pd.DataFrame(rows)
@@ -106,7 +108,7 @@ def main(opts):
                      f"{(delta > 0).sum()} with more in post-patching)" for name, delta in deltas.items()}
     report = [f"# Session difference of the masked-channel R² ({opts.label})", "",
               f"dR² = R²(post-patching) - R²(baseline) per subject (mean over channels, intact target channels). "
-              "Test: paired t-test on dR², d_z = mean / SD. Dose-response: Spearman correlation "
+              "Test: paired t-test on dR², d_z = mean / SD. Dose-response: Spearman rank correlation (rho) "
               "over subjects of dR² with the session difference of the cleaning.", "",
               *[f"- d {name}: {text}" for name, text in summary.items()],
               "  (interpolation = interpolated share of trial x channel pairs; ICA = components removed per recording)", "",
