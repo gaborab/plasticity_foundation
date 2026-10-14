@@ -522,8 +522,10 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
         rows += inject_subject(subject, X, bad, g, gains, neighbours, rng)
         print(f"[injection] {subject}: done")
     inj = pd.DataFrame(rows)
-    inj["error_change"] = np.log(inj.mse_injected / inj.mse_original)
-    inj["signal_change"] = np.log(inj.var_injected / inj.var_original)
+    # a flat target channel (e.g. disconnected, in a build without interpolation) has no defined change
+    flat = (inj.mse_original <= 1e-12) | (inj.var_original <= 1e-12)
+    inj["error_change"] = np.where(flat, np.nan, np.log(inj.mse_injected / inj.mse_original.where(~flat, 1.0)))
+    inj["signal_change"] = np.where(flat, np.nan, np.log(inj.var_injected / inj.var_original.where(~flat, 1.0)))
     inj.to_csv(out_dir / "injection.csv", index=False)
 
     pct = lambda log_ratio: 100 * (np.exp(log_ratio) - 1)
@@ -531,7 +533,7 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
     for gain in gains:
         for band in BANDS:
             sel = inj[(inj.gain == gain) & (inj.band == band) & inj.channel.isin(roi)]
-            row = {"gain": f"+{100 * gain:g} %", "band": band}
+            row = {"gain": f"{100 * gain:+g} %", "band": band}
             signal = sel[sel.scheme == "single"].groupby("subject")["signal_change"].mean().agg(**QUARTILES)
             row[f"signal power change ({', '.join(roi)})"] = fmt(pct(signal["median"]), pct(signal.q1), pct(signal.q3), unit=" %")
             for scheme in ["single", "cluster"]:
@@ -548,7 +550,7 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
             lim = symmetric_limit(values, default=1.0)
             what = "Target channel power change" if kind == "signal" else f"Masked prediction error change ({scheme} masking)"
             plot_topomap_row(values, info, (-lim, lim), "RdBu_r", "change (%)",
-                             f"{what} after a +{100 * gain:g} % visual-cortex source gain (median over N={n_subjects} subjects)",
+                             f"{what} after a {100 * gain:+g} % visual-cortex source gain (median over N={n_subjects} subjects)",
                              plot_dir / f"topomaps_injection_{kind}{'' if kind == 'signal' else '_' + scheme}_gain{gain:g}.png")
 
     return ["## Gain injection", "",
