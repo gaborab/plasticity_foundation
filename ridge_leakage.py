@@ -89,7 +89,7 @@ from core.plot_data_processing import create_topomap_info
 OUTPUT_ROOT = settings.BASE_DIR / "outputs" / "ridge_leakage"
 PLOT_ROOT = settings.PLOT_DIR / "ridge_leakage"
 SESSIONS = {"baseline": settings.FINETUNE_DIR.name, "post-patching": settings.PATCH_DIR.name}
-N_NEIGHBOURS = 4
+N_NEIGHBOURS = settings.N_NEIGHBOURS
 RIDGE_ALPHA = 1e-3
 MIN_TEST_TRIALS = 10  # R² of fewer pooled test trials is too noisy, especially for the interpolated test sets
 BANDS = {"5-60 Hz": (5, 60), **settings.FREQ_BANDS}

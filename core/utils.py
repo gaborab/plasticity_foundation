@@ -7,6 +7,8 @@ from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
 import pandas as pd
+from core import plot_data_processing
+import zlib
 
 def subject_paradigm(subject: str, thresh: int):
     return "no_press" if int(subject.removeprefix("STMD")) >= thresh else "press"
@@ -96,7 +98,7 @@ def normalize_wavelet(mags, by=Optional[Path], save_path: Optional[Path] = None)
     normalized_mags = (mags - mean) / (std + 1e-8)  # Add small value to avoid division by zero
     return normalized_mags, mean, std
 
-def cut_to_timewindow(tensor, original_window: Tuple[int, int], new_window: Tuple[int, int], fs:int):
+def cut_to_timewindow(tensor, original_window: Tuple[float, float], new_window: Tuple[float, float], fs:int):
     """
         Cuts the time dimension of a tensor based on the sampling frequency.
         Expects time to be the last dimension.
@@ -308,6 +310,65 @@ def get_subjects_by_eye_dominance(side: str, eye_dom_csv_path: Path):
     eye_dom = pd.read_csv(eye_dom_csv_path)
 
     return eye_dom[eye_dom["eye_dominance"] == side]["subject_id"].tolist()
+
+def nearest_electrodes(info, n_neighbours):
+    """{channel index: indices of its n_neighbours nearest electrodes}, Euclidean distance of the electrode positions in info."""
+    pos = np.array([ch["loc"][:3] for ch in info["chs"]])
+    dist = np.linalg.norm(pos[:, None] - pos[None], axis=-1)
+    return {c: [j for j in np.argsort(dist[c]) if j != c][:n_neighbours] for c in range(len(pos))}
+
+def build_neighbor_mask(n_neighbours, n_chans):
+    """
+    Builds the (n_chans, n_chans) boolean cluster table of masked-channel reconstruction: row c is True for channel c
+    and its n_neighbours nearest electrodes (HydroCel-65 positions), the channels hidden when c is the target.
+    With n_neighbours = 0 only the target channel itself is hidden.
+    """
+    info = plot_data_processing.create_topomap_info()
+    neighbors = nearest_electrodes(info, n_neighbours)
+    mask = np.zeros((n_chans, n_chans), dtype=bool)
+    for ch, ch_neighbors in neighbors.items():
+        mask[ch, [ch, *ch_neighbors]] = True
+    return mask
+
+
+def balanced_eval_channels(allowed_masks, n_channels):
+    """
+    Returns the evaluation target channels of every sample, n_channels allowed channels each, so that every channel is
+    evaluated about equally often although interpolation makes some channels allowed in far fewer samples than others.
+    allowed_masks: one (n_chans,) boolean mask of allowed target channels per sample, in dataset order.
+    Greedy and deterministic: going through the samples in order, every sample takes the allowed channels that have been
+    evaluated least so far. A channel that is rarely allowed thus catches up in the samples where it is allowed.
+    """
+    if len(allowed_masks) == 0:
+        return []
+    n_chans = len(allowed_masks[0])
+    times_evaluated = np.zeros(n_chans, dtype=int)  # how often every channel has been chosen so far
+    eval_channels = []
+    for sample_idx, allowed in enumerate(allowed_masks):
+        candidates = np.flatnonzero(np.asarray(allowed)).tolist()
+        if len(candidates) < n_channels:
+            raise ValueError(f"Sample {sample_idx} has {len(candidates)} allowed channels, fewer than the {n_channels} evaluation channels")
+
+        def priority(ch):
+            # 1. the channels evaluated least so far come first
+            # 2. among channels evaluated equally often, start at channel sample_idx and go up (wrapping around),
+            #    so that ties don't always go to the lowest channel indices
+            return times_evaluated[ch], (ch - sample_idx) % n_chans
+
+        chosen = sorted(sorted(candidates, key=priority)[:n_channels])
+        times_evaluated[chosen] += 1
+        eval_channels.append(np.array(chosen))
+    return eval_channels
+
+
+
+def channel_permutation(key, allowed, seed):
+    """
+    Returns a fixed random order of the allowed target channels of one sample, seeded by the sample's key,
+    so it is the same in every run, fold and dataset order.
+    """
+    rng = np.random.default_rng([seed, zlib.crc32(repr(key).encode())])
+    return rng.permutation(np.flatnonzero(allowed))
 
 
 

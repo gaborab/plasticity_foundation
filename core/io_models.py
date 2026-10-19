@@ -1,9 +1,8 @@
 from dataclasses import dataclass, fields, asdict
 from functools import cached_property
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from core import settings
-from core.io_utils import nested_group_to_dict
 import h5py
 import numpy as np
 import json
@@ -117,3 +116,39 @@ class Trial:
     reference_metrics = _metrics_field("reference")
     reference_channel_metrics = _metrics_field("reference", channel=True)
 
+@dataclass
+class TargetStats:
+    """Mean and std the dB targets are normalized with, fitted on the training targets of one fold."""
+    mu: float
+    sigma: float
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, float]) -> "TargetStats":
+        return cls(mu=data["mu"], sigma=data["sigma"])
+
+    def to_dict(self) -> Dict[str, float]:
+        return asdict(self)
+
+    @classmethod
+    def fit(cls, targets_data, eps: float = 1e-8) -> "TargetStats":
+        """
+        Fits the mean and std of all masked-in target values, pooled over trials, channels, freqs and time.
+        targets_data yields (target, mask, metadata) per sample, see FinetuneDataset.masked_targets. Only the channels
+        in metadata["allowed"] are used, so interpolated channels, which are never targets, are left out.
+        """
+        n, total, total_sq = 0, 0.0, 0.0
+        for target, mask, meta in targets_data:
+            values = target[meta["allowed"]][:, mask].double()  # (channels, freqs, time) -> (allowed channels, n_valid_bins)
+            n += values.numel()
+            total += values.sum().item()
+            total_sq += (values ** 2).sum().item()
+        mu = total / n
+        return cls(mu=mu, sigma=(total_sq / n - mu ** 2) ** 0.5 + eps)
+
+    def normalize(self, data):
+        """Normalizes a dB tensor or array."""
+        return (data - self.mu) / self.sigma
+
+    def denormalize(self, data):
+        """Converts a normalized tensor or array, e.g. a model output, back to dB."""
+        return (data * self.sigma) + self.mu

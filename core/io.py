@@ -29,47 +29,36 @@ class EpochIO:
     """
     Simple utility for saving/loading epoch tensors to/from a directory.
 
-    Filename convention: {subject}_{condition}_epoch{index}.pt
-    Example: STMD1_left_epoch1.pt
+    Filename convention: {subject}_{condition}_{saved type}{index}.pt, the saved type is the marker the files are loaded by.
+    Example: STMD1_left_input1.pt (input epoch, marker "_input"), STMD1_left_wavelet1.pt (wavelet target, marker "_wavelet")
     """
 
     def __init__(self, ext: Optional[str] = '.pt'):
         self.ext = ext
 
     def save(self, tensor_data: Any, directory: Path, subject: str, condition: str, epoch_id: int, saved_type = 'epoch') -> Path:
+        """
+        Saves a copy of tensor_data to directory as {subject}_{condition}_{saved_type}{epoch_id}{ext} and returns its path.
+        """
         directory.mkdir(parents=True, exist_ok=True)
         filename = io_utils.vars_to_filename(subject, condition, epoch_id, saved_type, self.ext)
         target = directory / filename
         torch.save(tensor_data.clone(), target)
         return target
 
-    def load_specific(self, directory: Path, subject: str, cond: str, idx: str, marker: str) -> Optional[Any]:
-        """
-        Load all epoch files in `directory` for a specific `subject`, `cond`, `marker` and `id` matching the filename convention.
-        """
-        filename = io_utils.vars_to_filename(subject, cond, idx, marker=marker, ext=self.ext)
-        # find matching file in directory
-        file = directory / filename
-
-        if not file.exists():
-            print(f"WARNING: File not found for filename: {filename} in directory: {directory}")
-        try:
-            return torch.load(file)
-        except Exception:
-            print(f"WARNING: Failed to load file: {file.name}")
-            return None
-
     def load_all_epochs(self, directory: Path, marker: str = '_epoch') -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """
-        Load all epoch files in `directory` matching the filename convention.
-        Returns: {subject: {condition: [1: epoch_tensor1, ...]}}
+        Load all epoch files in `directory` matching the filename convention, `marker` is the part before the epoch id, e.g. "_input".
+        Unreadable files are skipped with a warning.
+        Returns: {subject: {condition: [(id1, epoch_tensor1), ...]}} sorted by id
         """
         epochs = {}
         if not directory.exists():
             print("WARNING: Directory does not exist, unable to load epochs:", directory)
             return epochs
 
-        for file in directory.glob(f"*{self.ext}"):
+        # sorted, as glob order depends on the OS and file system
+        for file in sorted(directory.glob(f"*{self.ext}")):
             pos, id, subject, condition = io_utils.vars_from_filename(file.stem, marker=marker)
 
             # load tensor
@@ -92,9 +81,40 @@ class EpochIO:
 
         return epochs
 
-    def load_subject(self, directory: Path, subject: str) -> Optional[Dict[str, List[Any]]]:
-        all_epochs = self.load_all_epochs(directory)
+    def load_subject(self, directory: Path, subject: str, marker: str = '_epoch') -> Optional[Dict[str, List[tuple[int, Any]]]]:
+        """
+        Returns the epochs of one subject in `directory` as {condition: [(id1, epoch_tensor1), ...]}, None if there are none.
+        """
+        all_epochs = self.load_all_epochs(directory, marker=marker)
         return all_epochs.get(subject)
+
+    def load_all_input_target_data(self, input_dir: Path, target_dir: Optional[Path], target_mode: str) -> Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]]:
+        """
+        Loads the input epochs in `input_dir` and pairs each with the target of the same (subject, condition, id) in `target_dir`.
+        target_mode selects the target files by their marker, e.g. "wavelet" loads {subject}_{condition}_wavelet{id}.pt,
+        "autoencoder" uses every input as its own target and does not read `target_dir`.
+        Inputs without a target are skipped with a warning.
+        Returns: {subject: {condition: [(id1, (input_tensor1, target_tensor1)), ...]}} sorted by id, the (id, data) format of load_all_epochs.
+        """
+        input_data = self.load_all_epochs(input_dir, marker="_input")
+        if target_mode == "autoencoder":
+            return {subject: {cond: [(idx, (epoch, epoch)) for idx, epoch in pairs] for cond, pairs in conds.items()}
+                    for subject, conds in input_data.items()}
+
+        target_data = self.load_all_epochs(target_dir, marker=f"_{target_mode}")
+        targets = {(subject, cond, idx): target for subject, conds in target_data.items()
+                   for cond, pairs in conds.items() for idx, target in pairs}
+
+        data = {}
+        for subject, conds in input_data.items():
+            for cond, pairs in conds.items():
+                for idx, input_tensor in pairs:
+                    target_tensor = targets.get((subject, cond, idx))
+                    if target_tensor is None:
+                        print(f"WARNING: Missing {target_mode} target for {subject}, {cond}, epoch {idx}, skipping")
+                        continue
+                    data.setdefault(subject, {}).setdefault(cond, []).append((idx, (input_tensor, target_tensor)))
+        return data
 
 
 def load_model_log_data(directory: Path, model_name: str, folds=None) -> Dict[str, List[Dict[str, Any]]]:
@@ -236,6 +256,21 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     if n_missing_ts > 0:
         print(f"WARNING: {n_missing_ts}/{len(all_trials)} trials have no time series data in {time_series_path}")
     return all_trials
+
+
+def load_interpolated_channels(manifest_path: Path) -> Dict[Tuple[str, str, int], List[int]]:
+    """
+    Returns the interpolated channels of every trial in an epochs_manifest.csv written by make_dataset.py as
+    {(subject, stimulus, id): sorted channel indices}, the indices into the channel order of the saved epochs (CHORDER_STANDARD).
+    A trial's interpolated channels are the union of the channels interpolated for its whole recording (rec_interpolated)
+    and those autoreject interpolated in the epoch itself (ar_interpolated). Trials without interpolation get an empty list.
+    """
+    manifest = pd.read_csv(manifest_path, dtype={"rec_interpolated": str, "ar_interpolated": str}, keep_default_na=False)
+    interpolated = {}
+    for row in manifest.itertuples(index=False):
+        channels = {int(ch) for column in (row.rec_interpolated, row.ar_interpolated) for ch in column.split(';') if ch}
+        interpolated[(row.subject, row.stimulus, int(row.id))] = sorted(channels)
+    return interpolated
 
 
 def save_report(rows, filename: str, save_dir: Path):

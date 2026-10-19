@@ -1,7 +1,7 @@
 # EEG Foundation Model Fine-Tuning & Plasticity Analysis Pipeline
 
 > **Project status: active development, design change in progress.**
-> The dataset step (`make_dataset.py`) builds the data for the new **pre/post patch design** (see [Design change](#design-change-prepost-patches-and-masked-channel-reconstruction)). Training, inference and the analysis notebooks (steps 2–4 below) still describe and implement the previous single-window design and are being adapted. See [Known issues & caveats](#known-issues--caveats) before running anything.
+> The dataset step (`make_dataset.py`) builds the data for the new **pre/post patch design** (see [Design change](#design-change-prepost-patches-and-masked-channel-reconstruction)). Training (step 2) splits the trials into patches, trains with masked loss and fold-level target normalization, and does masked-channel reconstruction with `--masked`. Inference and the analysis notebooks (steps 3–4) still implement the previous single-window design and are being adapted. See [Known issues & caveats](#known-issues--caveats) before running anything.
 
 ---
 
@@ -11,7 +11,7 @@ This repository adapts the pretrained EEG foundation model **LaBraM** (LaBraM-Ba
 
 The idea:
 
-1. **Fine-tune on baseline only.** LaBraM gets a new regression head. It is trained to map a 1 s EEG epoch to that epoch's **time–frequency representation** (a complex Morlet wavelet magnitude in dB, z-scored). Training uses only **baseline (pre-patching)** recordings.
+1. **Fine-tune on baseline only.** LaBraM gets a new regression head. It is trained to map a 1 s EEG patch to that patch's **time–frequency representation** (a complex Morlet wavelet magnitude in dB, normalized with one mean and SD per fold). Training uses only **baseline (pre-patching)** recordings.
 2. **Reconstruct held-out data.** Each cross-validation fold's model then reconstructs epochs from its **held-out test subjects**, both baseline and **post-patching**.
 3. **Compare the errors.** The model has only seen baseline activity, so a change in reconstruction error from baseline to post-patching (normalised MAE, per band and per channel) is used as a quantitative marker of changed activity. The analysis notebook shows it as bar charts, distributions, correlations and Glass's Δ topomaps.
 
@@ -27,7 +27,7 @@ The previous model learnt the wavelet transform of its own input, so its error c
 - **Pre-stimulus correction.** The pre-patch error serves as a reference for the post-patch error of the same model, which cancels cap-refit and session effects to first order. Within-session contrasts across the four recording blocks of a session give a cap-free check.
 - **Within-subject folds** (`KFoldSplitter.split_within_subjects`), so a subject label can be given to the model.
 
-Only the dataset step implements this so far. Training (`run_general_finetune.py`), inference (`run_inference.py`) and the notebooks still follow the previous design.
+The dataset step implements this. Training (`run_general_finetune.py`) implements the two patches, the validity masks, within-subject folds and, with `--masked`, masked-channel reconstruction (see [2.3 Masked-channel reconstruction](#23-masked-channel-reconstruction---masked)). No subject label is given to the model so far. Inference (`run_inference.py`) and the notebooks still follow the previous design.
 
 ```mermaid
 flowchart LR
@@ -36,7 +36,7 @@ flowchart LR
     MD <--> CACHE[("data/processed/cache/ica<br/>fitted ICAs + ICLabel scores")]
     MD --> PRE[("data/processed/pre_patching<br/>input_epochs + wavelet_targets + manifest")]
     MD --> POST[("data/processed/post_patching<br/>input_epochs + wavelet_targets + manifest")]
-    PRE --> FT["run_general_finetune.py<br/>6-fold subject-wise CV"]
+    PRE --> FT["run_general_finetune.py<br/>6-fold within-subject CV"]
     FT --> CKPT[("outputs/finetune_outputs/{model}/{fold}<br/>checkpoints · logs · metadata")]
     CKPT --> INF["run_inference.py"]
     PRE --> INF
@@ -95,7 +95,7 @@ For preprocessing:
 
 ```text
 ├── make_dataset.py              # Step 1: preprocessing, epoching, fast-press exclusion, pre/post patch wavelet targets -> .pt files
-├── run_general_finetune.py      # Step 2: subject-wise k-fold fine-tuning of LaBraM + regression head
+├── run_general_finetune.py      # Step 2: within-subject k-fold fine-tuning of LaBraM + regression head on pre/post patches
 ├── run_inference.py             # Step 3: reconstruction of held-out trials, per-trial metrics -> HDF5
 ├── make_h5dataset_for_pretrain.py  # Auxiliary/experimental: HDF5 export for LaBraM pretraining (not part of the main pipeline)
 ├── qc_bad_channels.py           # QC: runs the automatic bad channel detector on all recordings -> outputs/qc/
@@ -110,7 +110,7 @@ For preprocessing:
 │   ├── datasets.py              # FinetuneDataset, FinetuneSplits, KFoldSplitter (subject-wise and within-subject folds)
 │   ├── utils.py                 # Wavelet transform and validity masks, cropping, metric calculation
 │   ├── io.py                    # EpochIO (.pt I/O), training-log loading, inference HDF5 read/write
-│   ├── io_models.py             # Trial / Metrics dataclasses (lazy views on inference HDF5)
+│   ├── io_models.py             # Trial / Metrics dataclasses (lazy views on inference HDF5), TargetStats (target normalization)
 │   ├── io_utils.py              # Filename conventions, figure saving
 │   ├── plot_data_processing.py  # Aggregation of inference metrics (means, SEM, Glass's Δ, ...)
 │   └── plotting.py              # Matplotlib/ipywidgets plotting helpers used by the notebooks
@@ -153,6 +153,9 @@ Every script and notebook reads its configuration from this module at import tim
 | `PRE_WINDOW`, `POST_WINDOW` | (−1.3, −0.3) s, (−0.3, 0.7) s | The two patches of a trial, one LaBraM patch (200 samples) each, meeting at −0.3 s. Each goes through the model in its own forward pass |
 | `EPOCH_WINDOW` = `WHOLE_EPOCH_WINDOW` | (−1.3, 0.7) s | Epoching window, and the window of the saved input epoch and wavelet target (both patches together, split during training) |
 | `PATCH_SIZE` = `TARGET_WINDOW_SIZE` | 200 | Samples per patch, and per predicted wavelet target |
+| `PATCH_PARAMS` | `epoch_window` = `EPOCH_WINDOW`, `patch_windows` = `{'pre': PRE_WINDOW, 'post': POST_WINDOW}`, `fs` = `RSFREQ` | Time window arguments of `FinetuneDataset`, which cuts every saved trial into one sample per patch |
+| `N_NEIGHBOURS` | 4 | Nearest electrodes (HydroCel-65 positions) hidden together with a target channel in masked-channel reconstruction. Default of `--n_neighbors` in training and inference, and of the "cluster" scheme of `ridge_leakage.py` |
+| `LOSS_WINDOWS` | `{'pre': PRE_WINDOW, 'post': POST_WINDOW}` | Target bins of every patch used by the training loss, the validation metrics and the target normalization, masked with `valid_wavelet_bins`. The whole patch keeps every bin computed from the patch's own data (6 668 of 10 000 per patch). Set to `PRE_TARGET_WINDOW` / `POST_TARGET_WINDOW` to train on the scored bins only |
 | `PRE_TARGET_WINDOW` | (−1.0, −0.7) s | Scored part of the pre patch. Wavelet support −1.29 … −0.41 s |
 | `POST_TARGET_WINDOW` | (0.0, 0.4) s | Scored part of the post patch, before any button press. Wavelet support −0.29 … 0.69 s |
 | `PAD_TIME` → `PADDING` | 0.3 s → 60 samples | Reflect padding of each patch for its CWT. It only reaches bins outside the scored windows |
@@ -426,7 +429,7 @@ Post-patching data receives slightly more cleaning throughout, though no step sh
 
 Trains one model per cross-validation fold on **baseline** epochs only.
 
-> **Not yet adapted to the pre/post patch design.** This section describes the previous single-window training: one 200-sample input per trial predicting its own wavelet target. The new dataset needs a dataset class that splits each trial into a pre and a post sample, masks channels, and applies the validity masks of `utils.valid_wavelet_bins` in the loss.
+> **Adapted to the pre/post patch design.** Every trial is split into a pre and a post sample, the loss and validation metrics only use the bins of `utils.valid_wavelet_bins`, and the targets are normalized with fold-level statistics. With `--masked`, the model predicts a hidden channel from the visible ones; without it, each channel's token predicts its own channel's target.
 
 **CLI**
 
@@ -440,34 +443,76 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 | `--epochs` | 120 | Training epochs per fold |
 | `--huber_beta` | 0.1 | β of the Smooth-L1 (Huber) loss |
 | `--no_pretrained` | off | Train from random initialisation instead of LaBraM-Base weights |
-| `--mse` | off | Only changes the loss label written to `metadata.json` (see Known issues) |
+| `--mse` | off | Use `nn.MSELoss` instead of the Huber loss |
+| `--masked` | off | Masked-channel reconstruction: hide a target channel with its nearest electrodes and train on the target channel only (see 2.3) |
+| `--n_neighbors` | `N_NEIGHBOURS` = 4 | Nearest electrodes hidden with the target channel with `--masked`, 0 hides the target channel only |
 
-#### 2.1 Data split: `core.datasets.KFoldSplitter.split_by_subject`
+#### 2.1 Data split: `core.datasets.KFoldSplitter`
 
-- Loads all baseline epochs from `FINETUNE_INPUT_EPOCHS_DIR` into `{subject: {stimulus: [(id, tensor), …]}}`.
+`KFoldSplitter(input_data_dir, target_data_dir, target_mode, seed, k_folds, no_press_threshold)` loads the data once with `EpochIO.load_all_input_target_data`:
+- The input epochs (`*_input{id}.pt` in `FINETUNE_INPUT_EPOCHS_DIR`) are paired by `(subject, stimulus, id)` with their targets (`*_wavelet{id}.pt` in `FINETUNE_WAVELET_DIR`) into `{subject: {stimulus: [(id, (input, target)), …]}}`, sorted by id. Files are read in sorted order, so the folds don't depend on the file system.
+- Inputs without a target are skipped with a warning. In `autoencoder` mode every input is its own target and the target folder is not read.
+- The splits pass the `(input, target)` pairs through unchanged, so a trial is the unit of splitting and both patches of a trial are always in the same split.
+
+`run_general_finetune.py` uses **`split_within_subjects`**. For every fold it:
+- prints `FinetuneSplits.describe()`: trials, subjects, stimulus types and the range of trials per subject of every split, and a warning listing the subject × stimulus groups missing from a split (e.g. a group too small to get validation trials);
+- saves the fold's `(subject, stimulus, id)` keys of every split as `keys.json` (`{"train": [[subject, stimulus, id], …], "val": …, "test": …}`). Both splits save keys in this format.
+
+**Subject-wise folds: `KFoldSplitter.split_by_subject`** (not used by the script at the moment):
 - Shuffles the subject list with `random.Random(SEED)` and deals subjects into *k* folds (`subjects[i::k]`).
 - For fold *i*, the **test** set is fold *i*'s subjects. The remaining subjects keep their shuffled order: the first `len // 5` (≈20 %) form the **validation** set and the rest the **training** set.
 - The split is **subject-disjoint**: no subject appears in more than one of train/val/test in a fold. Each subject is a test subject in exactly one fold. With k = 6 this gives roughly 67 / 17 / 17 % of subjects. With the current 19 subjects: 12–13 train, 3 val, 3–4 test.
 
-**Within-subject folds: `KFoldSplitter.split_within_subjects`** (for models that get a subject label). Every subject is in the training, validation and test data of every fold:
+**Within-subject folds: `KFoldSplitter.split_within_subjects`** (used by the script, and needed for models that get a subject label). Every subject is in the training, validation and test data of every fold:
 - Epochs are identified by `(subject, stimulus, id)` keys. The keys of every subject × stimulus group are shuffled with `random.Random(SEED)` and concatenated, and fold *i* is every *k*-th key (`keys[i::k]`), like `split_by_subject`. Each fold therefore holds about 1/k of every subject's every stimulus type, and every epoch is a test epoch in exactly one fold.
 - For fold *i*, the test set is fold *i*. From the remaining epochs, 20 % (`len // 5`) of every subject × stimulus group is shuffled into the validation set, the rest is the training set, so training and validation are stratified too.
-- `_select(keys)` turns the key lists back into the `{subject: {stimulus: [(id, tensor), …]}}` dicts of `FinetuneSplits`.
+- `_select(keys)` turns the key lists back into the `{subject: {stimulus: [(id, (input, target)), …]}}` dicts of `FinetuneSplits`.
 - On the 3 201 baseline epochs of the previous build (19 subjects, 171 subject × stimulus groups, 9–20 epochs each): about 2 183 train / 484 val / 534 test epochs per fold, every group in all three sets of every fold.
 
 #### 2.2 Dataset and target transforms: `core.datasets.FinetuneDataset`
 
-Each sample is `(eeg, target, metadata)`, with `metadata = {"subject", "condition", "id"}`. All samples are loaded into memory at construction.
+`FinetuneDataset(epochs_dict, **PATCH_PARAMS, target_mode, log, normalize, masks, target_stats, interpolations, seed, n_eval_channels)` holds all samples in memory.
 
-- **EEG input**: the (23, 200) µV epoch, trimmed to a multiple of `TARGET_WINDOW_SIZE` (`cut_to_size`). In `train_one_epoch`, `evaluate` and inference it is **divided by 100** (LaBraM's 0.1 mV input convention) and rearranged to `(B, 23, 1, 200)`, i.e. 23 channels × 1 patch × 200 samples.
-- **Wavelet target** (`target_mode='wavelet'`): the matching `…_wavelet{id}.pt` is loaded from `wavelet_dir`, converted from float16 to float32, and then:
-  1. `log=True`: converted to dB, `20·log10(mag + 1e-7)`
-  2. `normalize=True`: **per-trial z-score** over the whole (23, 50, 200) tensor, `(x − mean) / std`
+- **One sample per patch.** Every trial's (23, 400) input and (23, 50, 400) target over `EPOCH_WINDOW` are cut with `cut_to_timewindow` into the `patch_windows` of `PATCH_PARAMS`: a pre sample (−1.3 … −0.3 s) and a post sample (−0.3 … 0.7 s), each with a (23, 200) input and a (23, 50, 200) target. `metadata = {"subject", "condition", "id", "allowed", "patch"}`, with `patch` = `"pre"` or `"post"`. A dataset therefore has twice as many samples as trials.
+- **Allowed target channels**: `metadata["allowed"]` is a (23,) bool tensor, False for the trial's interpolated channels. `interpolations` comes from `io.load_interpolated_channels(<dataset dir>/epochs_manifest.csv)`: the union of `rec_interpolated` and `ar_interpolated` per `(subject, stimulus, id)`. Without `interpolations` (training without `--masked`) every channel is allowed.
+- **EEG input**: the (23, 200) µV patch. In `train_one_epoch`, `evaluate` and inference it is **divided by 100** (LaBraM's 0.1 mV input convention) and rearranged to `(B, 23, 1, 200)`, i.e. 23 channels × 1 patch × 200 samples.
+- **Wavelet target** (`target_mode='wavelet'`): converted from float16 to float32 and, with `log=True`, to dB, `20·log10(mag + 1e-7)`. The samples keep the dB targets.
+- **Autoencoder target** (`target_mode='autoencoder'`): the input patch itself (in µV, not divided by 100).
+- **Masks**: `masks = {patch: (50, 200) bool}` marks the target bins the loss and metrics use in each patch. The script builds them with `utils.valid_wavelet_bins(FREQS, patch_window, LOSS_WINDOWS[patch], RSFREQ, **WAVELET_PARAMS)` in wavelet mode. Without masks every bin is used.
+- **`__getitem__`** returns `(input, target, metadata, mask, target_ch, eval_chs)`:
+  - `mask`: the patch's validity mask repeated over channels, a bool tensor of the target's shape.
+  - `target_ch`: the training target channel of the current epoch for `--masked` (see 2.3), set with `set_epoch(epoch)`.
+  - `eval_chs`: the sample's `n_eval_channels` (3) fixed evaluation target channels for `--masked` (see 2.3).
 
-  Train, validation and test datasets all use `log=True, normalize=True`. Samples without a wavelet file are skipped with a warning.
-- **Autoencoder target** (`target_mode='autoencoder'`): the EEG epoch itself (in µV, not divided by 100).
+  The new items come after `metadata`, so code that reads `batch[0..2]` by index is unaffected.
 
-#### 2.3 Model: `core.architectures`
+**Target normalization: `core.io_models.TargetStats`.** One mean μ and one SD σ per fold:
+- `FinetuneSplits.initialize_datasets(patch_params, target_mode, log, normalize, masks, target_stats, interpolations, seed, n_eval_channels)` builds the three datasets. If `target_stats` is not given, it fits them with `TargetStats.fit(training_dataset.masked_targets())`: all masked-in dB values of the training samples' **allowed** channels, pooled over trials, patches, channels, frequencies and time (float64 sums). Interpolated channels are never targets, so they are left out. Only in wavelet mode with masks.
+- The same stats are set on the training, validation and test datasets and kept in `fold.target_stats`. `__getitem__` returns `(target − μ) / σ` when `normalize=True`. `denormalize` converts model outputs back to dB.
+- A fixed transform keeps the absolute level and variability of every trial in the target, unlike the previous per-trial z-score, which removed each trial's overall power and scale.
+- The script saves the stats as `target_stats.json` in the fold folder. Inference has to denormalize the outputs with them before computing metrics in dB.
+
+#### 2.3 Masked-channel reconstruction (`--masked`)
+
+The model predicts a target channel's wavelet target from the other channels, with the target and its `--n_neighbors` nearest electrodes hidden. The loss only covers the target channel.
+
+**Hiding channels in the model** (`modeling_finetune.NeuralTransformer.forward_features`, `bool_masked_pos` = the wrappers' `channel_mask`, shape (B, 23)):
+1. The hidden channels' input is set to 0 **before** the patch embedding. `TemporalConv` applies `GroupNorm` over all 23 channel tokens of a sample, so without this the hidden channel's raw signal would shift the embedding of every visible token. Changing a hidden channel's input changed the output by up to 1.7 without the zeroing and by 0.0 with it.
+2. After the patch embedding, the hidden tokens are replaced by the learnt `mask_token`, which is loaded from LaBraM's pretraining checkpoint (`student.mask_token`) and is the same vector for every channel and trial. The channel position and time embeddings are added to every token as usual, so the transformer knows *which* channel is missing but nothing of its signal.
+
+With `channel_mask=None` or all False the output is identical to the model without masking.
+
+**Clusters**: `utils.build_neighbor_mask(n_neighbours, 23)` is a (23, 23) bool table; row *c* is channel *c* and its `n_neighbours` nearest electrodes (`utils.nearest_electrodes`, HydroCel-65 positions), the same clusters as `ridge_leakage.py`. `--n_neighbors 0` hides the target only.
+
+**Training target channel**: every sample has a fixed random permutation of its allowed channels (`utils.channel_permutation`, seeded with `SEED` and the sample's `(subject, stimulus, id, patch)` key via `zlib.crc32`), and epoch *e* uses `perm[e % len(perm)]` (`FinetuneDataset.set_epoch`). Every allowed channel is the target ⌊epochs / L⌋ or ⌈epochs / L⌉ times per sample (L allowed channels), in random order, the same in every run, fold and dataset order. Interpolated channels are never targets, but they stay visible as input.
+
+**Loss**: `engine_for_finetuning.target_channel_masks(masks, target_ch, neighbour_table)` returns the hidden clusters and a loss mask that keeps only the valid bins of each sample's target channel (the hidden neighbours are not scored). `criterion(output[loss_mask], target[loss_mask])`, so only the target channel's bins get a gradient. Training MSE / R² and the validation metrics use the same mask.
+
+**Validation channels**: each validation sample is evaluated on 3 fixed channels (`N_EVAL_CHANNELS` in the script), one forward pass each, every pass scored on its target channel only. `utils.balanced_eval_channels` assigns them greedily in dataset order: every sample takes the allowed channels evaluated least so far, ties rotated by the sample index. Interpolation makes some channels allowed in only 62 % of the trials, so picking evenly within each sample (random or by sample index) evaluates channels between ~120 and ~210 times on the manifest; the greedy assignment gives 161–168. The channels are the same in every epoch, so changes between validations come from the model only.
+
+Without `--masked` nothing is hidden, every channel's token predicts its own channel's target and all channels are scored.
+
+#### 2.4 Model: `core.architectures`
 
 Both models extend `BaseMLPWrapper`. It builds LaBraM with `timm.create_model(LABRAM_VERSION)` and **replaces `model.head`** with a 2-layer MLP that is applied **to every patch token**:
 
@@ -475,7 +520,7 @@ Both models extend `BaseMLPWrapper`. It builds LaBraM with `timm.create_model(LA
 Linear(200 → hidden) → LayerNorm(hidden) → GELU → Linear(hidden → target_dim)
 ```
 
-| Model | hidden | target_dim | Output per trial |
+| Model | hidden | target_dim | Output per sample (patch) |
 |---|---|---|---|
 | `EEGSpectralDecoder` (`wavelet`) | 1024 | 10 000 (= 50 × 200) | `(23, 50, 200)` |
 | `EEGAutoencoder` (`autoencoder`) | 512 | 200 | `(23, 200)` |
@@ -493,17 +538,17 @@ Forward pass (wavelet mode):
  → get_unflattened_output():  reshape → (B, 23, 50, 200)  (used for inference/plots)
 ```
 
-There is exactly one 1 s patch per channel, so **each channel's token predicts that channel's own full spectrogram**.
+There is exactly one 1 s patch per channel, so **each channel's token predicts that channel's own full spectrogram**. Both `forward` and `get_unflattened_output` take `channel_mask` ((B, 23) bool, see 2.3); a hidden channel's token then predicts its spectrogram from the visible channels.
 
 **Pretrained initialisation** (unless `--no_pretrained`):
 
 - Loads `libs/labram/checkpoints/labram-base.pth` and keeps only the `student.*` weights (prefix stripped).
 - Prefixes the keys with `model.` to match the wrapper and drops `relative_position_index` keys.
-- Loads them non-strictly (`libs.labram.utils.load_state_dict`). The new head (and anything else missing) keeps its random initialisation.
+- Loads them non-strictly (`libs.labram.utils.load_state_dict`). The new head (and anything else missing) keeps its random initialisation. `mask_token` is loaded from the checkpoint.
 
 The whole network is fine-tuned; nothing is frozen.
 
-#### 2.4 Optimisation
+#### 2.5 Optimisation
 
 | Item | Setting |
 |---|---|
@@ -511,33 +556,37 @@ The whole network is fine-tuned; nothing is frozen.
 | Batch size | 64 (`BATCH_SIZE`), no gradient accumulation (`UPDATE_FREQ = 1`). Steps/epoch = `len(train) // 64` (the last partial batch is skipped) |
 | Learning rate | Linear warm-up from 0 over **8 epochs** (`WARMUP_EPOCHS`), then per-iteration **cosine decay** from `--lr` to `MIN_LR = 1e-6` |
 | Layer-wise LR decay | `LAYER_DECAY = 0.9`: LR scale = 0.9^(13 − layer_id). Head + `fc_norm` → 1.0, block 12 → 0.9, …, block 1 → 0.9¹², patch/pos/time embeddings + `cls_token` → 0.9¹³ ≈ 0.25 |
-| Weight decay | Cosine schedule **increasing** from `--weight_decay` to 2 × `--weight_decay` (the larger final value is meant to lock in learnt features). 0 for biases and 1-D parameters (LayerNorm) |
-| Loss | `nn.SmoothL1Loss(beta=--huber_beta)` (Huber, β = 0.1) on the flattened output |
+| Weight decay | Cosine schedule **increasing** from `--weight_decay` to 2 × `--weight_decay` (the larger final value is meant to lock in learnt features). 0 for biases, 1-D parameters (LayerNorm) and `model.no_weight_decay()`: `pos_embed`, `cls_token`, `time_embed`, `mask_token`. Only weight matrices are decayed (53 of 228 parameter tensors) |
+| Loss | `nn.SmoothL1Loss(beta=--huber_beta)` (Huber, β = 0.1, in normalized target units), or `nn.MSELoss` with `--mse`, over the **masked-in bins** of the flattened output only: `criterion(output[mask], target[mask])`, with `--masked` only those of each sample's target channel. Bins outside the mask get no gradient |
 | Precision | `torch.cuda.amp.autocast` + `NativeScalerWithGradNormCount` loss scaling |
 | Gradient clipping | None (`CLIP_GRAD = None`) |
 | EMA | Disabled (`USE_EMA = False`) |
 | Seed | `torch.manual_seed(42)`. The data split uses seed 42 too |
 
-The training/eval loops are the vendored `libs/labram/engine_for_finetuning.train_one_epoch` / `evaluate`, modified for regression. They log loss, MSE and R² per step. `libs.labram.utils.get_metrics` routes `mse / mae / r2` to `autoencoder_metrics_fn`.
+The training/eval loops are the vendored `libs/labram/engine_for_finetuning.train_one_epoch` / `evaluate`, modified for regression, over the masked-in bins only:
+- `train_one_epoch` reads loss, MSE, R², grad norm and loss scale from the GPU **every 10 steps** (`print_freq`) and on the last step, not every step, because every read synchronizes the GPU. The epoch averages and TensorBoard curves are therefore over every 10th step, and a non-finite loss stops training at the next logged step (the AMP scaler skips steps with non-finite gradients in between).
+- `evaluate` sums n, Σt, Σt², Σ(t − o)², Σ|t − o| and the loss on the device in float64 (`MaskedErrorSums`) instead of collecting all predictions and running sklearn on the CPU. It returns `{loss, mse, mae, r2}` pooled over all scored bins, identical to sklearn's values.
 
-#### 2.5 Training loop, model selection, outputs
+#### 2.6 Training loop, model selection, outputs
 
 For each fold and epoch:
 
-1. `train_one_epoch`. Stats are printed and logged to TensorBoard.
+1. `train_dataset.set_epoch(epoch)`, then `train_one_epoch`. Stats are printed and logged to TensorBoard.
 2. If `epoch % 10 == 0`, save `checkpoint-{epoch}.pth` and overwrite `checkpoint.pth`.
-3. `evaluate` on the validation set. The metrics are MSE, MAE and **R²**, where R² = `r2_score` over *all* flattened validation predictions (z-scored dB space).
-4. Append one JSON line to `log.txt`, containing `train_*` and `val_*` metrics, `epoch` and `n_parameters`.
-5. If validation R² beats the best so far (starting at 0.0), save `checkpoint-best_val.pth`. **This is the checkpoint used by inference and by the notebooks.**
+3. **Every 3rd epoch and on the last epoch**: `evaluate` on the validation set. The metrics are MSE, MAE and **R²**, where R² = 1 − SS_res / SS_tot over the scored bins of all validation predictions pooled, in normalized units. R² is the same as in dB; MSE and MAE are in units of σ (σ² for MSE), so they are not comparable with runs before the fold-level normalization.
+4. On the validated epochs, append one JSON line to `log.txt`, containing `train_*` and `val_*` metrics, `epoch` and `n_parameters`. Plot curves against the `epoch` field, not the line number.
+5. If validation R² beats the best so far, save `checkpoint-best_val.pth`. The best R² starts at −∞, so the first validation always saves one, even with a negative R². **This is the checkpoint used by inference and by the notebooks.**
 
 ```text
 outputs/finetune_outputs/{model_name}/
 ├── metadata.json          # hyperparameters, results, model_params (see below)
 └── {1..k}/                # one folder per fold (1-based)
+    ├── keys.json          # (subject, stimulus, id) keys of the train / val / test split
+    ├── target_stats.json  # {"mu", "sigma"} of the target normalization (wavelet mode)
     ├── checkpoint-best_val.pth
     ├── checkpoint-0.pth, checkpoint-10.pth, …, checkpoint-110.pth
     ├── checkpoint.pth     # latest multiple-of-10 epoch
-    ├── log.txt            # JSON lines, one per epoch
+    ├── log.txt            # JSON lines, one per validated epoch
     └── logs/              # TensorBoard event files
 ```
 
@@ -545,7 +594,7 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 `metadata.json` contains:
 
-- `hyperparameters`: batch_size, epochs, warm-up, weight_decay, lr, pretrained.
+- `hyperparameters`: batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, and with `--masked` `n_neighbors` and `n_eval_channels`. Inference has to use the same `n_neighbors`.
 - `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken.
 - `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`.
 
@@ -693,7 +742,7 @@ It rebuilds the fold's test set and shows sample/channel sliders. For each check
 
 #### `macro_evaluation.ipynb`: fold-averaged training curves and model comparison
 
-Reads `log.txt` from every fold (`io.load_model_log_data`) and averages the metrics per epoch over folds (`utils.avg_metrics_over_folds`).
+Reads `log.txt` from every fold (`io.load_model_log_data`) and averages the metrics per epoch over folds (`utils.avg_metrics_over_folds`). It plots against the line number, which was the epoch while every epoch was validated; with validation every 3rd epoch, take the x values from the `epoch` field.
 
 | Section | Output |
 |---|---|
@@ -759,10 +808,10 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 |---|---|
 | `settings.py` | All configuration (see [Configuration](#configuration-coresettingspy)) |
 | `architectures.py` | `BaseMLPWrapper` (LaBraM + MLP head, exposes `get_num_layers` / `no_weight_decay` for the optimiser). `EEGSpectralDecoder` and `EEGAutoencoder` with `forward` (flattened output) and `get_unflattened_output` (per-channel shaped output) |
-| `datasets.py` | `FinetuneDataset` (loads samples, converts float16 targets to float32, applies log/z-score to wavelet targets, returns `(eeg, target, metadata)`). `FinetuneSplits` (holds one fold's train/val/test dicts; `initialize_datasets()`). `KFoldSplitter`: `split_by_subject` (subject-wise k-fold split), `split_within_subjects` (stratified within-subject k-fold split on `(subject, stimulus, id)` keys), `_select` (keys → nested epoch dict) |
-| `utils.py` | `calc_wavelet` (padded CWT magnitude, cycles per frequency from `morlet_cycles`), `morlet_cycles` (`min(max_cycles, 2π·f·max_reach/3)`), `wavelet_time_sd` (envelope SD in s), `wavelet_reach` (3 SD reach in s), `valid_wavelet_bins` ((freqs, time) mask of the bins of a patch that lie in a target window and are computed from real data of the patch only), `cut_to_timewindow` (crop by seconds, sample indices rounded), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
-| `io.py` | `EpochIO` (`save`, `load_specific`, `load_all_epochs`, `load_subject` for `.pt` files). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `save_time_series_metrics_hdf` (per-band time series, see [Time series metrics](#time-series-metrics)), `load_inference_trials` (filters for subjects, conditions and trial ids as ints or strings, `exclude_subjects`, the time `window` of the returned trials, and an optional `time_series_path`). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` |
-| `io_models.py` | `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
+| `datasets.py` | `FinetuneDataset` (cuts every trial into one sample per patch, converts float16 targets to float32 dB, normalizes them with `target_stats` on access, returns `(input, target, metadata, mask)`; `masked_targets()` yields `(dB target, mask)` per sample for fitting the stats). `FinetuneSplits` (holds one fold's train/val/test dicts and `keys`; `describe()` summarises the split, `initialize_datasets()` builds the three datasets and fits `target_stats`). `KFoldSplitter`: loads input/target pairs once, `split_by_subject` (subject-wise k-fold split), `split_within_subjects` (stratified within-subject k-fold split on `(subject, stimulus, id)` keys), `_select` (keys → nested epoch dict), `_keys_of` (nested epoch dict → keys) |
+| `utils.py` | Masked-channel reconstruction: `nearest_electrodes`, `build_neighbor_mask` ((23, 23) cluster table, row *c* = *c* and its nearest electrodes), `channel_permutation` (seeded per-sample order of the allowed training target channels), `balanced_eval_channels` (greedy balanced evaluation channels). `calc_wavelet` (padded CWT magnitude, cycles per frequency from `morlet_cycles`), `morlet_cycles` (`min(max_cycles, 2π·f·max_reach/3)`), `wavelet_time_sd` (envelope SD in s), `wavelet_reach` (3 SD reach in s), `valid_wavelet_bins` ((freqs, time) mask of the bins of a patch that lie in a target window and are computed from real data of the patch only), `cut_to_timewindow` (crop by seconds, sample indices rounded), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
+| `io.py` | `EpochIO` (`save`, `load_all_epochs`, `load_subject` for `.pt` files, files read in sorted order; `load_all_input_target_data` pairs input epochs with their targets by `(subject, stimulus, id)`). `load_interpolated_channels` (interpolated channels per trial from `epochs_manifest.csv`). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `save_time_series_metrics_hdf` (per-band time series, see [Time series metrics](#time-series-metrics)), `load_inference_trials` (filters for subjects, conditions and trial ids as ints or strings, `exclude_subjects`, the time `window` of the returned trials, and an optional `time_series_path`). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` |
+| `io_models.py` | `TargetStats` dataclass (`mu`, `sigma`; `fit` on masked targets, `normalize` / `denormalize`, `from_dict` / `to_dict`). `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
 | `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
 | `plot_data_processing.py` | Time series: `calc_metric_time_series` / `calc_time_series_metrics` (`{band: (23, 200)}` of `TIME_SERIES_METRICS` metrics, see [Time series metrics](#time-series-metrics)), `calc_subjectwise_time_series`, `get_subjectwise_time_series_mean` (mean ± SEM over subjects), `get_subjectwise_time_series_difference` (paired post − baseline difference per subject, mean ± SEM). Volatility correction: `fill_corrected_maes` (see [Metric definitions](#metric-definitions-coreutilsget_inference_metrics--calculate_bandwise_metrics)). Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM with `ddof=1`, SD with `ddof=0`). Subject level: `calc_subjectwise_metric_stats`, `calc_subjectwise_channel_metric_stats` (`group_by='channel'` returns `{channel: {subject: {band}}}`), `get_subjectwise_metric_mean` (mean ± SEM of subject means). Subject-level volatility adjustment: `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric` (baseline and adjusted post-patching subject means, slopes). `calc_subjectwise_channel_d` (subject-level Cohen's d_z or Glass's Δ per channel and band, selectable `ddof`). `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta` (pooled-trial Glass's Δ, no longer used in the notebook). `rename_chans_to_mne`, `create_topomap_info` (mne.Info in model channel order with 10-20 labels at the positions of the recording EGI HydroCel-65 electrodes, `VREF` = Cz). Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
 | `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `session_correlation_plot` (bands × metrics grid, one colour and fitted line per session, adjustable point size), `save_button`, `save_heatmap`, `save_line_plot`, `plot_time_series` (lines with ±SEM bands, optional vertical and horizontal markers), `plot_time_series_grid` (one `plot_time_series` panel per band, separate y-axes). `plot_grouped_bar` places the bars of a group side by side for any number of series |
@@ -775,10 +824,10 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 
 Code from the original LaBraM repository (Jiang et al., *Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI*). It includes the pretrained `checkpoints/labram-base.pth`. `vqnsp.pth`, the neural tokenizer, is not used by this pipeline. Project-specific modifications:
 
-- `engine_for_finetuning.py`: `train_one_epoch` / `evaluate` were rewritten for regression. Targets are flattened, samples are 3-tuples with metadata, and MSE/R² are logged. A TODO in the file plans to move this logic into `core/`.
+- `engine_for_finetuning.py`: `train_one_epoch` / `evaluate` were rewritten for regression. Samples are `(input, target, metadata, mask, target_ch, eval_chs)` tuples, targets and masks are flattened, and the loss, MSE and R² are computed over the masked-in bins only (`evaluate` uses every bin if a batch has no mask). Added `target_channel_masks` (hidden clusters and target-only loss mask for `--masked`) and `MaskedErrorSums` (validation metrics summed on the device). Training stats are read from the GPU every 10 steps. A TODO in the file plans to move this logic into `core/`.
 - `utils.py`: `get_metrics` routes `mse/mae/r2` to a new `autoencoder_metrics_fn`.
 - `optim_factory.py`: `get_num_layer_for_vit` strips the `model.` prefix of the wrapper, so layer-wise LR decay works on `BaseMLPWrapper`.
-- `modeling_finetune.py`: `Block` defaults `init_values` to 1e-4 when it is `None`. This means the LayerScale parameters (`gamma_1`/`gamma_2`) are always created, matching the pretrained checkpoint. The `return_patch_tokens` option used by the wrappers is original LaBraM code.
+- `modeling_finetune.py`: `Block` defaults `init_values` to 1e-4 when it is `None`. This means the LayerScale parameters (`gamma_1`/`gamma_2`) are always created, matching the pretrained checkpoint. The `return_patch_tokens` option used by the wrappers is original LaBraM code. `NeuralTransformer` has the pretraining `mask_token` again, and `forward` / `forward_features` take `bool_masked_pos`: the hidden channels' input is zeroed before the patch embedding and their tokens are replaced by `mask_token` (see [2.3](#23-masked-channel-reconstruction---masked)).
 
 ### `libs/unscrambly`: in-house EEG preprocessing
 
@@ -867,7 +916,15 @@ uv run python ridge_leakage.py --compare_root data/processed_raw --compare_label
 ## Known issues & caveats
 
 **Design change in progress**
-- `run_general_finetune.py`, `run_inference.py` and the notebooks are not yet adapted to the pre/post patch dataset: no dataset class splits the trials into patches, masks channels or applies `valid_wavelet_bins`. `run_inference.py` and `plasticity_tensor_analysis.ipynb` still use the removed `TARGET_TIME_WINDOW` and fail with the current settings.
+- `run_general_finetune.py` trains on pre/post patches with masked loss and, with `--masked`, masked-channel reconstruction. It has been run end to end on synthetic data on the CPU only, not yet on the rebuilt dataset on a GPU.
+- `run_inference.py` accepts `--masked` / `--n_neighbors` but doesn't use them yet: it has to hide every allowed target channel in turn (one pass per channel with `get_unflattened_output(..., channel_mask=...)`) and keep each pass's target channel.
+- `run_inference.py` is not adapted yet:
+  - It builds its datasets without masks, so the targets stay in dB while the model outputs normalized values. It has to load `target_stats.json` and denormalize the outputs before computing metrics.
+  - It re-runs the split instead of reading `keys.json`.
+  - With the within-subject split, every subject is a test subject of every fold, so every post-patching trial is reconstructed by all k fold models and appears k times in the merged results. Either compare per fold or assign the post-patching trials to folds.
+  - It and `plasticity_tensor_analysis.ipynb` still use the removed `TARGET_TIME_WINDOW` and fail with the current settings.
+- `micro_evaluation.ipynb` and `macro_evaluation.ipynb` still call `KFoldSplitter` and `initialize_datasets` with the old arguments.
+- The saved data has to be rebuilt with `make_dataset.py` for the `input_epochs/` layout.
 
 **Data preparation**
 - **Empty `input_epochs/` and `wavelet_targets/` (not `cache/`) before re-running.** The guard stops `make_dataset.py` otherwise; see [Guard and consistency check](#guard-and-consistency-check).
@@ -879,13 +936,14 @@ uv run python ridge_leakage.py --compare_root data/processed_raw --compare_label
 - `--save_wavelet` uses `store_true` with `default=True`, so it cannot be disabled from the CLI. Superlet targets (`--save_superlet`, `--target_mode superlet`) are not implemented: a superlet dataset is empty.
 
 **Training**
-- `--mse` does **not** switch the loss. The criterion is always `SmoothL1Loss(beta=--huber_beta)`, and the flag only changes `loss_type` in `metadata.json`. `AUTOENCODER_PARAMS['loss_type']` is unused.
+- A subject × stimulus group with fewer than 5 trials left after the test split gets no validation trials (`len // 5`). `describe()` prints a warning for it.
 - The script calls `torch.cuda.get_device_name(0)`, so it fails on machines without CUDA.
-- `checkpoint-best_val.pth` is only written once validation R² exceeds 0. A fold that never gets there has no best checkpoint, and inference silently skips it.
-- The no-weight-decay list (`pos_embed`, `cls_token`, `time_embed`) is matched against unprefixed names, but the wrapper's parameters are named `model.pos_embed` etc. These embeddings therefore do receive weight decay.
+- Runs trained before the no-weight-decay fix applied weight decay to `pos_embed`, `cls_token` and `time_embed`: their names were matched without the wrapper's `model.` prefix. `BaseMLPWrapper.no_weight_decay` now returns the prefixed names, and `mask_token` is excluded as well. The effect is small (the decay shrinks a parameter by about 0.4 % over 120 epochs at these learning rates), but don't compare runs from before and after the fix as if only the intended change differed.
+- Checkpoints trained before `mask_token` was added to the fine-tuning model have no `model.mask_token`. `run_inference.py` loads checkpoints strictly, so it fails on them; load those with `strict=False`.
+- `utils.avg_metrics_over_folds` averages the folds' log lines by position, so all folds need the same number of lines. Early stopping (not implemented) would break this.
 
 **Fold reproducibility**
-- Inference and the notebooks rebuild the folds from the *current* contents of the baseline epoch folder (`FINETUNE_INPUT_EPOCHS_DIR`). The subject order comes from filesystem glob order and is not sorted before seeded shuffling. Adding or removing subjects, or moving the data to another filesystem, can change the splits. Test sets would then no longer match training.
+- Inference and the notebooks rebuild the folds from the *current* contents of the baseline epoch folders. Files are read in sorted order, so moving the data to another filesystem no longer changes the splits, but any change to the set of trials does: adding or removing subjects, a missing or unreadable target, or a rebuilt dataset. Test sets would then no longer match training, without a warning. Training saves every fold's split as `keys.json`; inference should build its test sets from it.
 
 **Inference / metrics**
 - In the trial-level and band-wise NMAE, `EPS` is added to the ratio (`mae / std + eps`), not to the denominator. The channel-level NMAE adds it to the denominator.

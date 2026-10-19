@@ -278,7 +278,7 @@ class NeuralTransformer(nn.Module):
         self.patch_size = patch_size
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        # self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         if use_abs_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, 128 + 1, embed_dim), requires_grad=True)
         else:
@@ -305,7 +305,7 @@ class NeuralTransformer(nn.Module):
         if self.time_embed is not None:
             trunc_normal_(self.time_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
-        # trunc_normal_(self.mask_token, std=.02)
+        trunc_normal_(self.mask_token, std=.02)
         if isinstance(self.head, nn.Linear):
             trunc_normal_(self.head.weight, std=.02)
         self.apply(self._init_weights)
@@ -337,7 +337,8 @@ class NeuralTransformer(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed', 'cls_token', 'time_embed'}
+        # MODIFIED: mask_token added, it is a learnt token like cls_token (LaBraM's pretraining did decay it)
+        return {'pos_embed', 'cls_token', 'time_embed', 'mask_token'}
 
     def get_classifier(self):
         return self.head
@@ -346,12 +347,22 @@ class NeuralTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
+    def forward_features(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, bool_masked_pos=None, **kwargs):
         batch_size, n, a, t = x.shape
         input_time_window = a if t == self.patch_size else t
+        if bool_masked_pos is not None:
+            # zero the hidden channels' input, GroupNorm in patch_embed pools statistics over all channels
+            x = x.masked_fill(bool_masked_pos.view(batch_size, n, a, 1), 0)
         x = self.patch_embed(x)
+        batch_size, seq_len, _ = x.size()
 
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        mask_token = self.mask_token.expand(batch_size, seq_len, -1)
+
+        # replace the masked visual tokens by mask_token
+        if bool_masked_pos is not None:
+            w = bool_masked_pos.unsqueeze(-1).type_as(mask_token)
+            x = x * (1 - w) + mask_token * w
 
         x = torch.cat((cls_tokens, x), dim=1)
 
@@ -387,12 +398,13 @@ class NeuralTransformer(nn.Module):
             else:
                 return x[:, 0]
 
-    def forward(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, **kwargs):
+
+    def forward(self, x, input_chans=None, return_patch_tokens=False, return_all_tokens=False, bool_masked_pos=None, **kwargs):
         '''
         x: [batch size, number of electrodes, number of patches, patch size]
         For example, for an EEG sample of 4 seconds with 64 electrodes, x will be [batch size, 64, 4, 200]
         '''
-        x = self.forward_features(x, input_chans=input_chans, return_patch_tokens=return_patch_tokens, return_all_tokens=return_all_tokens, **kwargs)
+        x = self.forward_features(x, input_chans=input_chans, return_patch_tokens=return_patch_tokens, return_all_tokens=return_all_tokens, bool_masked_pos=bool_masked_pos, **kwargs)
         x = self.head(x)
         return x
 

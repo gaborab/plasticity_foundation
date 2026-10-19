@@ -59,6 +59,19 @@ TARGET_WINDOW_SIZE = PATCH_SIZE  # the model predicts the wavelet target of one 
 # scored parts of the patches, bins whose wavelet reaches outside their patch are masked as well (utils.valid_wavelet_bins)
 PRE_TARGET_WINDOW = (-1.0, -0.7)  # wavelet support -1.29 to -0.41 s
 POST_TARGET_WINDOW = (0.0, 0.4)  # wavelet support -0.29 to 0.69 s at 5 Hz
+TARGET_WINDOWS = [PRE_TARGET_WINDOW, POST_TARGET_WINDOW]
+# time window arguments of FinetuneDataset: the saved inputs and targets span EPOCH_WINDOW and are cut into one sample per patch
+PATCH_PARAMS = {
+    'epoch_window': EPOCH_WINDOW,
+    'patch_windows': {'pre': PRE_WINDOW, 'post': POST_WINDOW},
+    'fs': RSFREQ,
+}
+# target bins of every patch the training loss, the validation metrics and the target stats use, masked by utils.valid_wavelet_bins:
+# all bins of the patch computed from its own data, set to PRE_TARGET_WINDOW / POST_TARGET_WINDOW to train on the scored bins only
+LOSS_WINDOWS = {'pre': PRE_WINDOW, 'post': POST_WINDOW}
+# masked-channel reconstruction: a target channel is hidden together with its N_NEIGHBOURS nearest electrodes
+# (HydroCel-65 positions), the same cluster as the "cluster" scheme of ridge_leakage.py
+N_NEIGHBOURS = 4
 MIN_REACTION_TIME = 0.5  # s, trials with a button press earlier than this after onset are dropped in make_dataset.py (~1.4% of trials)
 PAD_TIME = 0.3  # reflect padding of each patch for its wavelet transform, only reaches bins outside the scored targets
 PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targets

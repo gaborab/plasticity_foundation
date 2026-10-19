@@ -24,7 +24,11 @@ class BaseMLPWrapper(nn.Module):
         return self.model.get_num_layers()
 
     def no_weight_decay(self):
-        return self.model.no_weight_decay()
+        """
+        Returns the names of the parameters excluded from weight decay (LaBraM's position/time embeddings and special tokens),
+        prefixed with "model." like this wrapper's parameter names, which the optimizer matches them against.
+        """
+        return {f"model.{name}" for name in self.model.no_weight_decay()}
 
 
 class EEGAutoencoder(BaseMLPWrapper):
@@ -36,22 +40,19 @@ class EEGAutoencoder(BaseMLPWrapper):
         super(EEGAutoencoder, self).__init__(target_dim=target_dim, model_version=model_version, hidden_dim=512, pretrained=pretrained)
         self.n_chans = n_chans
 
-    def forward(self, x, input_chans):
-        pred = self.model(x, input_chans, return_patch_tokens=True)
+    def forward(self, x, input_chans, channel_mask=None):
+        pred = self.model(x, input_chans, return_patch_tokens=True, bool_masked_pos=channel_mask)
         pred = rearrange(pred, 'B N T -> B (N T)')
         return pred
 
     def get_num_layers(self):
         return self.model.get_num_layers()
 
-    def no_weight_decay(self):
-        return self.model.no_weight_decay()
-
-    def get_unflattened_output(self, x, input_chans = None):
+    def get_unflattened_output(self, x, input_chans = None, channel_mask=None):
         """
         Returns the predicted temporal output for the first channel, reshaped to (n_chans, time_points).
         """
-        pred = self.model(x, input_chans, return_patch_tokens=True)
+        pred = self.model(x, input_chans, return_patch_tokens=True, bool_masked_pos=channel_mask)
         if pred.ndim == 2:
             pred = rearrange(pred, 'B (N T) -> B N T', N=self.n_chans)
         return pred
@@ -67,22 +68,19 @@ class EEGSpectralDecoder(BaseMLPWrapper):
         self.n_chans = n_chans
         self.n_freqs = n_freqs
 
-    def forward(self, x, input_chans):
-        pred = self.model(x, input_chans, return_patch_tokens=True)
+    def forward(self, x, input_chans, channel_mask=None):
+        pred = self.model(x, input_chans, return_patch_tokens=True, bool_masked_pos=channel_mask)
         pred = rearrange(pred, 'B N W -> B (N W)')
         return pred
 
     def get_num_layers(self):
         return self.model.get_num_layers()
 
-    def no_weight_decay(self):
-        return self.model.no_weight_decay()
-
-    def get_unflattened_output(self, x, input_chans = None):
+    def get_unflattened_output(self, x, input_chans = None, channel_mask=None):
         """
         Predicts spectral output for all channels, reshaped to (n_chans, n_freqs, time_points).
         """
-        pred = self.model(x, input_chans, return_patch_tokens=True)
+        pred = self.model(x, input_chans, return_patch_tokens=True, bool_masked_pos=channel_mask)
 
         pred = rearrange(pred, 'B N (F T) -> B N F T', F=self.n_freqs, N=self.n_chans)
         return pred

@@ -3,7 +3,9 @@ from collections import OrderedDict
 from pathlib import Path
 
 import torch
-from core import settings
+
+import core.plot_data_processing
+from core import settings, io
 from core import utils as core_utils
 from core.architectures import EEGAutoencoder, EEGSpectralDecoder
 from core.datasets import KFoldSplitter
@@ -42,12 +44,14 @@ CLIP_GRAD = None
 BATCH_SIZE = 64
 UPDATE_FREQ = 1
 USE_EMA = False
+N_EVAL_CHANNELS = 3  # evaluation target channels per validation sample with --masked, see core.utils.balanced_eval_channels
 SAVE_PLOTS = True
 
 
 
 
 def get_args():
+    """Parses the command line arguments of the fine-tuning run."""
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
     parser.add_argument('--model_name', type=str)
     parser.add_argument('--target_mode', type=str, default='wavelet')
@@ -60,6 +64,10 @@ def get_args():
     parser.add_argument('--no_pretrained', action='store_true', default=False)
     parser.add_argument('--mse', action='store_true', default=False)
     parser.add_argument('--model_desc', type=str, default='')
+    parser.add_argument('--masked', action='store_true', default=False,
+                        help='Masked-channel reconstruction: hide a target channel and its nearest electrodes, train on the target channel only')
+    parser.add_argument('--n_neighbors', type=int, default=settings.N_NEIGHBOURS,
+                        help='Nearest electrodes hidden together with the target channel with --masked, 0 hides the target channel only')
 
     return parser.parse_args()
 
@@ -70,8 +78,14 @@ def main(opts):
     dataloaders, initializing the model, and training/evaluating across folds.
     """
     torch.manual_seed(settings.SEED)
-    kfold = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
-    folds = kfold.split_by_subject()
+    kfold = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+    folds = kfold.split_within_subjects()
+    # (freqs, time) masks of the target bins the loss and the target stats use in every patch
+    masks = None
+    if opts.target_mode == 'wavelet':
+        masks = {patch: core_utils.valid_wavelet_bins(settings.FREQS, patch_window, settings.LOSS_WINDOWS[patch], settings.RSFREQ, **settings.WAVELET_PARAMS)
+                 for patch, patch_window in settings.PATCH_PARAMS['patch_windows'].items()}
+        print("Masked-in target bins per patch:", {patch: int(mask.sum()) for patch, mask in masks.items()})
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
     ch_names = settings.CHORDER_STANDARD
     # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
@@ -79,6 +93,15 @@ def main(opts):
     if opts.model_name is None:
         print("Please specify model name")
         return
+
+    # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster
+    trial_interpolations = None
+    neighbour_table = None
+    if opts.masked:
+        trial_interpolations = io.load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
+        neighbour_table = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS)
+        print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
+              f"{N_EVAL_CHANNELS} evaluation channels per validation sample")
 
     LR = opts.lr
     WEIGHT_DECAY = opts.weight_decay
@@ -103,6 +126,10 @@ def main(opts):
             "weight_decay": WEIGHT_DECAY,
             "lr": LR,
             "pretrained": USE_PRETRAINED,
+            "loss_windows": settings.LOSS_WINDOWS if opts.target_mode == 'wavelet' else None,
+            "masked": opts.masked,
+            "n_neighbors": opts.n_neighbors if opts.masked else None,
+            "n_eval_channels": N_EVAL_CHANNELS if opts.masked else None,
         },
         "description": opts.model_desc
     }
@@ -140,9 +167,7 @@ def main(opts):
     # ----------- CROSS-VALIDATION LOOP ------------
     for fold in folds:
         print(f"\n=== Fold {i}/{len(folds)} ===")
-        print(f"  Train subjects: {list(fold.training_epochs.keys())}")
-        print(f"  Val subjects: {list(fold.validation_epochs.keys())}")
-        print(f"  Test subjects: {list(fold.testing_epochs.keys())}")
+        print(fold.describe())
         # create output and log directory
         print("Creating output and log directories...")
         output_dir = output_dir_base / str(i)
@@ -152,6 +177,9 @@ def main(opts):
         if Path(output_dir / "log.txt").exists():
             print(f"WARNING: log.txt already exists in {output_dir}. Deleting old log.txt...")
             Path(output_dir / "log.txt").unlink()
+
+        with open(output_dir / "keys.json", "w") as f:
+            json.dump(fold.keys, f)
 
         print(f"Initializing model with {opts.target_mode} head...")
         # initialize LaBraM
@@ -184,14 +212,20 @@ def main(opts):
             utils.load_state_dict(model, checkpoint_model, prefix='')
 
         model.to(device)
+        fold_neighbour_table = torch.as_tensor(neighbour_table, device=device) if neighbour_table is not None else None
 
         # INITIALIZING
         # initialize samplers
         print(f"Initializing datasets with {opts.target_mode} target mode...")
-        train_dataset, val_dataset, test_dataset = fold.initialize_datasets(target_mode=opts.target_mode,
-                                                                            window_size=settings.TARGET_WINDOW_SIZE,
-                                                                            wavelet_dir=settings.FINETUNE_WAVELET_DIR,
-                                                                            superlet_dir=settings.FINETUNE_SUPERLET_DIR)
+        # the targets are normalized with mu and sigma of the pooled masked training targets
+        train_dataset, val_dataset, test_dataset = fold.initialize_datasets(patch_params=settings.PATCH_PARAMS,
+                                                                            target_mode=opts.target_mode, masks=masks, interpolations=trial_interpolations,
+                                                                            seed=settings.SEED, n_eval_channels=N_EVAL_CHANNELS)
+        if fold.target_stats is not None:
+            print(f"Target stats: {fold.target_stats}")
+            # inference has to denormalize the model outputs with the stats of the fold
+            with open(output_dir / "target_stats.json", mode="w") as f:
+                json.dump(fold.target_stats.to_dict(), f)
 
         train_sampler = torch.utils.data.RandomSampler(train_dataset)
         val_sampler = torch.utils.data.SequentialSampler(val_dataset)
@@ -237,14 +271,14 @@ def main(opts):
         # initialize log writer
         log_writer = utils.TensorboardLogger(log_dir=log_dir)
         start_time = time.time()
-        max_r2 = 0.0
+        max_r2 = float("-inf")  # the first validation always saves a best checkpoint, even with a negative R2
         max_r2_val_epoch = 0
         # --------- TRAINING LOOP ----------
         print(f"Training for {EPOCHS} epochs")
         for epoch in range(EPOCHS):
-            print(f"{epoch + 1}/{EPOCHS + 1}")
+            print(f"{epoch + 1}/{EPOCHS}")
             log_writer.set_step(epoch * num_training_steps_per_epoch * UPDATE_FREQ)
-
+            train_dataset.set_epoch(epoch)  # selects every sample's training target channel of this epoch from its permutation
             # TRAINING
             train_stats = train_one_epoch(
                 model, criterion, train_loader, optimizer,
@@ -252,7 +286,7 @@ def main(opts):
                 log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
                 lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
-                ch_names=ch_names
+                ch_names=ch_names, neighbour_table=fold_neighbour_table
             )
             print("train statistics: ", train_stats)
             print(f"Saving model to {output_dir}")
@@ -266,36 +300,37 @@ def main(opts):
                     epoch=epoch,
                     model_ema=model_ema
                 )
+            if epoch % 3 == 0 or epoch == EPOCHS - 1:
+                print(f" Evaluating on validation set at epoch {epoch}")
+                val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
+                                     is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table)
+                print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
 
-            val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
-                                 is_binary=False, criterion=criterion)
-            print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
+                print(f"Logging val stats to {log_dir}")
+                write_stat_logs(log_writer, val_stats, epoch)
 
-            print(f"Logging val stats to {log_dir}")
-            write_stat_logs(log_writer, val_stats, epoch)
+                log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+                             **{f'val_{k}': v for k, v in val_stats.items()},
+                             'epoch': epoch,
+                             'n_parameters': n_parameters}
 
-            log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                         **{f'val_{k}': v for k, v in val_stats.items()},
-                         'epoch': epoch,
-                         'n_parameters': n_parameters}
+                log_writer.flush()
+                with open(os.path.join(output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_stats) + "\n")
 
-            log_writer.flush()
-            with open(os.path.join(output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
-
-            if val_stats['r2'] > max_r2:
-                max_r2 = val_stats['r2']
-                max_r2_val_epoch = epoch
-                print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
-                utils.save_model(
-                    args=argparse.Namespace(**{"output_dir": output_dir}),
-                    model=model,
-                    model_without_ddp=model,
-                    optimizer=optimizer,
-                    loss_scaler=loss_scaler,
-                    epoch="best_val",
-                    model_ema=model_ema
-                )
+                if val_stats['r2'] > max_r2:
+                    max_r2 = val_stats['r2']
+                    max_r2_val_epoch = epoch
+                    print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
+                    utils.save_model(
+                        args=argparse.Namespace(**{"output_dir": output_dir}),
+                        model=model,
+                        model_without_ddp=model,
+                        optimizer=optimizer,
+                        loss_scaler=loss_scaler,
+                        epoch="best_val",
+                        model_ema=model_ema
+                    )
 
         # save max r2 for val
         stats = {
@@ -336,6 +371,7 @@ def main(opts):
 
 
 def write_stat_logs(log_writer, val_stats, epoch):
+    """Writes the known validation metrics of val_stats to the tensorboard log at the given epoch."""
     for key, value in val_stats.items():
         if key == 'accuracy':
             log_writer.update(accuracy=value, head="val", step=epoch)

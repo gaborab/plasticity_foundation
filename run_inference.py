@@ -58,22 +58,23 @@ def get_args():
     parser.add_argument('--model_name', type=str, required=True, help='Name of the model architecture to use for inference')
     parser.add_argument('--target_mode', type=str, default='wavelet', help='Target mode for the model (e.g., wavelet, superlet)')
     parser.add_argument('--postpatch', action='store_true', help='Whether to run inference on postpatch data')
+    parser.add_argument('--masked', action='store_true',
+                        help='Masked-channel reconstruction: hide every target channel with its nearest electrodes in turn, as in training with --masked')
+    parser.add_argument('--n_neighbors', type=int, default=settings.N_NEIGHBOURS,
+                        help='Nearest electrodes hidden together with the target channel with --masked, use the value the model was trained with')
     return parser.parse_args()
 
 def main(opts):
     print(f"Running inference with {opts.model_name} model, postpatch mode: {opts.postpatch}")
     total_time = 0
-    io_handler = EpochIO(ext='.pt')
-    # loads data in format {subject: {condition: [(id1, epoch_tensor1), (id2, epoch_tensor2), ...]}}
-    print("Loading baseline data...")
-    finetune_all_data = io_handler.load_all_epochs(settings.FINETUNE_EPOCHS_DIR)
     postpatch_all_data = None
     if opts.postpatch:
         print("Loading postpatch data...")
-        postpatch_all_data = io_handler.load_all_epochs(settings.PATCH_EPOCHS_DIR)
+        io_handler = EpochIO(ext='.pt')
+        postpatch_all_data = io_handler.load_all_input_target_data(input_dir=settings.PATCH_INPUT_EPOCHS_DIR, target_dir=settings.PATCH_WAVELET_DIR, target_mode=opts.target_mode)
 
-    splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_EPOCHS_DIR, seed=settings.SEED, input_data=finetune_all_data, k_folds=6, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
-    folds = splitter.split_by_subject()
+    splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR, target_mode=opts.target_mode, seed=settings.SEED, k_folds=6, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+    folds = splitter.split_within_subjects()
 
     ch_names = settings.CHORDER_STANDARD
     # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
@@ -87,7 +88,7 @@ def main(opts):
         print(f"Running inference for fold {i + 1}/{len(folds)}")
         testing_ids = list(fold.testing_epochs.keys())
         print("Testing subjects for this fold:", testing_ids)
-        _, _, testing_dataset = fold.initialize_datasets(target_mode=opts.target_mode, wavelet_dir=settings.FINETUNE_WAVELET_DIR, log=True, normalize=True)
+        _, _, testing_dataset = fold.initialize_datasets(patch_params=settings.PATCH_PARAMS, target_mode=opts.target_mode, log=True, normalize=True)
 
         print("Setting up model with target mode:", opts.target_mode)
         if opts.target_mode == "autoencoder":
@@ -126,7 +127,7 @@ def main(opts):
             postpatch_file = output_path / "postpatch_reconstruction.h5"
 
             postpatch_fold_items = {subject: postpatch_all_data[subject] for subject in testing_ids}
-            postpatch_dataset = FinetuneDataset(postpatch_fold_items, target_mode=opts.target_mode, wavelet_dir=settings.PATCH_WAVELET_DIR, window_size=settings.TARGET_WINDOW_SIZE, log=True, normalize=True)
+            postpatch_dataset = FinetuneDataset(postpatch_fold_items, **settings.PATCH_PARAMS, target_mode=opts.target_mode, log=True, normalize=True)
             print("Running post-patch reconstruction...")
             run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, band_indices)
             print("Post-patch reconstruction finished.")
