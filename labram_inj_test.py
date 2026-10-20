@@ -13,9 +13,9 @@ per subject the mean over the settings.INJECTION_N_ROI channels where the inject
 quartiles over subjects. An error change much smaller than the signal change means the masked prediction absorbs the gain change.
 --mixed_injection injects the settings.MIXED_INJECTION_GAINS sources at once (fsaverage), each --injection value scaling all gains.
 
-Outputs (outputs/labram_injection/<model_name>/): trial_errors.csv (one row per fold, trial, channel, band and gain),
+Outputs (outputs/labram_injection/<model_name>/<injection>/, <injection> = {single,mixed}_{head model}): trial_errors.csv (one row per fold, trial, channel, band and gain),
 injection.csv (per gain, band, subject and channel), summary.csv (per gain and band, median [quartiles] over subjects).
-Topomaps (outputs/plots/labram_injection/<model_name>/): injected_source_topographies.png and, per gain, one row of bands
+Topomaps (outputs/plots/labram_injection/<model_name>/<injection>/): injected_source_topographies.png and, per gain, one row of bands
 of the median change over subjects per channel: topomaps_injection_signal_*.png and topomaps_injection_error_*.png.
 """
 import argparse
@@ -228,7 +228,9 @@ def main(opts):
     ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
     roi = [ch_names[c] for c in np.argsort(-np.abs(G @ relative))[:settings.INJECTION_N_ROI]]
     print(f"Injected source: {description}, strongest at {', '.join(roi)}")
-    plot_dir = PLOT_ROOT / opts.model_name
+    # one folder per injection, so single and mixed runs of the same model keep their own results
+    injection_name = f"{'mixed' if opts.mixed_injection else 'single'}_{opts.head_model}"
+    plot_dir = PLOT_ROOT / opts.model_name / injection_name
     plot_dir.mkdir(parents=True, exist_ok=True)
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes
     plot_sources(topographies, relative_gains, info, ch_names, plot_dir)
@@ -280,7 +282,7 @@ def main(opts):
 
     trial_errors = pd.concat(all_trial_errors, ignore_index=True)
     per_channel, summary = summarize(trial_errors, roi)
-    out_dir = OUTPUT_ROOT / opts.model_name
+    out_dir = OUTPUT_ROOT / opts.model_name / injection_name
     out_dir.mkdir(parents=True, exist_ok=True)
     trial_errors.to_csv(out_dir / "trial_errors.csv", index=False)
     per_channel.to_csv(out_dir / "injection.csv", index=False)
