@@ -153,6 +153,7 @@ def main(opts):
     spectral = target_mode in ["wavelet", "superlet"]
 
     # the baseline test sets are rebuilt from the keys saved during training
+    print("Loading training split keys and building baseline inference folds...")
     splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR,
                              target_mode=target_mode, seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))
@@ -160,6 +161,7 @@ def main(opts):
     # every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
     postpatch_folds = None
     if opts.postpatch:
+        print("Building post-patching inference folds...")
         postpatch_splitter = KFoldSplitter(input_data_dir=settings.PATCH_INPUT_EPOCHS_DIR, target_data_dir=settings.PATCH_WAVELET_DIR,
                                            target_mode=target_mode, seed=settings.SEED, k_folds=k_folds,
                                            no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)

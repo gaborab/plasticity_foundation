@@ -8,6 +8,7 @@ from sklearn.metrics import r2_score
 from einops import rearrange
 from core.io_models import *
 import pandas as pd
+import mne
 from core import plot_data_processing
 import zlib
 
@@ -378,3 +379,121 @@ def channel_permutation(key, allowed, seed):
 
 
 
+
+
+# ---------------------------------------------------------------- gain injection
+def hydrocel_info(fs: int):
+    """mne.Info of all 65 HydroCel-65 electrodes (E1 ... E64 and the reference Cz) with the standard montage, and the montage."""
+    montage = mne.channels.make_standard_montage("GSN-HydroCel-65_1.0")
+    info = mne.create_info(montage.ch_names, fs, "eeg")
+    info.set_montage(montage)
+    return info, montage
+
+
+def model_channel_topography(gain, info, egi_to_1020_map: Dict[str, str], channel_order: List[str]):
+    """
+    Average-references a 65-channel topography (as in the preprocessing), picks the model channels in channel_order
+    (e.g. settings.CHORDER_STANDARD, mapped to EGI electrodes with egi_to_1020_map) and scales it to a maximum absolute value of 1.
+    """
+    gain = gain - gain.mean()
+    egi = {v: k for k, v in egi_to_1020_map.items()}
+    montage_name = lambda ch: "Cz" if egi[ch] == "EEG VREF" else "E" + egi[ch].split(" ")[-1]
+    g = np.array([gain[info.ch_names.index(montage_name(ch))] for ch in channel_order])
+    return g / np.abs(g).max()
+
+
+def fsaverage_label_gains(labels: List[str], fs: int):
+    """
+    Scalp field of every given aparc label (both hemispheres) on the MNE fsaverage template: the sum over the label's sources,
+    oriented normal to the cortex with equal amplitude, through the 3-layer fsaverage BEM, HydroCel-65 electrodes aligned
+    with the template by their fiducials (trans='fsaverage'). Folded cortex partly cancels itself, as in real EEG.
+    Returns ({label: 65-channel field}, {label: number of sources}, info of the 65 channels).
+    Downloads fsaverage (~200 MB) into the MNE data folder on the first call.
+    """
+    fs_dir = Path(mne.datasets.fetch_fsaverage(verbose=False))
+    info, _ = hydrocel_info(fs)
+    fwd = mne.make_forward_solution(info, trans="fsaverage", src=fs_dir / "bem" / "fsaverage-ico-5-src.fif",
+                                    bem=fs_dir / "bem" / "fsaverage-5120-5120-5120-bem-sol.fif", meg=False, eeg=True, verbose=False)
+    fwd = mne.convert_forward_solution(fwd, surf_ori=True, force_fixed=True, verbose=False)
+    annotation = mne.read_labels_from_annot("fsaverage", parc="aparc", subjects_dir=fs_dir.parent, verbose=False)
+    fields, counts = {}, {}
+    for name in labels:
+        offset, columns = 0, []
+        for hemi, src in zip(["lh", "rh"], fwd["src"]):
+            vertices = np.concatenate([lab.vertices for lab in annotation if lab.name == f"{name}-{hemi}"] or [[]])
+            columns.append(offset + np.where(np.isin(src["vertno"], vertices))[0])
+            offset += len(src["vertno"])
+        columns = np.concatenate(columns)
+        if len(columns) == 0:
+            raise ValueError(f"No fsaverage source in the aparc label {name!r}")
+        fields[name], counts[name] = fwd["sol"]["data"][:, columns].sum(axis=1), len(columns)
+    return fields, counts, info
+
+
+def sphere_topography(depth: float, fs: int, egi_to_1020_map: Dict[str, str], channel_order: List[str]):
+    """
+    Scalp topography (model channels, max |g| = 1) of a radial dipole in occipital cortex, at depth (fraction of the head
+    radius) towards the midpoint of O1 (E35) and O2 (E39), 3-shell sphere model fitted to the HydroCel-65 electrodes,
+    and a description of it. Needs no download.
+    """
+    info, montage = hydrocel_info(fs)
+    sphere = mne.make_sphere_model("auto", "auto", info, verbose=False)
+    pos = montage.get_positions()["ch_pos"]
+    r0 = np.asarray(sphere["r0"])
+    direction = (pos["E35"] + pos["E39"]) / 2 - r0
+    direction /= np.linalg.norm(direction)
+    dipole = mne.Dipole(times=[0.0], pos=[r0 + depth * sphere.radius * direction], amplitude=[1e-8],
+                        ori=[direction], gof=[100.0])
+    fwd, _ = mne.make_forward_dipole(dipole, sphere, info, trans=None, verbose=False)
+    return model_channel_topography(fwd["sol"]["data"][:, 0], info, egi_to_1020_map, channel_order), \
+        f"radial dipole at {depth:g} of the head radius towards O1/O2, 3-shell sphere model"
+
+
+def injected_sources(head_model: str, labels: List[str], mixed_gains: Optional[Dict[str, float]], depth: float, fs: int,
+                     egi_to_1020_map: Dict[str, str], channel_order: List[str]):
+    """
+    The sources of a gain injection: ({name: topography (model channels, max |g| = 1)}, {name: gain per unit of injection},
+    description). mixed_gains ({aparc label: gain}, needs head_model "fsaverage"): every label is a separate source with its
+    own gain. Otherwise one source: the given aparc labels together (head_model "fsaverage") or the sphere-model dipole at
+    depth ("sphere"), with gain 1, so the injection value is its gain.
+    """
+    if mixed_gains is not None:
+        if head_model != "fsaverage":
+            raise ValueError("A mixed injection needs the fsaverage head model: its sources are aparc labels")
+        fields, counts, info65 = fsaverage_label_gains(list(mixed_gains), fs)
+        topographies = {name: model_channel_topography(field, info65, egi_to_1020_map, channel_order) for name, field in fields.items()}
+        description = "; ".join(f"{name} {100 * gain:+g} % ({counts[name]} sources)" for name, gain in mixed_gains.items())
+        return topographies, dict(mixed_gains), f"mixed injection: {description} (aparc, both hemispheres, fsaverage BEM)"
+    if head_model == "fsaverage":
+        fields, counts, info65 = fsaverage_label_gains(labels, fs)
+        g = model_channel_topography(sum(fields.values()), info65, egi_to_1020_map, channel_order)
+        description = f"{', '.join(labels)} (aparc, both hemispheres, {sum(counts.values())} sources normal to the cortex), fsaverage BEM"
+    else:
+        g, description = sphere_topography(depth, fs, egi_to_1020_map, channel_order)
+    return {"source": g}, {"source": 1.0}, description
+
+
+def source_overlap(topographies: Dict[str, np.ndarray]):
+    """
+    How distinguishable injected sources are on the model channels: pairwise cosine similarity of their topographies
+    (1 = identical shape, -1 = identical but inverted) and the condition number of their matrix (largest / smallest
+    singular value; large values mean their activity cannot be told apart and the joint estimate is unstable).
+    """
+    names = list(topographies)
+    G = np.stack([topographies[name] for name in names], axis=1)
+    unit = G / np.linalg.norm(G, axis=0)
+    singular = np.linalg.svd(G, compute_uv=False)
+    return pd.DataFrame(unit.T @ unit, index=names, columns=names), singular[0] / singular[-1]
+
+
+def inject_sources(X, G, gains, times, ramp_duration: float):
+    """
+    Returns a copy of the trials X (..., channels, time) in which the injected sources are stronger after stimulus onset.
+    G: (channels, n_sources) topographies, gains: (n_sources,) relative gain of every source, times: (time,) in s, onset at 0.
+    The sources' activity is estimated jointly by least squares, S = pinv(G) x, so activity shared by overlapping
+    topographies is not counted twice; source k then gets gains[k] * G[:, k] * S_k(t) added, ramped in with a raised
+    cosine over ramp_duration s after onset.
+    """
+    ramp = 0.5 - 0.5 * np.cos(np.pi * np.clip(times / ramp_duration, 0, 1))  # 0 before onset, 1 from ramp_duration s on
+    sources = np.einsum("kc,...ct->...kt", np.linalg.pinv(G), X)
+    return X + np.einsum("ck,k,...kt->...ct", G, np.asarray(gains), sources * ramp)

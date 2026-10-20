@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+import mne
 import numpy as np
 import ipywidgets as widgets
 from IPython.display import display
@@ -487,3 +488,33 @@ def save_line_plot(channel_data, save_dir: Path, title="Epoch waveform", xlabel=
     plt.ylabel(ylabel)
     plt.savefig(save_dir, dpi=300, bbox_inches='tight')
     plt.close()
+
+
+def plot_topomap_row(values_by_band, info, channel_names, vlim, cmap, label, title, save_path):
+    """
+    One topomap per band in a row, one colour scale shared by all panels (layout of the plasticity_plotting.ipynb topomaps).
+    values_by_band: {band: Series indexed by channel name}; channels without a value are left out of that panel.
+    info: mne.Info of the channels in channel_names order (plot_data_processing.create_topomap_info).
+    """
+    fig, axes = plt.subplots(1, len(values_by_band), figsize=(24, 4))
+    axes = np.atleast_1d(axes)
+    im = None
+    for ax, (band, values) in zip(axes, values_by_band.items()):
+        vals = values.reindex(channel_names).to_numpy(dtype=float)
+        keep = np.where(~np.isnan(vals))[0]
+        if len(keep) < 4:
+            ax.set_axis_off()
+            ax.set_title(f"{band}\n(too few channels)")
+            continue
+        im, _ = mne.viz.plot_topomap(vals[keep], mne.pick_info(info, keep), axes=ax, show=False, vlim=vlim, cmap=cmap)
+        ax.set_title(band)
+    if im is not None:
+        fig.colorbar(im, ax=axes, shrink=0.8, label=label)
+    plt.suptitle(title, y=1.02)
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def symmetric_limit(values_by_band, default=0.1):
+    """Returns the largest absolute value of all bands' Series, for a colour scale symmetric around 0 (default if all are empty)."""
+    return max([np.nanmax(np.abs(v.to_numpy())) for v in values_by_band.values() if len(v)] or [default])

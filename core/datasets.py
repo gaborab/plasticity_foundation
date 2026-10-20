@@ -122,6 +122,59 @@ class FinetuneDataset(torch.utils.data.Dataset):
         self.epoch = epoch
 
 
+class InjectionDataset(torch.utils.data.Dataset):
+    """
+    One patch of every trial with and without gain injections, for the injection test of masked-channel reconstruction.
+    Expects input dictionaries in the format of EpochIO.load_all_input_target_data, only the input epochs are used: the
+    targets are recomputed from the (injected) inputs, so the uninjected and injected targets go through the same code.
+    epoch_window: (start, end) in s of the saved input epochs, stimulus onset at 0. patch_window: the patch to return, e.g. the post patch.
+    topographies: (n_chans, n_sources) topographies of the injected sources, gain_sets: one (n_sources,) gain vector per
+    injection; the sources get stronger after onset, ramped in over ramp_duration s (utils.inject_sources).
+    freqs, pad, wavelet_params: wavelet transform of the patch as in make_dataset.patch_wavelet_target (utils.calc_wavelet).
+    interpolations: {(subject, condition, id): interpolated channel indices}, metadata["allowed"] is False for them.
+    target_stats: the fold's target normalization, converts the model outputs back to dB (the targets are returned in dB).
+    __getitem__ returns (inputs, targets, metadata): inputs (1 + n_injections, n_chans, patch samples) and dB targets
+    (1 + n_injections, n_chans, n_freqs, patch samples), index 0 uninjected and index i + 1 injected with gain_sets[i].
+    """
+
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]], epoch_window: Tuple[float, float],
+                 patch_window: Tuple[float, float], fs: int, topographies: np.ndarray, gain_sets: List[np.ndarray], ramp_duration: float,
+                 freqs: np.ndarray, pad: int, wavelet_params: Dict[str, float],
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, target_stats: Optional[TargetStats] = None):
+        self.epoch_window, self.patch_window, self.fs = epoch_window, patch_window, fs
+        self.topographies, self.gain_sets, self.ramp_duration = topographies, gain_sets, ramp_duration
+        self.freqs, self.pad, self.wavelet_params = freqs, pad, wavelet_params
+        self.target_stats = target_stats
+        self.samples = []
+        for subj, conds in epochs_dict.items():
+            for cond, epoch_list in conds.items():
+                for idx, (input_tensor, _) in epoch_list:
+                    allowed = torch.ones(input_tensor.shape[0], dtype=torch.bool)
+                    if interpolations is not None:
+                        allowed[interpolations.get((subj, cond, idx), [])] = False
+                    metadata = {"subject": subj, "condition": cond, "id": idx, "allowed": allowed}
+                    self.samples.append((input_tensor.float().numpy(), metadata))
+
+    def __len__(self):
+        """Returns the number of trials."""
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        """Returns (inputs, targets, metadata) of one trial's patch, uninjected first, then one per gain set."""
+        epoch, metadata = self.samples[idx]
+        times = self.epoch_window[0] + np.arange(epoch.shape[-1]) / self.fs
+        epochs = [epoch] + [utils.inject_sources(epoch, self.topographies, gains, times, self.ramp_duration).astype(np.float32)
+                            for gains in self.gain_sets]
+        inputs, targets = [], []
+        for x in epochs:
+            patch = utils.cut_to_timewindow(torch.from_numpy(x), self.epoch_window, self.patch_window, self.fs)
+            mag, _ = utils.calc_wavelet(patch, fs=self.fs, freqs=self.freqs, pad=self.pad, **self.wavelet_params)
+            # (freqs, channels, time) -> (channels, freqs, time) in dB, as make_dataset and FinetuneDataset
+            targets.append(20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7))
+            inputs.append(patch)
+        return torch.stack(inputs), torch.stack(targets), metadata
+
+
 class FinetuneSplits:
     """
     This class can be implemented to hold the training, validation, and testing epochs for a single fold of cross-validation.
