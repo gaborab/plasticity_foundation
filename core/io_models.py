@@ -113,8 +113,6 @@ class Trial:
     full_channel_metrics = _metrics_field("full", channel=True)
     analysis_metrics = _metrics_field("analysis")
     analysis_channel_metrics = _metrics_field("analysis", channel=True)
-    reference_metrics = _metrics_field("reference")
-    reference_channel_metrics = _metrics_field("reference", channel=True)
 
 @dataclass
 class TargetStats:

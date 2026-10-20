@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Tuple, Optional, Dict, List, Any
 import numpy as np
@@ -157,21 +158,19 @@ def reconstruct_model_output(checkpoint_path: Path, model, input, input_chans, *
 
 def calculate_r2(y_true, y_pred):
     """
-    Calculates the R-squared metric for the given true and predicted values of single-channel data.
-    The function expects either 1D or 2D arrays for y_true and y_pred, where the last dimension corresponds to time points. If the input is 2D, it will be flattened before calculation.
+    Calculates the R-squared metric for the given true and predicted values, flattened over all dimensions (1D to 3D arrays).
+    NaN-aware: only positions where both values are finite are used. Returns NaN if fewer than 2 such positions remain.
     """
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
     if y_true.ndim > 3 or y_pred.ndim > 3:
         raise ValueError(f"Expected y_true and y_pred to be 1D or 2D or 3D arrays, but got shapes {y_true.shape} and {y_pred.shape}.")
 
-    if y_true.ndim >= 2:
-        # Flatten the arrays if they are 2D
-        y_true = y_true.flatten()
-        y_pred = y_pred.flatten()
-
-    r2 = r2_score(y_true, y_pred)
-    return r2
+    y_true, y_pred = np.ravel(y_true), np.ravel(y_pred)
+    finite = np.isfinite(y_true) & np.isfinite(y_pred)
+    if finite.sum() < 2:
+        return np.nan
+    return r2_score(y_true[finite], y_pred[finite])
 
 
 def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds, band_indices: Dict[str, np.ndarray], eps: float = 1e-8):
@@ -180,6 +179,7 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
     Expects band_indices as {band name: indices of the band's frequency bins}, e.g. settings.FREQ_BAND_INDICES.
     Expects y_true and y_pred to be 2D or 3D arrays, where the last dimension corresponds to time points and the second-to-last dimension corresponds to frequencies.
     Expects freq_stds to be a 1D array of standard deviations for each frequency.
+    NaN-aware: NaN bins (bins outside the metric window, interpolated channels) are left out, a band without any finite bin gets NaN metrics.
     """
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shapes of y_true {y_true.shape} and y_pred {y_pred.shape} do not match.")
@@ -199,20 +199,16 @@ def calculate_bandwise_metrics(y_true, y_pred, signal_freq_stds, recon_freq_stds
         if y_true.ndim == 2:
             band_true = y_true[indices, :].flatten()
             band_pred = y_pred[indices, :].flatten()
-        elif y_true.ndim == 3:
+        else:
             band_true = y_true[:, indices, :].flatten()
             band_pred = y_pred[:, indices, :].flatten()
-        else:
-            print("WARNING: Expected 2D or 3D arrays for y_true and y_pred when calculating bandwise metrics, but got arrays with shape:", y_true.shape)
-            return None, None, None, None, None, None, None
-        r2 = r2_score(band_true, band_pred)
-        mae = np.mean(np.abs(band_true - band_pred))
-        r2_bandwise[name] = r2
+        mae = np.nanmean(np.abs(band_true - band_pred))
+        r2_bandwise[name] = calculate_r2(band_true, band_pred)
         mae_bandwise[name] = mae
-        signal_std_bandwise[name] = np.mean(signal_freq_stds[indices])
-        recon_std_bandwise[name] = np.mean(recon_freq_stds[indices])
-        signal_mean_bandwise[name] = np.mean(band_true)
-        recon_mean_bandwise[name] = np.mean(band_pred)
+        signal_std_bandwise[name] = np.nanmean(signal_freq_stds[indices])
+        recon_std_bandwise[name] = np.nanmean(recon_freq_stds[indices])
+        signal_mean_bandwise[name] = np.nanmean(band_true)
+        recon_mean_bandwise[name] = np.nanmean(band_pred)
         nmae_bandwise[name] = mae / signal_std_bandwise[name] + eps
 
     return r2_bandwise, mae_bandwise, signal_std_bandwise, recon_std_bandwise, nmae_bandwise, signal_mean_bandwise, recon_mean_bandwise
@@ -222,62 +218,70 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
     """
     Calculates inference metrics (e.g., R-squared, MAE) for a single trial's output and target data. Expects trial_output and trial_target to be 3D arrays, where the last dimension corresponds to time points.
     band_indices: {band name: indices of the band's frequency bins} for spectral targets, None skips the band-wise metrics.
+    NaN-aware: a bin that is NaN in the output or the target (bins outside the metric window, interpolated channels in
+    masked-channel reconstruction) is left out of every metric. Metrics without any finite bin, e.g. those of an
+    interpolated channel, are NaN.
     Returns a dictionary containing the calculated metrics.
     """
     spectral = band_indices is not None
+    # leave a bin out of both arrays if it is missing in either, so every metric uses the same bins
+    finite = np.isfinite(trial_output) & np.isfinite(trial_target)
+    trial_output = np.where(finite, trial_output, np.nan)
+    trial_target = np.where(finite, trial_target, np.nan)
 
-    signal_stds = np.std(trial_target, axis=-1)
-    recon_stds = np.std(trial_output, axis=-1)
-    global_std = np.mean(signal_stds)
-    recon_std = np.mean(recon_stds)
+    # all-NaN slices (interpolated channels, frequencies without bins in the window) give NaN, without RuntimeWarnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        signal_stds = np.nanstd(trial_target, axis=-1)
+        recon_stds = np.nanstd(trial_output, axis=-1)
+        global_std = np.nanmean(signal_stds)
+        recon_std = np.nanmean(recon_stds)
 
-    # global metrics
-    g_metrics = Metrics()
-    g_metrics.r2 = calculate_r2(trial_target, trial_output)
-    g_metrics.mae = np.mean(np.abs(trial_target - trial_output))
-    g_metrics.nmae = g_metrics.mae / global_std + eps
-    g_metrics.signal_volatility = global_std
-    g_metrics.signal_mean = np.mean(trial_target).item()
-    g_metrics.recon_mean = np.mean(trial_output).item()
-    g_metrics.recon_volatility = recon_std
+        # global metrics
+        g_metrics = Metrics()
+        g_metrics.r2 = calculate_r2(trial_target, trial_output)
+        g_metrics.mae = np.nanmean(np.abs(trial_target - trial_output))
+        g_metrics.nmae = g_metrics.mae / global_std + eps
+        g_metrics.signal_volatility = global_std
+        g_metrics.signal_mean = np.nanmean(trial_target).item()
+        g_metrics.recon_mean = np.nanmean(trial_output).item()
+        g_metrics.recon_volatility = recon_std
 
-    # global band-wise metrics
-    if spectral:
-        signal_freq_stds = np.mean(signal_stds, axis=0)
-        recon_freq_stds = np.mean(recon_stds, axis=0)
-        g_metrics.r2_bandwise, g_metrics.mae_bandwise, g_metrics.signal_volatility_bandwise, g_metrics.recon_volatility_bandwise, g_metrics.nmae_bandwise, g_metrics.signal_mean_bandwise, g_metrics.recon_mean_bandwise = (
-            calculate_bandwise_metrics(trial_target, trial_output, signal_freq_stds, recon_freq_stds, band_indices=band_indices, eps=eps)
-        )
-    g_metrics = g_metrics.to_dict()
-
-    ch_metrics_dict = {}
-    signal_channel_stds = np.mean(signal_stds, axis=1) if spectral else signal_stds
-    recon_channel_stds = np.mean(recon_stds, axis=1) if spectral else recon_stds
-    # channel-wise metrics
-    for i in range(trial_target.shape[0]):
-        ch_key = f'{ch_prefix}{i}'
-        ch_metrics = Metrics()
-        ch_metrics.r2 = calculate_r2(trial_target[i], trial_output[i])
-        ch_metrics.mae = np.mean(np.abs(trial_target[i] - trial_output[i]))
-
-        ch_metrics.signal_volatility = signal_channel_stds[i]
-        ch_metrics.recon_volatility = recon_channel_stds[i]
-        ch_metrics.nmae = ch_metrics.mae / (signal_channel_stds[i] + eps)
-
-        ch_metrics.signal_mean = np.mean(trial_target[i]).item()
-        ch_metrics.recon_mean = np.mean(trial_output[i]).item()
-
-
-
-        # channel-wise band-wise metrics
+        # global band-wise metrics
         if spectral:
-            signal_channel_freq_stds = signal_stds[i, :]
-            recon_channel_freq_stds = recon_stds[i, :]
-            ch_metrics.r2_bandwise, ch_metrics.mae_bandwise, ch_metrics.signal_volatility_bandwise, ch_metrics.recon_volatility_bandwise, ch_metrics.nmae_bandwise, ch_metrics.signal_mean_bandwise, ch_metrics.recon_mean_bandwise = (
-                calculate_bandwise_metrics(trial_target[i], trial_output[i], signal_channel_freq_stds, recon_channel_freq_stds, band_indices=band_indices, eps=eps)
+            signal_freq_stds = np.nanmean(signal_stds, axis=0)
+            recon_freq_stds = np.nanmean(recon_stds, axis=0)
+            g_metrics.r2_bandwise, g_metrics.mae_bandwise, g_metrics.signal_volatility_bandwise, g_metrics.recon_volatility_bandwise, g_metrics.nmae_bandwise, g_metrics.signal_mean_bandwise, g_metrics.recon_mean_bandwise = (
+                calculate_bandwise_metrics(trial_target, trial_output, signal_freq_stds, recon_freq_stds, band_indices=band_indices, eps=eps)
             )
+        g_metrics = g_metrics.to_dict()
 
-        ch_metrics_dict[ch_key] = ch_metrics.to_dict()
+        ch_metrics_dict = {}
+        signal_channel_stds = np.nanmean(signal_stds, axis=1) if spectral else signal_stds
+        recon_channel_stds = np.nanmean(recon_stds, axis=1) if spectral else recon_stds
+        # channel-wise metrics
+        for i in range(trial_target.shape[0]):
+            ch_key = f'{ch_prefix}{i}'
+            ch_metrics = Metrics()
+            ch_metrics.r2 = calculate_r2(trial_target[i], trial_output[i])
+            ch_metrics.mae = np.nanmean(np.abs(trial_target[i] - trial_output[i]))
+
+            ch_metrics.signal_volatility = signal_channel_stds[i]
+            ch_metrics.recon_volatility = recon_channel_stds[i]
+            ch_metrics.nmae = ch_metrics.mae / (signal_channel_stds[i] + eps)
+
+            ch_metrics.signal_mean = np.nanmean(trial_target[i]).item()
+            ch_metrics.recon_mean = np.nanmean(trial_output[i]).item()
+
+            # channel-wise band-wise metrics
+            if spectral:
+                signal_channel_freq_stds = signal_stds[i, :]
+                recon_channel_freq_stds = recon_stds[i, :]
+                ch_metrics.r2_bandwise, ch_metrics.mae_bandwise, ch_metrics.signal_volatility_bandwise, ch_metrics.recon_volatility_bandwise, ch_metrics.nmae_bandwise, ch_metrics.signal_mean_bandwise, ch_metrics.recon_mean_bandwise = (
+                    calculate_bandwise_metrics(trial_target[i], trial_output[i], signal_channel_freq_stds, recon_channel_freq_stds, band_indices=band_indices, eps=eps)
+                )
+
+            ch_metrics_dict[ch_key] = ch_metrics.to_dict()
     return g_metrics, ch_metrics_dict
 
 

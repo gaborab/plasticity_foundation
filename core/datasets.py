@@ -130,7 +130,7 @@ class FinetuneSplits:
     saved with the fold so inference can rebuild the same split.
     """
 
-    def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict, keys: Dict[str, List[Tuple[str, str, int]]]):
+    def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict, keys: Dict[str, List[Tuple[str, str, int]]] = None):
         self.training_epochs = training_dict
         self.validation_epochs = validation_dict
         self.testing_epochs = testing_dict
@@ -190,7 +190,6 @@ class FinetuneSplits:
 
         training_dataset, validation_dataset, testing_dataset = datasets
         return training_dataset, validation_dataset, testing_dataset
-
 
 class KFoldSplitter:
     """
@@ -285,6 +284,22 @@ class KFoldSplitter:
             keys = {"train": train_keys, "val": val_keys, "test": test_keys}
             splits.append(FinetuneSplits(training_dict=self._select(train_keys), validation_dict=self._select(val_keys),
                                          testing_dict=self._select(test_keys), keys=keys))
+        return splits
+
+    def split_from_keys(self, keys: List[Dict[str, List[Tuple[str, str, int]]]]) -> List[FinetuneSplits]:
+        """
+        Rebuilds the FinetuneSplits of a training run from its saved keys (io.load_training_split_keys), one per fold.
+        keys: one {"train": [...], "val": [...], "test": [...]} dict of (subject, condition, id) keys per fold.
+        Warns if saved keys are missing from the loaded data, e.g. after the dataset was rebuilt.
+        """
+        loaded = set(self._keys_of(self.input_target_data))
+        splits = []
+        for i, fold in enumerate(keys):
+            missing = {split: len(set(split_keys) - loaded) for split, split_keys in fold.items()}
+            if any(missing.values()):
+                print(f"WARNING: fold {i + 1} has saved keys missing from the loaded data: {missing}")
+            splits.append(FinetuneSplits(training_dict=self._select(fold["train"]), validation_dict=self._select(fold["val"]),
+                                         testing_dict=self._select(fold["test"]), keys=fold))
         return splits
 
     @staticmethod

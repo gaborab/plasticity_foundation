@@ -61,9 +61,10 @@ PRE_TARGET_WINDOW = (-1.0, -0.7)  # wavelet support -1.29 to -0.41 s
 POST_TARGET_WINDOW = (0.0, 0.4)  # wavelet support -0.29 to 0.69 s at 5 Hz
 TARGET_WINDOWS = [PRE_TARGET_WINDOW, POST_TARGET_WINDOW]
 # time window arguments of FinetuneDataset: the saved inputs and targets span EPOCH_WINDOW and are cut into one sample per patch
+PATCH_WINDOWS = {'pre': PRE_WINDOW, 'post': POST_WINDOW}
 PATCH_PARAMS = {
     'epoch_window': EPOCH_WINDOW,
-    'patch_windows': {'pre': PRE_WINDOW, 'post': POST_WINDOW},
+    'patch_windows': PATCH_WINDOWS,
     'fs': RSFREQ,
 }
 # target bins of every patch the training loss, the validation metrics and the target stats use, masked by utils.valid_wavelet_bins:
@@ -80,10 +81,11 @@ BASELINE_WINDOW = None  # no MNE baseline correction: a baseline window would sh
 ANALYSIS_WINDOW = POST_TARGET_WINDOW  # before every button press
 REFERENCE_WINDOW = PRE_TARGET_WINDOW
 
+# time windows the inference metrics are computed on, cut from each patch; bins computed partly from the patch's reflect
+# padding are left out (run_inference), so 'full' is every valid bin of the patch and 'analysis' the scored windows
 METRIC_WINDOWS = {
-    'full': POST_TARGET_WINDOW,
-    'analysis': ANALYSIS_WINDOW,
-    'reference': REFERENCE_WINDOW,
+    'full': PATCH_WINDOWS,
+    'analysis': {'pre': PRE_TARGET_WINDOW, 'post': POST_TARGET_WINDOW},
 }
 
 

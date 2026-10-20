@@ -1,7 +1,7 @@
 # EEG Foundation Model Fine-Tuning & Plasticity Analysis Pipeline
 
 > **Project status: active development, design change in progress.**
-> The dataset step (`make_dataset.py`) builds the data for the new **pre/post patch design** (see [Design change](#design-change-prepost-patches-and-masked-channel-reconstruction)). Training (step 2) splits the trials into patches, trains with masked loss and fold-level target normalization, and does masked-channel reconstruction with `--masked`. Inference and the analysis notebooks (steps 3–4) still implement the previous single-window design and are being adapted. See [Known issues & caveats](#known-issues--caveats) before running anything.
+> The dataset step (`make_dataset.py`) builds the data for the new **pre/post patch design** (see [Design change](#design-change-prepost-patches-and-masked-channel-reconstruction)). Training (step 2) splits the trials into patches, trains with masked loss and fold-level target normalization, and does masked-channel reconstruction with `--masked`. Inference (step 3) reconstructs both patches of every trial and writes them to `pre/` / `post/` groups. The functions that read the inference files and the analysis notebooks (step 4) still expect the previous single-window files and are being adapted. See [Known issues & caveats](#known-issues--caveats) before running anything.
 
 ---
 
@@ -27,7 +27,7 @@ The previous model learnt the wavelet transform of its own input, so its error c
 - **Pre-stimulus correction.** The pre-patch error serves as a reference for the post-patch error of the same model, which cancels cap-refit and session effects to first order. Within-session contrasts across the four recording blocks of a session give a cap-free check.
 - **Within-subject folds** (`KFoldSplitter.split_within_subjects`), so a subject label can be given to the model.
 
-The dataset step implements this. Training (`run_general_finetune.py`) implements the two patches, the validity masks, within-subject folds and, with `--masked`, masked-channel reconstruction (see [2.3 Masked-channel reconstruction](#23-masked-channel-reconstruction---masked)). No subject label is given to the model so far. Inference (`run_inference.py`) and the notebooks still follow the previous design.
+The dataset step implements this. Training (`run_general_finetune.py`) implements the two patches, the validity masks, within-subject folds and, with `--masked`, masked-channel reconstruction (see [2.3 Masked-channel reconstruction](#23-masked-channel-reconstruction---masked)). No subject label is given to the model so far. Inference (`run_inference.py`) follows the new design (see [3. Inference](#3-inference-run_inferencepy)); the loaders of the inference files and the notebooks still follow the previous design.
 
 ```mermaid
 flowchart LR
@@ -62,7 +62,7 @@ uv run python make_dataset.py
 uv run python run_general_finetune.py --model_name my_model --target_mode wavelet
 
 # 4. reconstruct held-out baseline + post-patching trials, compute metrics
-uv run python run_inference.py --model_name my_model --target_mode wavelet --postpatch
+uv run python run_inference.py --model_name my_model --postpatch   # target mode, masking and folds from the run's metadata.json
 ```
 
 Then open the notebooks in `notebooks/` (see [Analysis notebooks](#4-analysis-notebooks)).
@@ -161,7 +161,7 @@ Every script and notebook reads its configuration from this module at import tim
 | `PAD_TIME` → `PADDING` | 0.3 s → 60 samples | Reflect padding of each patch for its CWT. It only reaches bins outside the scored windows |
 | `BASELINE_WINDOW` | `None` | No baseline correction: a baseline window would shift each patch by data of the other one. The 0.1 Hz high-pass removes drift |
 | `MIN_REACTION_TIME` | 0.5 s | Trials with a button press earlier than this after onset are dropped (about 1.4 % of trials) |
-| `METRIC_WINDOWS` | `full`, `analysis` = (0, 0.4) s, `reference` = (−1.0, −0.7) s | Time windows the metrics are computed on (`button` was removed) |
+| `METRIC_WINDOWS` | `full` = `PATCH_WINDOWS`, `analysis` = `{'pre': PRE_TARGET_WINDOW, 'post': POST_TARGET_WINDOW}` | Time windows the inference metrics are computed on, per patch. Bins reaching into a patch's reflect padding are left out, so `full` is every valid bin of the patch. The pre-stimulus reference is `analysis` of the pre patch (`reference` and `button` were removed) |
 | `CHORDER_STANDARD`, `N_CHANNELS` | 23 channels | Channel order used everywhere (see table below) |
 | `SEED` | 42 | `torch.manual_seed`, fold shuffling, ICA and autoreject |
 | `EPS` | 1e-8 | Numerical guard in metrics |
@@ -594,7 +594,7 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 `metadata.json` contains:
 
-- `hyperparameters`: batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, and with `--masked` `n_neighbors` and `n_eval_channels`. Inference has to use the same `n_neighbors`.
+- `hyperparameters`: `target_mode`, `k_folds`, batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, and with `--masked` `n_neighbors` and `n_eval_channels`. Inference reads `target_mode`, `k_folds`, `masked` and `n_neighbors` from here. The file is written when all folds are done. Inference has to use the same `n_neighbors`.
 - `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken.
 - `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`.
 
@@ -602,54 +602,74 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 ### 3. Inference: `run_inference.py`
 
-Reconstructs every fold's **held-out test subjects** with that fold's best checkpoint, for baseline and (optionally) post-patching data. It stores targets, reconstructions and per-trial metrics.
-
-> **Not yet adapted to the pre/post patch design.** This section describes the previous single-window inference, and `run_inference.py` still uses the removed `TARGET_TIME_WINDOW` and `FINETUNE_EPOCHS_DIR`, so it fails with the current settings. The windows below are those of the old files.
+Reconstructs every fold's **held-out baseline test trials** with that fold's best checkpoint and, with `--postpatch`, a sixth of the post-patching trials per fold. It stores targets, reconstructions and per-trial metrics for both patches of every trial.
 
 **CLI**
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `--model_name` | *required* | Folder under `outputs/finetune_outputs/` |
-| `--target_mode` | `wavelet` | Must match the training mode |
-| `--postpatch` | off | Also reconstruct the post-patching epochs of each fold's test subjects |
+| `--postpatch` | off | Also reconstruct post-patching trials, each in one fold (see step 7) |
+| `--target_mode`, `--masked`, `--n_neighbors` | `wavelet`, off, `N_NEIGHBOURS` | **Fallbacks only.** Inference reads these from the run's `metadata.json`; the CLI values are used, with a warning, only for runs whose metadata doesn't record them |
+| `--injection` | off | Placeholder, only prints a message |
 
-**Steps per fold** (k = 6 is hard-coded here):
+**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, and `k_folds` falls back to the number of numbered fold folders.
 
-1. Rebuild the folds with `KFoldSplitter(FINETUNE_EPOCHS_DIR, seed=SEED)`. These are the same splits as in training, as long as the data directory is unchanged.
-2. Build the test `FinetuneDataset` from baseline epochs (`log=True, normalize=True`).
-3. Instantiate the model from the current settings and load `{fold}/checkpoint-best_val.pth`. A fold without this file is skipped. The model runs in `eval()` on GPU when available.
-4. Delete the fold's output folder `{model_name}/{fold}/` if it exists, so no file of a previous run (e.g. an old `postpatch_reconstruction.h5` or time series file) is left next to the new outputs. Anything stored there by hand is deleted too.
-5. `run_reconstruction`: batches of 256 go through `model.get_unflattened_output` under autocast. For every trial it computes metrics (`core.utils.get_inference_metrics`, band-wise with `settings.FREQ_BAND_INDICES`) and writes them (`core.io.save_inference_trial_hdf`).
-6. With `--postpatch`: load the **same test subjects'** epochs from `PATCH_EPOCHS_DIR` and wavelet targets from `PATCH_WAVELET_DIR`, then repeat step 5.
+**Steps**
 
-Every subject is a test subject in exactly one fold. Merging the six folds therefore gives out-of-sample reconstructions for **every subject, exactly once**.
+1. Load all baseline input/target pairs with `KFoldSplitter` and rebuild every fold's split from its saved `keys.json` (`io.load_training_split_keys`, `KFoldSplitter.split_from_keys`), so the test sets are exactly those of training. Keys missing from the loaded data, e.g. after a rebuild of the dataset, are reported.
+2. With `--postpatch`, split the post-patching trials with `split_within_subjects` (same seed and *k*) and use fold *i*'s test set for fold *i*'s model (see below).
+3. With `masked`, load the interpolated channels of both sessions from their `epochs_manifest.csv` and build the cluster table with the run's `n_neighbors`.
+4. Per fold: skip the fold if it has no `checkpoint-best_val.pth`, and load `target_stats.json` (required in wavelet mode).
+5. Build the test `FinetuneDataset` with `normalize=False` (dB targets), the fold's `target_stats` and the interpolations, load the model strictly from the checkpoint and switch it to `eval()`.
+6. Delete the fold's output folder `{model_name}/{fold}/` if it exists, so no file of a previous run is left next to the new outputs. Anything stored there by hand is deleted too.
+7. `run_reconstruction` on the baseline test set, then, with `--postpatch`, on the fold's post-patching trials, whose keys are saved as `postpatch_keys.json`.
+
+**Post-patching folds.** With within-subject folds every subject is a test subject of every fold, so the post-patching trials are split into the same *k* folds with the same stratified slicing per subject × stimulus. Every baseline and every post-patching trial is reconstructed exactly once, and each subject's trials of both sessions are spread evenly over the *k* models, so differences between the fold models cancel in the session contrast.
+
+**`run_reconstruction`**, per batch of 256 samples (patches):
+- **Reconstruction** (`reconstruct_batch`): without masking, one pass of `get_unflattened_output`. With masking, one pass per channel *c*: *c*'s cluster is hidden in every sample of the batch, and row *c* of the output is taken from that pass. That is 23 passes per batch.
+- **Back to dB**: `dataset.target_stats.denormalize(output)`. The fold's normalization is one global scale, so errors in dB are the normalized errors times the fold's σ: R² and NMAE are unchanged, and all folds share one scale.
+- **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them.
+- **Metrics per window** of `METRIC_WINDOWS`: the output is set to NaN outside the patch's valid bins (`valid_wavelet_bins` over the whole patch, i.e. the bins that don't reach into the reflect padding), both arrays are cut to the window with `cut_to_timewindow` ([start, end)), and `get_inference_metrics` computes the NaN-aware metrics. The saved output keeps all bins of the allowed channels.
+
+| Window | pre patch | post patch | Scored bins per channel |
+|---|---|---|---|
+| `full` | −1.3 … −0.3 s | −0.3 … 0.7 s | all valid bins: 6 668 of 10 000 |
+| `analysis` | −1.0 … −0.7 s (`PRE_TARGET_WINDOW`) | 0.0 … 0.4 s (`POST_TARGET_WINDOW`) | 60 × 50 = 3 000 / 80 × 50 = 4 000 (all valid) |
+
+The per-trial pre-stimulus correction is ΔE = `analysis` of the post patch − `analysis` of the pre patch.
 
 **Output layout** (`outputs/inference_outputs/{model_name}/{fold}/`):
 
 ```text
-baseline_reconstruction.h5   /   postpatch_reconstruction.h5
+baseline_reconstruction.h5   /   postpatch_reconstruction.h5        postpatch_keys.json (with --postpatch)
 └── {subject}/                         e.g. STMD11
     └── {stimulus}/                    e.g. left_2, global
         └── {id}/                      e.g. 17  (HDF5 key, i.e. a string)
-            ├── target   (23, 50, 200) float32, gzip   z-scored dB wavelet target
-            ├── output   (23, 50, 200) float32, gzip   reconstruction
-            └── attrs (one pair per time window):
-                ├── {window}_metrics_json           trial-level Metrics as JSON
-                └── {window}_channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
+            ├── attrs: interpolated    indices of the trial's interpolated channels (NaN rows with masking)
+            ├── pre/                   pre-stimulus patch (−1.3 … −0.3 s)
+            │   ├── target   (23, 50, 200) float32, gzip   dB wavelet target
+            │   ├── output   (23, 50, 200) float32, gzip   reconstruction in dB, NaN rows for interpolated channels
+            │   └── attrs (one pair per time window):
+            │       ├── {window}_metrics_json           trial-level Metrics as JSON
+            │       └── {window}_channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
+            └── post/                  post-stimulus patch (−0.3 … 0.7 s), same content
 ```
 
-`{window}` is every key of `METRIC_WINDOWS` in `core/settings.py`. Files of the previous design contain `full` (−0.2–0.8 s), `analysis` (0–0.4 s), `button` (0.4–0.8 s) and `reference` (−0.2–0 s). The current `METRIC_WINDOWS` has `full` and `analysis` (both the post target, 0–0.4 s) and `reference` (the pre target, −1.0 … −0.7 s); `button` was removed, so `Trial` can no longer select it. For each window, `run_reconstruction` crops target and output with `cut_to_timewindow` and computes the metrics on the crop. The crops are *not* re-normalised: only the full window is z-scored. Files written before the window metrics were added only contain `metrics_json` / `channel_metrics_json`, and the current `Trial` class can't read them, so re-run inference for such models.
+`{window}` is every key of `METRIC_WINDOWS`: `full` and `analysis`. Files of the previous design have no `pre/` / `post/` level and also contain `button` and `reference` windows; the current code doesn't read them. Metrics of interpolated channels are NaN (JSON `NaN`).
 
-(In `autoencoder` mode, `target`/`output` are (23, 200) µV and there are no band-wise metrics.)
+(In `autoencoder` mode, `target`/`output` are (23, 200) µV, there are no band-wise metrics and no valid-bin masking.)
 
 #### Metric definitions: `core.utils.get_inference_metrics` / `calculate_bandwise_metrics`
 
-Metrics are computed per trial, **in the target space**, i.e. the per-trial z-scored dB wavelet magnitude. Notation: `σ_sig(c, f)` = standard deviation **over time** of the target for channel *c* and frequency *f*, and `σ_rec(c, f)` is the same for the reconstruction.
+Metrics are computed per trial and patch, **in dB** (the model outputs are converted back with the fold's `TargetStats`), on the bins of the metric window. Notation: `σ_sig(c, f)` = standard deviation **over time** of the target for channel *c* and frequency *f*, and `σ_rec(c, f)` is the same for the reconstruction.
+
+**NaN-aware.** A bin that is NaN in the output or the target (outside the patch's valid bins, interpolated channels with masking) is left out of every metric: means and SDs use `np.nanmean` / `np.nanstd`, and `calculate_r2` only uses positions where both values are finite. A channel or band without any finite bin gets NaN metrics, so an interpolated channel's channel metrics are NaN while the trial-level metrics cover the allowed channels only.
 
 | Field (`Metrics`) | Trial level | Channel level (`ch_i`) |
 |---|---|---|
-| `r2` | `r2_score` over the flattened (23·50·200) tensor | `r2_score` over the channel's (50·200) values |
+| `r2` | `r2_score` over the scored bins of all allowed channels | `r2_score` over the channel's scored bins |
 | `mae` | mean \|target − output\| | same, within the channel |
 | `signal_volatility` | mean over (c, f) of `σ_sig` | mean over f of `σ_sig(c, ·)` |
 | `recon_volatility` | same for `σ_rec` | same for `σ_rec` |
@@ -670,6 +690,8 @@ The whole tensor and every channel are corrected separately, each with its own s
 
 #### Reading inference results: `core.io` / `core.io_models`
 
+> **Not yet adapted to the `pre/` / `post/` layout.** `load_inference_trials` and `Trial` still expect `target`, `output` and the metric attributes directly in the `{id}` group, as in files of the previous design. They need to read the patch subgroups, and the aggregation in `plot_data_processing` (which uses `np.mean`) needs NaN-aware means for interpolated channels.
+
 ```python
 from core import io, settings
 trials = io.load_inference_trials(settings.INFERENCE_DIR / "my_model" / "1" / "baseline_reconstruction.h5",
@@ -680,8 +702,7 @@ t.subject, t.condition, t.idx, t.window  # metadata
 t.target_data, t.recon_data            # np.ndarray, read lazily from HDF5 on every access
 t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # selected window (here: analysis)
 t.channel_metrics["ch_8"].nmae         # O1, selected window
-t.full_metrics.mae                     # a specific window, independent of t.window
-t.reference_channel_metrics["ch_8"].mae  # {full,analysis,reference}_metrics / _channel_metrics
+t.full_metrics.mae                     # a specific window, independent of t.window: {full,analysis}_metrics / _channel_metrics
 ```
 
 `Trial` is a lazy view on an open HDF5 group. Every window's metrics are available as `{window}_metrics` / `{window}_channel_metrics`, parsed from the JSON attributes into `Metrics` dataclasses on first access and cached. `metrics` / `channel_metrics` return the metrics of the trial's `window` (default `"full"`), i.e. the same cached objects as `{window}_metrics` / `{window}_channel_metrics`. All analysis helpers read `metrics` / `channel_metrics`, so the window passed to `load_inference_trials` selects the window of the whole analysis, including the volatility corrections. An unknown window raises a `ValueError` when the trial is created.
@@ -808,10 +829,10 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 |---|---|
 | `settings.py` | All configuration (see [Configuration](#configuration-coresettingspy)) |
 | `architectures.py` | `BaseMLPWrapper` (LaBraM + MLP head, exposes `get_num_layers` / `no_weight_decay` for the optimiser). `EEGSpectralDecoder` and `EEGAutoencoder` with `forward` (flattened output) and `get_unflattened_output` (per-channel shaped output) |
-| `datasets.py` | `FinetuneDataset` (cuts every trial into one sample per patch, converts float16 targets to float32 dB, normalizes them with `target_stats` on access, returns `(input, target, metadata, mask)`; `masked_targets()` yields `(dB target, mask)` per sample for fitting the stats). `FinetuneSplits` (holds one fold's train/val/test dicts and `keys`; `describe()` summarises the split, `initialize_datasets()` builds the three datasets and fits `target_stats`). `KFoldSplitter`: loads input/target pairs once, `split_by_subject` (subject-wise k-fold split), `split_within_subjects` (stratified within-subject k-fold split on `(subject, stimulus, id)` keys), `_select` (keys → nested epoch dict), `_keys_of` (nested epoch dict → keys) |
-| `utils.py` | Masked-channel reconstruction: `nearest_electrodes`, `build_neighbor_mask` ((23, 23) cluster table, row *c* = *c* and its nearest electrodes), `channel_permutation` (seeded per-sample order of the allowed training target channels), `balanced_eval_channels` (greedy balanced evaluation channels). `calc_wavelet` (padded CWT magnitude, cycles per frequency from `morlet_cycles`), `morlet_cycles` (`min(max_cycles, 2π·f·max_reach/3)`), `wavelet_time_sd` (envelope SD in s), `wavelet_reach` (3 SD reach in s), `valid_wavelet_bins` ((freqs, time) mask of the bins of a patch that lie in a target window and are computed from real data of the patch only), `cut_to_timewindow` (crop by seconds, sample indices rounded), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics`, `avg_metrics_over_folds` |
-| `io.py` | `EpochIO` (`save`, `load_all_epochs`, `load_subject` for `.pt` files, files read in sorted order; `load_all_input_target_data` pairs input epochs with their targets by `(subject, stimulus, id)`). `load_interpolated_channels` (interpolated channels per trial from `epochs_manifest.csv`). `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `save_time_series_metrics_hdf` (per-band time series, see [Time series metrics](#time-series-metrics)), `load_inference_trials` (filters for subjects, conditions and trial ids as ints or strings, `exclude_subjects`, the time `window` of the returned trials, and an optional `time_series_path`). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` |
-| `io_models.py` | `TargetStats` dataclass (`mu`, `sigma`; `fit` on masked targets, `normalize` / `denormalize`, `from_dict` / `to_dict`). `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis,reference}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
+| `datasets.py` | `FinetuneDataset` (cuts every trial into one sample per patch, converts float16 targets to float32 dB, normalizes them with `target_stats` on access, returns `(input, target, metadata, mask)`; `masked_targets()` yields `(dB target, mask)` per sample for fitting the stats). `FinetuneSplits` (holds one fold's train/val/test dicts and `keys`; `describe()` summarises the split, `initialize_datasets()` builds the three datasets and fits `target_stats`). `KFoldSplitter`: loads input/target pairs once, `split_by_subject` (subject-wise k-fold split), `split_within_subjects` (stratified within-subject k-fold split on `(subject, stimulus, id)` keys), `_select` (keys → nested epoch dict), `_keys_of` (nested epoch dict → keys), `split_from_keys` (rebuilds a training run's folds from its saved keys) |
+| `utils.py` | Masked-channel reconstruction: `nearest_electrodes`, `build_neighbor_mask` ((23, 23) cluster table, row *c* = *c* and its nearest electrodes), `channel_permutation` (seeded per-sample order of the allowed training target channels), `balanced_eval_channels` (greedy balanced evaluation channels). `calc_wavelet` (padded CWT magnitude, cycles per frequency from `morlet_cycles`), `morlet_cycles` (`min(max_cycles, 2π·f·max_reach/3)`), `wavelet_time_sd` (envelope SD in s), `wavelet_reach` (3 SD reach in s), `valid_wavelet_bins` ((freqs, time) mask of the bins of a patch that lie in a target window and are computed from real data of the patch only), `cut_to_timewindow` (crop by seconds, sample indices rounded), `cut_to_size` (trim to a multiple of the window), `add_prefix_dict_keys`, `format_model_input` (single trial → `(1, N, A, 200)/100`), `reconstruct_model_output` (load checkpoint + predict), `calculate_r2`, `calculate_bandwise_metrics`, `get_inference_metrics` (NaN-aware: NaN bins are left out), `avg_metrics_over_folds` |
+| `io.py` | `EpochIO` (`save`, `load_all_epochs`, `load_subject` for `.pt` files, files read in sorted order; `load_all_input_target_data` pairs input epochs with their targets by `(subject, stimulus, id)`). `load_interpolated_channels` (interpolated channels per trial from `epochs_manifest.csv`). `load_training_split_keys` (every fold's `keys.json` of a training run, keys as tuples). `save_inference_trial_hdf` writes one patch of a trial to `{subject}/{stimulus}/{id}/{patch}`. `load_model_log_data` (per-fold `log.txt`). `save_inference_trial_hdf`, `save_time_series_metrics_hdf` (per-band time series, see [Time series metrics](#time-series-metrics)), `load_inference_trials` (filters for subjects, conditions and trial ids as ints or strings, `exclude_subjects`, the time `window` of the returned trials, and an optional `time_series_path`). `NumpyEncoder` for JSON. `save_report` (list of dicts → CSV, used for all QC reports and the manifest). Legacy `save_dict_to_hdf` |
+| `io_models.py` | `TargetStats` dataclass (`mu`, `sigma`; `fit` on masked targets, `normalize` / `denormalize`, `from_dict` / `to_dict`). `Metrics` dataclass (all metric fields incl. `corrected_mae(_bandwise)`, `from_dict` / `to_dict`). `Trial` dataclass (lazy `target_data`, `recon_data`; cached `{full,analysis}_metrics` / `_channel_metrics`; `window` field, and `metrics` / `channel_metrics` returning the metrics of that window; optional `time_series_data` group and `time_series(metric, bands=None)` returning `{band: (23, 200)}`, read uncached) |
 | `io_utils.py` | `vars_to_filename` / `vars_from_filename` (filename convention), `nested_group_to_dict`, `save_figure`, `generate_hash` (short SHA-256 of a dict, used for the ICA cache key) |
 | `plot_data_processing.py` | Time series: `calc_metric_time_series` / `calc_time_series_metrics` (`{band: (23, 200)}` of `TIME_SERIES_METRICS` metrics, see [Time series metrics](#time-series-metrics)), `calc_subjectwise_time_series`, `get_subjectwise_time_series_mean` (mean ± SEM over subjects), `get_subjectwise_time_series_difference` (paired post − baseline difference per subject, mean ± SEM). Volatility correction: `fill_corrected_maes` (see [Metric definitions](#metric-definitions-coreutilsget_inference_metrics--calculate_bandwise_metrics)). Trial aggregation: `extract_metric`, `get_metric_stats`, `get_bandwise_metric_stats`, `get_channel_metric_stats`, `get_channel_bandwise_metric_stats` (mean, SEM with `ddof=1`, SD with `ddof=0`). Subject level: `calc_subjectwise_metric_stats`, `calc_subjectwise_channel_metric_stats` (`group_by='channel'` returns `{channel: {subject: {band}}}`), `get_subjectwise_metric_mean` (mean ± SEM of subject means). Subject-level volatility adjustment: `calc_subject_adjusted_metric` / `calc_subject_adjusted_channel_metric` (baseline and adjusted post-patching subject means, slopes). `calc_subjectwise_channel_d` (subject-level Cohen's d_z or Glass's Δ per channel and band, selectable `ddof`). `calc_channel_glass_delta` and `calc_channel_bandwise_glass_delta` (pooled-trial Glass's Δ, no longer used in the notebook). `rename_chans_to_mne`, `create_topomap_info` (mne.Info in model channel order with 10-20 labels at the positions of the recording EGI HydroCel-65 electrodes, `VREF` = Cz). Viewer helpers `get_channel_viewer_metrics`, `order_to_channel_viewer_format` |
 | `plotting.py` | `single_channel_viewer`, `show_reconstructions`, `set_heatmap_formatting`, `plot_grouped_bar`, `distribution_viewer`, `correlation_plot`, `session_correlation_plot` (bands × metrics grid, one colour and fitted line per session, adjustable point size), `save_button`, `save_heatmap`, `save_line_plot`, `plot_time_series` (lines with ±SEM bands, optional vertical and horizontal markers), `plot_time_series_grid` (one `plot_time_series` panel per band, separate y-axes). `plot_grouped_bar` places the bars of a group side by side for any number of series |
@@ -917,13 +938,10 @@ uv run python ridge_leakage.py --compare_root data/processed_raw --compare_label
 
 **Design change in progress**
 - `run_general_finetune.py` trains on pre/post patches with masked loss and, with `--masked`, masked-channel reconstruction. It has been run end to end on synthetic data on the CPU only, not yet on the rebuilt dataset on a GPU.
-- `run_inference.py` accepts `--masked` / `--n_neighbors` but doesn't use them yet: it has to hide every allowed target channel in turn (one pass per channel with `get_unflattened_output(..., channel_mask=...)`) and keep each pass's target channel.
-- `run_inference.py` is not adapted yet:
-  - It builds its datasets without masks, so the targets stay in dB while the model outputs normalized values. It has to load `target_stats.json` and denormalize the outputs before computing metrics.
-  - It re-runs the split instead of reading `keys.json`.
-  - With the within-subject split, every subject is a test subject of every fold, so every post-patching trial is reconstructed by all k fold models and appears k times in the merged results. Either compare per fold or assign the post-patching trials to folds.
-  - It and `plasticity_tensor_analysis.ipynb` still use the removed `TARGET_TIME_WINDOW` and fail with the current settings.
-- `micro_evaluation.ipynb` and `macro_evaluation.ipynb` still call `KFoldSplitter` and `initialize_datasets` with the old arguments.
+- `run_inference.py` follows the new design (see [3. Inference](#3-inference-run_inferencepy)). Training and inference have been run end to end on synthetic data on the CPU only, not yet on the rebuilt dataset on a GPU.
+- **The inference files can't be analysed yet.** `io.load_inference_trials` and `Trial` don't read the `pre/` / `post/` subgroups, the plasticity notebooks still select the removed `reference` window, the aggregation in `plot_data_processing` uses `np.mean` and would propagate the NaN metrics of interpolated channels, and the time series writer (`save_time_series_metrics_hdf`) has no patch level.
+- **Session comparisons with interpolated channels.** Trial-level metrics average over each trial's allowed channels, which differ between trials and can differ systematically between sessions (cap refit). Aggregate per subject × channel first and compare sessions over the channels a subject has in both.
+- `plasticity_tensor_analysis.ipynb` still uses the removed `TARGET_TIME_WINDOW`. `micro_evaluation.ipynb` and `macro_evaluation.ipynb` still call `KFoldSplitter` and `initialize_datasets` with the old arguments.
 - The saved data has to be rebuilt with `make_dataset.py` for the `input_epochs/` layout.
 
 **Data preparation**
@@ -943,7 +961,7 @@ uv run python ridge_leakage.py --compare_root data/processed_raw --compare_label
 - `utils.avg_metrics_over_folds` averages the folds' log lines by position, so all folds need the same number of lines. Early stopping (not implemented) would break this.
 
 **Fold reproducibility**
-- Inference and the notebooks rebuild the folds from the *current* contents of the baseline epoch folders. Files are read in sorted order, so moving the data to another filesystem no longer changes the splits, but any change to the set of trials does: adding or removing subjects, a missing or unreadable target, or a rebuilt dataset. Test sets would then no longer match training, without a warning. Training saves every fold's split as `keys.json`; inference should build its test sets from it.
+- `run_inference.py` rebuilds every fold from its saved `keys.json` and warns about keys missing from the loaded data. The notebooks still rebuild the folds from the *current* contents of the baseline epoch folders. Files are read in sorted order, so moving the data to another filesystem no longer changes the splits, but any change to the set of trials does: adding or removing subjects, a missing or unreadable target, or a rebuilt dataset. Test sets would then no longer match training, without a warning. The notebooks should build their test sets from `keys.json` like inference.
 
 **Inference / metrics**
 - In the trial-level and band-wise NMAE, `EPS` is added to the ratio (`mae / std + eps`), not to the denominator. The channel-level NMAE adds it to the denominator.

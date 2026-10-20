@@ -119,6 +119,8 @@ def main(opts):
 
     run_metadata = {
         "hyperparameters": {
+            "target_mode": opts.target_mode,
+            "k_folds": opts.k_folds,
             "batch_size": BATCH_SIZE,
             "epochs": EPOCHS,
             "warmup_steps": WARMUP_EPOCHS,

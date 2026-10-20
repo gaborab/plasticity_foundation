@@ -192,8 +192,8 @@ def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, h5file:
 
 
 
-def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]]):
-    trial_path = f"{subject}/{condition}/{idx}"
+def save_inference_trial_hdf(subject: str, condition: str, idx: int, patch: str, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]]):
+    trial_path = f"{subject}/{condition}/{str(idx)}/{patch}"
     trial_group = h5file.create_group(trial_path)
     trial_group.create_dataset("target", data=trial_target, compression="gzip")
     trial_group.create_dataset("output", data=trial_output, compression="gzip")
@@ -202,7 +202,18 @@ def save_inference_trial_hdf(subject: str, condition: str, idx, h5file: h5py.Fil
         trial_group.attrs[f"{name}_metrics_json"] = json.dumps(metrics, cls=NumpyEncoder)
         trial_group.attrs[f"{name}_channel_metrics_json"] = json.dumps(ch_metrics, cls=NumpyEncoder)
 
-
+def load_training_split_keys(path: Path, k_folds:int) -> List[Dict[str, List[Tuple[str, str, int]]]]:
+    """
+    Loads the keys.json of every fold of a training run in path (folders 1..k_folds) and returns one
+    {"train": [...], "val": [...], "test": [...]} dict of (subject, condition, id) keys per fold.
+    JSON stores the keys as lists, they are converted back to tuples so they can be compared with the epoch keys.
+    """
+    result = []
+    for i in range(k_folds):
+        with open(path / str(i+1) / "keys.json", "r", encoding="utf-8") as f:
+            fold_keys = json.load(f)
+        result.append({split: [tuple(key) for key in keys] for split, keys in fold_keys.items()})
+    return result
 
 def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full", time_series_path: Optional[Path] = None) -> List[Trial]:
     """
