@@ -62,7 +62,7 @@ TARGET_POOL = 5
 TARGET_FS = RSFREQ // TARGET_POOL  # bins per second of the wavelet targets
 SPECTRAL_TIME_BINS = PATCH_SIZE // TARGET_POOL  # time bins of the wavelet target of one patch
 # scored parts of the patches, bins whose wavelet reaches outside their patch are masked as well (utils.valid_wavelet_bins)
-PRE_TARGET_WINDOW = (-1.0, -0.7)  # wavelet support -1.29 to -0.41 s
+PRE_TARGET_WINDOW = (-1.0, -0.6)  # 0.4 s like POST_TARGET_WINDOW, so the pre and post errors average equally many bins; wavelet support -1.29 to -0.32 s
 POST_TARGET_WINDOW = (0.0, 0.4)  # wavelet support -0.29 to 0.69 s at 5 Hz
 TARGET_WINDOWS = [PRE_TARGET_WINDOW, POST_TARGET_WINDOW]
 # time window arguments of FinetuneDataset: the saved inputs and targets span EPOCH_WINDOW and are cut into one sample per patch

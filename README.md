@@ -24,7 +24,7 @@ The previous model learnt the wavelet transform of its own input, so its error c
 - **Masked-channel reconstruction.** The model sees the EEG of all channels except a masked one (or a neighbourhood around it) and predicts the masked channel's wavelet target. Interpolated channels are never targets.
 - **Two patches per trial.** Every trial is split into a **pre-stimulus patch** (−1.3 … −0.3 s) and a **post-stimulus patch** (−0.3 … 0.7 s), one LaBraM patch (1 s, 200 samples) each. They go through the model in **separate forward passes** and get **separately computed wavelet targets**, so the two share no data.
 - **Pooled targets.** The wavelet power is averaged over 25 ms bins (`TARGET_POOL` = 5 samples), 40 bins per patch, over 5–45 Hz. The wavelets are much wider than one sample, so little resolution is lost, and the head predicts 2 000 instead of 10 000 values per channel.
-- **Scored windows.** Post 0 … 0.4 s (before any button press), pre −1.0 … −0.7 s. With the wavelet cycles used (≤ 0.29 s reach), every scored bin is computed from real data of its own patch only.
+- **Scored windows.** Post 0 … 0.4 s (before any button press), pre −1.0 … −0.6 s, both 0.4 s long so the pre and post errors average equally many bins. With the wavelet cycles used (≤ 0.29 s reach), every scored bin is computed from real data of its own patch only.
 - **Pre-stimulus correction.** The pre-patch error serves as a reference for the post-patch error of the same model, which cancels cap-refit and session effects to first order. Within-session contrasts across the four recording blocks of a session give a cap-free check.
 - **Within-subject folds** (`KFoldSplitter.split_within_subjects`), so a subject label can be given to the model.
 
@@ -160,7 +160,7 @@ Every script and notebook reads its configuration from this module at import tim
 | `INJECTION_ONSET_RAMP`, `INJECTION_SOURCE_DEPTH`, `INJECTION_LABELS`, `MIXED_INJECTION_GAINS`, `INJECTION_N_ROI` | 0.02 s, 0.7, `["pericalcarine"]`, V1 +10 % / lateral occipital +25 % / lingual −10 %, 4 | Gain injection of `ridge_leakage.py` and `labram_inj_test.py`: raised-cosine ramp of the gain after onset, depth of the sphere-model dipole, aparc labels of the fsaverage source, sources and gains of a mixed injection, and the number of channels (where the injected pattern is strongest) the results are averaged over |
 | `N_NEIGHBOURS` | 4 | Nearest electrodes (HydroCel-65 positions) hidden together with a target channel in masked-channel reconstruction. Default of `--n_neighbors` in training and inference, and of the "cluster" scheme of `ridge_leakage.py` |
 | `LOSS_WINDOWS` | `{'pre': PRE_WINDOW, 'post': POST_WINDOW}` | Target bins of every patch used by the training loss, the validation metrics and the target normalization, masked with `valid_wavelet_bins`. The whole patch keeps every bin computed from the patch's own data (1 231 of 2 000 pooled bins per patch). Set to `PRE_TARGET_WINDOW` / `POST_TARGET_WINDOW` to train on the scored bins only |
-| `PRE_TARGET_WINDOW` | (−1.0, −0.7) s | Scored part of the pre patch. Wavelet support −1.29 … −0.41 s |
+| `PRE_TARGET_WINDOW` | (−1.0, −0.6) s | Scored part of the pre patch, 0.4 s like `POST_TARGET_WINDOW`. Wavelet support −1.29 … −0.32 s |
 | `POST_TARGET_WINDOW` | (0.0, 0.4) s | Scored part of the post patch, before any button press. Wavelet support −0.29 … 0.69 s |
 | `PAD_TIME` → `PADDING` | 0.3 s → 60 samples | Reflect padding of each patch for its CWT. It only reaches bins outside the scored windows |
 | `BASELINE_WINDOW` | `None` | No baseline correction: a baseline window would shift each patch by data of the other one. The 0.1 Hz high-pass removes drift |
@@ -642,7 +642,7 @@ Reconstructs every fold's **held-out baseline test trials** with that fold's bes
 | Window | pre patch | post patch | Scored bins per channel |
 |---|---|---|---|
 | `full` | −1.3 … −0.3 s | −0.3 … 0.7 s | all valid bins: 1 231 of 2 000 |
-| `analysis` | −1.0 … −0.7 s (`PRE_TARGET_WINDOW`) | 0.0 … 0.4 s (`POST_TARGET_WINDOW`) | 12 × 50 = 600 / 16 × 50 = 800 (all valid) |
+| `analysis` | −1.0 … −0.6 s (`PRE_TARGET_WINDOW`) | 0.0 … 0.4 s (`POST_TARGET_WINDOW`) | 16 × 50 = 800 in both patches (all valid) |
 
 The per-trial pre-stimulus correction is ΔE = `analysis` of the post patch − `analysis` of the pre patch.
 
