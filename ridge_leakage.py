@@ -25,7 +25,7 @@ Masked prediction, per build, session and subject:
       the difference shows how much interpolation makes a channel predictable
     - ridge penalty: RIDGE_ALPHA times the mean variance of the visible channels (training data), i.e. nearly unregularised,
       so an exact linear dependency would show up as R² ~ 1
-    - eigenvalue check: smallest / largest eigenvalue of the 23-channel covariance of the 5-60 Hz signal (all trials);
+    - eigenvalue check: smallest / largest eigenvalue of the 23-channel covariance of the broadband (settings frequency window) signal (all trials);
       an exact linear dependency gives ~0 (~1e-12 or less in double precision)
 
 Gain injection (--inject GAIN [GAIN ...], baseline session of the main build only):
@@ -56,7 +56,7 @@ Outputs (outputs/ridge_leakage/<label>/ and outputs/plots/ridge_leakage/<label>/
                             (intact target channels)
     interpolation.csv       per session and band: R² of interpolated minus intact target channel (single masking),
                             over subject x channel pairs with both test sets
-    per_channel.csv         per channel: interpolation rate per session, median R² (5-60 Hz, subject-sessions pooled)
+    per_channel.csv         per channel: interpolation rate per session, median R² (broadband, subject-sessions pooled)
     eigenvalues.csv         per session and subject
     comparison_<compare_label>.csv  (--compare_root) per session, subject, band, scheme and channel: R² of both builds
                                     and their difference (main - compare); the compare build gets its own full output folder
@@ -94,7 +94,8 @@ SESSIONS = {"baseline": settings.FINETUNE_DIR.name, "post-patching": settings.PA
 N_NEIGHBOURS = settings.N_NEIGHBOURS
 RIDGE_ALPHA = 1e-3
 MIN_TEST_TRIALS = 10  # R² of fewer pooled test trials is too noisy, especially for the interpolated test sets
-BANDS = {"5-60 Hz": (5, 60), **settings.FREQ_BANDS}
+BROADBAND = settings.FREQ_WINDOW_LABEL  # all frequencies of the wavelet targets, e.g. "5-45 Hz"
+BANDS = {BROADBAND: settings.SPECTRAL_DECODER_PARAMS["freq_window"], **settings.FREQ_BANDS}
 CHANNEL_NAMES = [c.replace("EEG ", "").replace("-REF", "") for c in settings.CHORDER_STANDARD]
 N_CH = len(CHANNEL_NAMES)
 SOURCE_DEPTH = settings.INJECTION_SOURCE_DEPTH  # dipole position as a fraction of the head radius, towards O1/O2
@@ -208,7 +209,7 @@ def analyse_subject(session, subject, X, bad, neighbours, rng):
     rows, eig_ratio = [], np.nan
     for band, edges in BANDS.items():
         Xf = band_filter(X, edges)
-        if band == "5-60 Hz":
+        if band == BROADBAND:
             ev = np.linalg.eigvalsh(np.cov(Xf.transpose(1, 0, 2).reshape(N_CH, -1)))
             eig_ratio = ev[0] / ev[-1]
         stats = trial_stats(Xf)
@@ -332,7 +333,7 @@ def run_build(root, label, neighbours, info):
     interp_table["R² interpolated - intact"] = [fmt(m, a, b) for m, a, b in zip(interp_table["median"], interp_table.q1, interp_table.q3)]
     interp_table = interp_table[["session", "band", "R² interpolated - intact", "n_pairs"]]
 
-    broad = r2[r2.band == "5-60 Hz"]
+    broad = r2[r2.band == BROADBAND]
     med = lambda scheme, test_set: broad[(broad.scheme == scheme) & (broad.test_set == test_set)].groupby("channel")["r2"].median().reindex(CHANNEL_NAMES)
     per_channel = pd.DataFrame({
         "channel": CHANNEL_NAMES,
@@ -352,7 +353,7 @@ def run_build(root, label, neighbours, info):
               "R² over the pooled test samples of trials with an intact target channel; table values are the median [quartiles] "
               "over subjects of the mean over channels.", "",
               "## Exact linear dependency", "",
-              f"Smallest / largest eigenvalue of the 23-channel covariance (5-60 Hz): median {eig['ratio'].median():.1e}, "
+              f"Smallest / largest eigenvalue of the 23-channel covariance ({BROADBAND}): median {eig['ratio'].median():.1e}, "
               f"minimum {eig['ratio'].min():.1e} over {len(eig)} subject-sessions. An exact linear dependency would give ~1e-12 or less.", "",
               "## R² of the masked channel", "", markdown_table(table), "",
               "## Interpolated vs intact target channel (single masking)", "",
@@ -361,7 +362,7 @@ def run_build(root, label, neighbours, info):
               markdown_table(interp_table, index=False), "",
               "## Per channel", "",
               "Interpolation rate: share of trials in which the channel is interpolated (recording- or autoreject-level). "
-              "R²: 5-60 Hz, median over subject-sessions.", "", markdown_table(per_channel, index=False), ""]
+              f"R²: {BROADBAND}, median over subject-sessions.", "", markdown_table(per_channel, index=False), ""]
     (out_dir / "report.md").write_text("\n".join(report), encoding="utf-8")
 
     for session in SESSIONS:

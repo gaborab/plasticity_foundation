@@ -39,18 +39,33 @@ def wavelet_reach(freqs, max_cycles, max_reach, n_sd: float = 3):
     return n_sd * wavelet_time_sd(freqs, morlet_cycles(freqs, max_cycles, max_reach))
 
 
-def valid_wavelet_bins(freqs, patch_window, target_window, fs, max_cycles, max_reach):
+def valid_wavelet_bins(freqs, patch_window, target_window, fs, max_cycles, max_reach, pool: int = 1):
     """
     Returns a (freqs, time) boolean mask over the samples of one patch (patch_window, sampled at fs from its start):
     True where the sample lies in target_window and the wavelet of that frequency reaches no further than the patch edges,
     i.e. the bin is computed from real data of the patch only, not from its reflect padding.
+    pool: samples per bin of targets pooled with pool_power, a pooled bin is valid only if all its samples are.
     """
     n_samples = round((patch_window[1] - patch_window[0]) * fs)
     times = patch_window[0] + np.arange(n_samples) / fs
     reach = wavelet_reach(freqs, max_cycles, max_reach)[:, None]
     in_target = (times >= target_window[0] - 1e-9) & (times <= target_window[1] + 1e-9)
     inside_patch = (times - reach >= patch_window[0] - 1e-9) & (times + reach <= patch_window[1] + 1e-9)
-    return in_target[None, :] & inside_patch
+    valid = in_target[None, :] & inside_patch
+    return valid.reshape(len(freqs), -1, pool).all(axis=-1)
+
+
+def pool_power(mag, pool: int):
+    """
+    Pools wavelet magnitudes (..., time) into bins of pool consecutive samples: the magnitude of the mean power of each bin,
+    sqrt(mean(mag^2)), so 20*log10 of a pooled bin is the bin's mean power in dB. The time length has to be a multiple of pool.
+    """
+    if pool == 1:
+        return mag
+    if mag.shape[-1] % pool:
+        raise ValueError(f"Time length {mag.shape[-1]} is not a multiple of the pooling factor {pool}")
+    power = mag.reshape(*mag.shape[:-1], -1, pool) ** 2
+    return np.sqrt(power.mean(axis=-1))
 
 
 def calc_wavelet(tensor_data, fs, freqs, pad, max_cycles, max_reach):
@@ -222,6 +237,9 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
     NaN-aware: a bin that is NaN in the output or the target (bins outside the metric window, interpolated channels in
     masked-channel reconstruction) is left out of every metric. Metrics without any finite bin, e.g. those of an
     interpolated channel, are NaN.
+    level_error: per channel |mean target - mean output| over the window's bins (and over the band's bins for
+    level_error_bandwise), i.e. the error of the predicted mean level, in which the unpredictable bin-to-bin fluctuation
+    averages out. The trial-level value is the mean over the channels, so errors of different channels do not cancel.
     Returns a dictionary containing the calculated metrics.
     """
     spectral = band_indices is not None
@@ -258,6 +276,7 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
         g_metrics = g_metrics.to_dict()
 
         ch_metrics_dict = {}
+        level_errors, level_errors_bandwise = [], []  # of every channel, averaged into the trial-level metric
         signal_channel_stds = np.nanmean(signal_stds, axis=1) if spectral else signal_stds
         recon_channel_stds = np.nanmean(recon_stds, axis=1) if spectral else recon_stds
         # channel-wise metrics
@@ -273,6 +292,8 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
 
             ch_metrics.signal_mean = np.nanmean(trial_target[i]).item()
             ch_metrics.recon_mean = np.nanmean(trial_output[i]).item()
+            ch_metrics.level_error = abs(ch_metrics.signal_mean - ch_metrics.recon_mean)
+            level_errors.append(ch_metrics.level_error)
 
             # channel-wise band-wise metrics
             if spectral:
@@ -281,8 +302,16 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
                 ch_metrics.r2_bandwise, ch_metrics.mae_bandwise, ch_metrics.signal_volatility_bandwise, ch_metrics.recon_volatility_bandwise, ch_metrics.nmae_bandwise, ch_metrics.signal_mean_bandwise, ch_metrics.recon_mean_bandwise = (
                     calculate_bandwise_metrics(trial_target[i], trial_output[i], signal_channel_freq_stds, recon_channel_freq_stds, band_indices=band_indices, eps=eps)
                 )
+                ch_metrics.level_error_bandwise = {band: abs(ch_metrics.signal_mean_bandwise[band] - ch_metrics.recon_mean_bandwise[band])
+                                                   for band in ch_metrics.signal_mean_bandwise}
+                level_errors_bandwise.append(ch_metrics.level_error_bandwise)
 
             ch_metrics_dict[ch_key] = ch_metrics.to_dict()
+
+        g_metrics["level_error"] = np.nanmean(level_errors)
+        if spectral:
+            g_metrics["level_error_bandwise"] = {band: np.nanmean([errors[band] for errors in level_errors_bandwise])
+                                                 for band in g_metrics["signal_mean_bandwise"]}
     return g_metrics, ch_metrics_dict
 
 

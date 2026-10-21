@@ -21,7 +21,8 @@ class FinetuneDataset(torch.utils.data.Dataset):
     Every trial is split into one sample per patch, e.g. a pre- and a post-stimulus sample, with the patch name in metadata["patch"].
     epoch_window: (start, end) in s of the saved input epochs and targets, the time axis is their last dimension.
     patch_windows: {patch name: (start, end) in s}, the windows the inputs and targets are cut to, each within epoch_window.
-    fs: sampling frequency of the inputs and targets.
+    fs: sampling frequency of the inputs. target_fs: time bins per second of the wavelet targets (pooled, see utils.pool_power),
+    None for targets sampled like the inputs.
     masks: {patch name: (freqs, time) boolean mask} of the target bins the loss and metrics use in each patch, see utils.valid_wavelet_bins.
     Without masks every target bin is used.
     target_stats: normalizes the targets returned by __getitem__ if normalize is set, samples keep the dB targets.
@@ -32,11 +33,13 @@ class FinetuneDataset(torch.utils.data.Dataset):
     """
 
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]], epoch_window: Tuple[float, float],
-                 patch_windows: Dict[str, Tuple[float, float]], fs: int, target_mode='wavelet', log: bool = True, normalize: bool = True,
+                 patch_windows: Dict[str, Tuple[float, float]], fs: int, target_fs: Optional[int] = None, target_mode='wavelet',
+                 log: bool = True, normalize: bool = True,
                  masks: Optional[Dict[str, np.ndarray]] = None, target_stats: Optional[TargetStats] = None,
                  interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0, n_eval_channels: int = 3):
         if target_mode not in ('autoencoder', 'wavelet'):
             raise ValueError(f"Unknown target mode '{target_mode}', expected 'autoencoder' or 'wavelet'")
+        target_fs = target_fs or fs
         self.samples = []
         self.perms = []
         self.eval_channels = []
@@ -72,7 +75,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
 
                     for patch, patch_window in patch_windows.items():
                         patch_input = utils.cut_to_timewindow(epoch_data, epoch_window, patch_window, fs)
-                        patch_target = patch_input if target_mode == 'autoencoder' else utils.cut_to_timewindow(target_data, epoch_window, patch_window, fs)
+                        patch_target = patch_input if target_mode == 'autoencoder' else utils.cut_to_timewindow(target_data, epoch_window, patch_window, target_fs)
                         self.samples.append((patch_input, patch_target, {**metadata, "patch": patch}))
                         self.perms.append(utils.channel_permutation((subj, cond, idx, patch), allowed, seed=seed))
         # fixed evaluation target channels, every channel evaluated about equally often over the dataset
@@ -130,20 +133,22 @@ class InjectionDataset(torch.utils.data.Dataset):
     epoch_window: (start, end) in s of the saved input epochs, stimulus onset at 0. patch_window: the patch to return, e.g. the post patch.
     topographies: (n_chans, n_sources) topographies of the injected sources, gain_sets: one (n_sources,) gain vector per
     injection; the sources get stronger after onset, ramped in over ramp_duration s (utils.inject_sources).
-    freqs, pad, wavelet_params: wavelet transform of the patch as in make_dataset.patch_wavelet_target (utils.calc_wavelet).
+    freqs, pad, wavelet_params, pool: wavelet transform and time pooling of the patch as in make_dataset.patch_wavelet_target
+    (utils.calc_wavelet, utils.pool_power), the targets have self.target_fs = fs // pool time bins per second.
     interpolations: {(subject, condition, id): interpolated channel indices}, metadata["allowed"] is False for them.
     target_stats: the fold's target normalization, converts the model outputs back to dB (the targets are returned in dB).
     __getitem__ returns (inputs, targets, metadata): inputs (1 + n_injections, n_chans, patch samples) and dB targets
-    (1 + n_injections, n_chans, n_freqs, patch samples), index 0 uninjected and index i + 1 injected with gain_sets[i].
+    (1 + n_injections, n_chans, n_freqs, patch time bins), index 0 uninjected and index i + 1 injected with gain_sets[i].
     """
 
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]], epoch_window: Tuple[float, float],
                  patch_window: Tuple[float, float], fs: int, topographies: np.ndarray, gain_sets: List[np.ndarray], ramp_duration: float,
-                 freqs: np.ndarray, pad: int, wavelet_params: Dict[str, float],
+                 freqs: np.ndarray, pad: int, wavelet_params: Dict[str, float], pool: int = 1,
                  interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, target_stats: Optional[TargetStats] = None):
         self.epoch_window, self.patch_window, self.fs = epoch_window, patch_window, fs
         self.topographies, self.gain_sets, self.ramp_duration = topographies, gain_sets, ramp_duration
-        self.freqs, self.pad, self.wavelet_params = freqs, pad, wavelet_params
+        self.freqs, self.pad, self.wavelet_params, self.pool = freqs, pad, wavelet_params, pool
+        self.target_fs = fs // pool
         self.target_stats = target_stats
         self.samples = []
         for subj, conds in epochs_dict.items():
@@ -169,6 +174,7 @@ class InjectionDataset(torch.utils.data.Dataset):
         for x in epochs:
             patch = utils.cut_to_timewindow(torch.from_numpy(x), self.epoch_window, self.patch_window, self.fs)
             mag, _ = utils.calc_wavelet(patch, fs=self.fs, freqs=self.freqs, pad=self.pad, **self.wavelet_params)
+            mag = utils.pool_power(mag, self.pool)
             # (freqs, channels, time) -> (channels, freqs, time) in dB, as make_dataset and FinetuneDataset
             targets.append(20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7))
             inputs.append(patch)

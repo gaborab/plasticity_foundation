@@ -55,7 +55,12 @@ PRE_WINDOW = (-1.3, -0.3)
 POST_WINDOW = (-0.3, 0.7)
 EPOCH_WINDOW = (PRE_WINDOW[0], POST_WINDOW[1])  # saved input epoch and wavelet target: both patches, split during training
 PATCH_SIZE = round((POST_WINDOW[1] - POST_WINDOW[0]) * RSFREQ)
-TARGET_WINDOW_SIZE = PATCH_SIZE  # the model predicts the wavelet target of one patch
+TARGET_WINDOW_SIZE = PATCH_SIZE  # the autoencoder predicts the raw signal of one patch
+# wavelet targets are pooled in time: the power of TARGET_POOL consecutive samples is averaged (utils.pool_power), 25 ms bins.
+# The wavelets are far wider than one sample (~90 ms at 45 Hz, ~300 ms at 5 Hz), so the pooling loses little resolution
+TARGET_POOL = 5
+TARGET_FS = RSFREQ // TARGET_POOL  # bins per second of the wavelet targets
+SPECTRAL_TIME_BINS = PATCH_SIZE // TARGET_POOL  # time bins of the wavelet target of one patch
 # scored parts of the patches, bins whose wavelet reaches outside their patch are masked as well (utils.valid_wavelet_bins)
 PRE_TARGET_WINDOW = (-1.0, -0.7)  # wavelet support -1.29 to -0.41 s
 POST_TARGET_WINDOW = (0.0, 0.4)  # wavelet support -0.29 to 0.69 s at 5 Hz
@@ -66,6 +71,7 @@ PATCH_PARAMS = {
     'epoch_window': EPOCH_WINDOW,
     'patch_windows': PATCH_WINDOWS,
     'fs': RSFREQ,
+    'target_fs': TARGET_FS,
 }
 # target bins of every patch the training loss, the validation metrics and the target stats use, masked by utils.valid_wavelet_bins:
 # all bins of the patch computed from its own data, set to PRE_TARGET_WINDOW / POST_TARGET_WINDOW to train on the scored bins only
@@ -175,9 +181,10 @@ AUTOENCODER_PARAMS = {
 N_FREQS = 50
 SPECTRAL_DECODER_PARAMS = {
     'n_chans': N_CHANNELS,
-    'freq_window': (5, 60),  # below 5 Hz the wavelets reach further than the 1 s target window
+    # below 5 Hz the wavelets reach further than the 1 s target window, above 45 Hz muscle activity and line noise dominate
+    'freq_window': (5, 45),
     'n_freqs': N_FREQS,
-    'target_dim': N_FREQS * TARGET_WINDOW_SIZE,
+    'target_dim': N_FREQS * SPECTRAL_TIME_BINS,
     'model_version': LABRAM_VERSION,
 }
 
@@ -196,7 +203,8 @@ FREQ_BANDS = {
     'theta (5-8Hz)': (5, 8),
     'alpha (8-12Hz)': (8, 12),
     'beta (12-30Hz)': (12, 30),
-    'gamma (30-60Hz)': (30, 60)
+    'gamma (30-45Hz)': (30, 45)
 }
+FREQ_WINDOW_LABEL = f"{SPECTRAL_DECODER_PARAMS['freq_window'][0]}-{SPECTRAL_DECODER_PARAMS['freq_window'][1]} Hz"  # all bins
 # indices of the FREQS bins falling into each band, used to index the frequency dimension of spectral tensors
 FREQ_BAND_INDICES = {name: np.where((FREQS >= low) & (FREQS <= high))[0] for name, (low, high) in FREQ_BANDS.items()}

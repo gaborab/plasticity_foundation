@@ -28,11 +28,12 @@ def train_class_batch(model, samples, target, mask, criterion, ch_names, channel
     return loss, outputs
 
 
-def target_channel_masks(masks, target_ch, neighbour_table):
+def target_channel_masks(masks, target_ch, neighbour_table, interpolated=None):
     """
     ADDED: returns (hidden, loss_mask) of masked-channel reconstruction with one target channel per sample.
     masks: (batch, n_chans, ...) boolean validity mask, target_ch: (batch,) target channel indices,
     neighbour_table: (n_chans, n_chans) boolean cluster table (core.utils.build_neighbor_mask), all on the same device.
+    interpolated: (batch, n_chans) boolean tensor of channels hidden as well (interpolated channels), None hides the clusters only.
     hidden is the (batch, n_chans) cluster of every sample's target channel, passed to the model as channel_mask.
     loss_mask keeps the bins of masks of the target channel only, flattened to (batch, n_outputs).
     Without a neighbour_table nothing is hidden (None) and loss_mask is masks flattened.
@@ -43,6 +44,8 @@ def target_channel_masks(masks, target_ch, neighbour_table):
 
     # 1. hidden channels: the row of every sample's target channel in the cluster table (the target and its nearest electrodes)
     hidden = neighbour_table[target_ch]  # (batch, n_chans)
+    if interpolated is not None:
+        hidden = hidden | interpolated  # interpolated channels are hidden from the input, they get the same mask token
 
     # 2. target channel only: True at every sample's target channel, False at all other channels, the hidden neighbours included
     batch_size, n_chans = masks.shape[:2]
@@ -90,11 +93,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, log_writer=None,
                     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None, ch_names=None, neighbour_table=None):
+                    num_training_steps_per_epoch=None, update_freq=None, ch_names=None, neighbour_table=None,
+                    hide_interpolated=False):
     """
     MODIFIED: trains the model for one epoch on batches of (input, target, metadata, mask, target_ch, eval_chs) from FinetuneDataset.
     neighbour_table: (n_chans, n_chans) boolean cluster table on device for masked-channel reconstruction: every sample's
     target_ch is hidden with its cluster and the loss uses the target channel's masked-in bins only. None trains on all channels.
+    hide_interpolated: hide every sample's interpolated channels (metadata["allowed"] False) from the input as well (masked only).
     The loss, MSE and R2 are logged every print_freq steps only, as reading them from the GPU synchronizes it.
     Returns the averages of the logged stats.
     """
@@ -112,7 +117,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
     optimizer.zero_grad()
 
-    for data_iter_step, (samples, targets, _, masks, target_ch, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, targets, metadata, masks, target_ch, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
             continue
@@ -132,7 +137,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         targets = targets.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
         masks = masks.to(device, non_blocking=True)
         # hidden cluster of every sample's target channel, and the loss over the target channel's masked-in bins only
-        hidden, loss_mask = target_channel_masks(masks, target_ch.to(device, non_blocking=True), neighbour_table)
+        interpolated = ~metadata["allowed"].to(device, non_blocking=True) if hide_interpolated else None
+        hidden, loss_mask = target_channel_masks(masks, target_ch.to(device, non_blocking=True), neighbour_table, interpolated)
 
         with torch.cuda.amp.autocast():
             loss, output = train_class_batch(
@@ -203,12 +209,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 @torch.no_grad()
 def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=['acc'], criterion=torch.nn.SmoothL1Loss(beta=0.1), is_binary=True,
-             neighbour_table=None):
+             neighbour_table=None, hide_interpolated=False):
     """
     MODIFIED: evaluates the model on batches of (input, target, metadata, mask, target_ch, eval_chs) from FinetuneDataset.
     neighbour_table: (n_chans, n_chans) boolean cluster table on device for masked-channel reconstruction: one forward pass
     per evaluation channel in eval_chs, each with that channel's cluster hidden and scored on that channel only.
     None scores all channels in a single pass. Every bin is used if a batch has no mask.
+    hide_interpolated: hide every sample's interpolated channels (metadata["allowed"] False) from the input as well (masked only).
     The errors are summed on the device (MaskedErrorSums), metrics and is_binary are kept for compatibility.
     Returns {"loss", "mse", "mae", "r2"} over the scored bins of all batches pooled.
     """
@@ -229,12 +236,13 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
         EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
         mask = batch[3].to(device, non_blocking=True) if len(batch) > 3 else torch.ones_like(target, dtype=torch.bool, device=device)
         target = target.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
+        interpolated = ~batch[2]["allowed"].to(device, non_blocking=True) if hide_interpolated else None
 
         # one pass per evaluation channel with masking, a single pass over all channels without
         eval_chs = batch[5].to(device, non_blocking=True) if neighbour_table is not None else [None]
         for j in range(eval_chs.shape[1] if neighbour_table is not None else 1):
             target_ch = eval_chs[:, j] if neighbour_table is not None else None
-            hidden, loss_mask = target_channel_masks(mask, target_ch, neighbour_table)
+            hidden, loss_mask = target_channel_masks(mask, target_ch, neighbour_table, interpolated)
             with torch.cuda.amp.autocast():
                 output = model(EEG, input_chans=input_chans, channel_mask=hidden)
                 loss = criterion(output[loss_mask], target[loss_mask])

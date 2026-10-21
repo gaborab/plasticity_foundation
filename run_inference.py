@@ -21,10 +21,12 @@ from einops import rearrange
 from core import utils as core_utils
 
 
-def reconstruct_batch(model, eeg, input_chans, n_chans, neighbour_table=None):
+def reconstruct_batch(model, eeg, input_chans, n_chans, neighbour_table=None, interpolated=None):
     """
     Returns the (batch, n_chans, ...) reconstruction of a batch. Masked (neighbour_table given): row c comes from the pass
     that hides channel c with its cluster in every sample. Unmasked: one pass.
+    interpolated: (batch, n_chans) bool tensor on the device of channels hidden in every pass of the sample as well
+    (interpolated channels), None hides the clusters only. Only used with a neighbour_table.
     """
     if neighbour_table is None:
         with torch.cuda.amp.autocast():
@@ -32,6 +34,8 @@ def reconstruct_batch(model, eeg, input_chans, n_chans, neighbour_table=None):
     output = None
     for ch in range(n_chans):
         hidden = neighbour_table[ch].expand(eeg.shape[0], -1)  # (batch, n_chans), the same cluster for every sample
+        if interpolated is not None:
+            hidden = hidden | interpolated
         with torch.cuda.amp.autocast():
             ch_output = model.get_unflattened_output(eeg, input_chans=input_chans, channel_mask=hidden)[:, ch].float()
         if output is None:
@@ -41,15 +45,17 @@ def reconstruct_batch(model, eeg, input_chans, n_chans, neighbour_table=None):
 
 
 def run_reconstruction(model, dataset, ch_names, device, output_file, valid_bins=None, band_indices=None,
-                       neighbour_table=None):
+                       neighbour_table=None, hide_interpolated=False, target_fs=settings.TARGET_FS):
     """
     Reconstructs every sample of dataset and saves target, output and metrics per trial and patch to output_file
     ({subject}/{condition}/{id}/{patch}, see io.save_inference_trial_hdf). The metrics are computed on every window of
-    settings.METRIC_WINDOWS, cut from the patch in time.
+    settings.METRIC_WINDOWS, cut from the patch in time with target_fs (time bins per second of the targets).
     valid_bins: {patch: (freqs, time) bool mask} of the bins computed from the patch's own data (utils.valid_wavelet_bins),
     the other bins are NaN in the metrics. None (raw-signal targets) scores every bin.
     dataset.target_stats converts the model outputs back to dB, the dataset has to return dB targets (normalize=False).
     neighbour_table: (n_chans, n_chans) bool cluster table on device for masked-channel reconstruction, None for one unmasked pass.
+    hide_interpolated: hide the interpolated channels of every sample from the input as well, as in training with
+    --hide_interpolated (masked-channel reconstruction only).
     Interpolated channels (metadata["allowed"] False) are NaN in the saved output and left out of the metrics,
     and every trial group stores them in its "interpolated" attribute.
     """
@@ -63,7 +69,8 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, valid_bins
             eeg = eeg.float().to(device, non_blocking=True) / 100
             eeg = rearrange(eeg, 'B N (A T) -> B N A T', T=200)
 
-            output = reconstruct_batch(model, eeg, input_chans, eeg.shape[1], neighbour_table)
+            interpolated = ~metadata['allowed'].to(device) if hide_interpolated else None
+            output = reconstruct_batch(model, eeg, input_chans, eeg.shape[1], neighbour_table, interpolated)
             if dataset.target_stats is not None:
                 output = dataset.target_stats.denormalize(output)  # the model predicts normalized targets
             output_np = output.cpu().numpy()
@@ -80,8 +87,8 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, valid_bins
                 scored_output = np.where(valid_bins[patch], trial_output, np.nan) if valid_bins is not None else trial_output
                 window_metrics = {}
                 for name, windows in settings.METRIC_WINDOWS.items():
-                    cut_output = core_utils.cut_to_timewindow(scored_output, settings.PATCH_WINDOWS[patch], windows[patch], settings.RSFREQ)
-                    cut_target = core_utils.cut_to_timewindow(trial_target, settings.PATCH_WINDOWS[patch], windows[patch], settings.RSFREQ)
+                    cut_output = core_utils.cut_to_timewindow(scored_output, settings.PATCH_WINDOWS[patch], windows[patch], target_fs)
+                    cut_target = core_utils.cut_to_timewindow(trial_target, settings.PATCH_WINDOWS[patch], windows[patch], target_fs)
                     window_metrics[name] = core_utils.get_inference_metrics(cut_output, cut_target, band_indices=band_indices, eps=settings.EPS)
                 save_inference_trial_hdf(subject, condition, idx, patch, h5file, trial_target, trial_output, window_metrics)
                 h5file[f"{subject}/{condition}/{idx}"].attrs["interpolated"] = np.flatnonzero(~allowed[j])
@@ -89,9 +96,9 @@ def run_reconstruction(model, dataset, ch_names, device, output_file, valid_bins
 
 def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
     """
-    Returns the settings of the training run inference has to match ({"target_mode", "masked", "n_neighbors", "k_folds"})
-    from the run's metadata.json. Settings older metadata doesn't record fall back to the CLI arguments,
-    k_folds to the number of fold folders in model_dir.
+    Returns the settings of the training run inference has to match ({"target_mode", "masked", "n_neighbors",
+    "hide_interpolated", "k_folds"}) from the run's metadata.json. Settings older metadata doesn't record fall back to
+    the CLI arguments, k_folds to the number of fold folders in model_dir.
     """
     hyperparameters = {}
     metadata_path = model_dir / "metadata.json"
@@ -104,6 +111,7 @@ def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
         "target_mode": opts.target_mode,
         "masked": opts.masked,
         "n_neighbors": opts.n_neighbors,
+        "hide_interpolated": opts.hide_interpolated,
         "k_folds": len([d for d in model_dir.iterdir() if d.is_dir() and d.name.isdigit()]),
     }
     run_settings = {}
@@ -138,8 +146,10 @@ def get_args():
                              'hide every target channel with its nearest electrodes in turn')
     parser.add_argument('--n_neighbors', type=int, default=settings.N_NEIGHBOURS,
                         help='Fallback if the run\'s metadata.json doesn\'t record it: nearest electrodes hidden together with the target channel')
-    parser.add_argument('--injection', action='store_true', default=False,
-                        help='Whether to run injection test for masking after inference')
+    parser.add_argument('--hide_interpolated', action='store_true',
+                        help='Fallback if the run\'s metadata.json doesn\'t record it: interpolated channels were hidden from the input '
+                             'in training (masked-channel reconstruction)')
+
     return parser.parse_args()
 
 
@@ -170,7 +180,8 @@ def main(opts):
     # (freqs, time) masks of the bins computed from each patch's own data, the metrics leave the other bins out
     valid_bins = None
     if spectral:
-        valid_bins = {patch: core_utils.valid_wavelet_bins(settings.FREQS, window, window, settings.RSFREQ, **settings.WAVELET_PARAMS)
+        valid_bins = {patch: core_utils.valid_wavelet_bins(settings.FREQS, window, window, settings.RSFREQ, **settings.WAVELET_PARAMS,
+                                                           pool=settings.TARGET_POOL)
                       for patch, window in settings.PATCH_WINDOWS.items()}
 
     ch_names = settings.CHORDER_STANDARD
@@ -188,7 +199,9 @@ def main(opts):
         if opts.postpatch:
             trial_interpolations_postpatch = load_interpolated_channels(settings.PATCH_DIR / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=run_settings["n_neighbors"], n_chans=settings.N_CHANNELS)
-        print(f"Masked-channel reconstruction: every target channel is hidden with its {run_settings['n_neighbors']} nearest electrodes")
+        print(f"Masked-channel reconstruction: every target channel is hidden with its {run_settings['n_neighbors']} nearest electrodes"
+              + (", interpolated channels are hidden from the input" if run_settings["hide_interpolated"] else ""))
+    hide_interpolated = masked and run_settings["hide_interpolated"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for i, fold in enumerate(folds):
@@ -232,7 +245,7 @@ def main(opts):
         output_path.mkdir(parents=True, exist_ok=True)
         print("Running baseline reconstruction...")
         run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, valid_bins, band_indices,
-                           fold_neighbour_table)
+                           fold_neighbour_table, hide_interpolated)
         print("Baseline reconstruction finished.")
 
         if opts.postpatch:
@@ -243,13 +256,11 @@ def main(opts):
             postpatch_dataset = FinetuneDataset(postpatch_folds[i].testing_epochs, **settings.PATCH_PARAMS, target_mode=target_mode,
                                                 target_stats=target_stats, log=True, normalize=False, interpolations=trial_interpolations_postpatch)
             run_reconstruction(model, postpatch_dataset, ch_names, device, postpatch_file, valid_bins, band_indices,
-                               fold_neighbour_table)
+                               fold_neighbour_table, hide_interpolated)
             print("Post-patch reconstruction finished.")
         fold_time = time.time() - start_time
         print(f"Fold time: {str(datetime.timedelta(seconds=int(fold_time)))}")
         total_time += fold_time
-        if opts.injection:
-            print("Running injection test...")
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Inference finished for model {opts.model_name}. Elapsed time: {total_time_str}")
 

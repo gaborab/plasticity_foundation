@@ -23,6 +23,7 @@ The previous model learnt the wavelet transform of its own input, so its error c
 
 - **Masked-channel reconstruction.** The model sees the EEG of all channels except a masked one (or a neighbourhood around it) and predicts the masked channel's wavelet target. Interpolated channels are never targets.
 - **Two patches per trial.** Every trial is split into a **pre-stimulus patch** (−1.3 … −0.3 s) and a **post-stimulus patch** (−0.3 … 0.7 s), one LaBraM patch (1 s, 200 samples) each. They go through the model in **separate forward passes** and get **separately computed wavelet targets**, so the two share no data.
+- **Pooled targets.** The wavelet power is averaged over 25 ms bins (`TARGET_POOL` = 5 samples), 40 bins per patch, over 5–45 Hz. The wavelets are much wider than one sample, so little resolution is lost, and the head predicts 2 000 instead of 10 000 values per channel.
 - **Scored windows.** Post 0 … 0.4 s (before any button press), pre −1.0 … −0.7 s. With the wavelet cycles used (≤ 0.29 s reach), every scored bin is computed from real data of its own patch only.
 - **Pre-stimulus correction.** The pre-patch error serves as a reference for the post-patch error of the same model, which cancels cap-refit and session effects to first order. Within-session contrasts across the four recording blocks of a session give a cap-free check.
 - **Within-subject folds** (`KFoldSplitter.split_within_subjects`), so a subject label can be given to the model.
@@ -153,11 +154,12 @@ Every script and notebook reads its configuration from this module at import tim
 | `RECORDINGS_PER_CONDITION` | `None` | Use all recording folders per session (otherwise last *n* baseline / first *n* post-patching) |
 | `PRE_WINDOW`, `POST_WINDOW` | (−1.3, −0.3) s, (−0.3, 0.7) s | The two patches of a trial, one LaBraM patch (200 samples) each, meeting at −0.3 s. Each goes through the model in its own forward pass |
 | `EPOCH_WINDOW` = `WHOLE_EPOCH_WINDOW` | (−1.3, 0.7) s | Epoching window, and the window of the saved input epoch and wavelet target (both patches together, split during training) |
-| `PATCH_SIZE` = `TARGET_WINDOW_SIZE` | 200 | Samples per patch, and per predicted wavelet target |
-| `PATCH_PARAMS` | `epoch_window` = `EPOCH_WINDOW`, `patch_windows` = `{'pre': PRE_WINDOW, 'post': POST_WINDOW}`, `fs` = `RSFREQ` | Time window arguments of `FinetuneDataset`, which cuts every saved trial into one sample per patch |
+| `PATCH_SIZE` = `TARGET_WINDOW_SIZE` | 200 | Samples per patch, and per predicted raw-signal target (autoencoder) |
+| `TARGET_POOL`, `TARGET_FS`, `SPECTRAL_TIME_BINS` | 5, 40, 40 | The wavelet targets are pooled in time: the mean power of 5 consecutive samples (`utils.pool_power`), i.e. 25 ms bins, 40 bins per second and per patch. Times of target bins are converted with `TARGET_FS`, times of the input with `RSFREQ` |
+| `PATCH_PARAMS` | `epoch_window` = `EPOCH_WINDOW`, `patch_windows` = `{'pre': PRE_WINDOW, 'post': POST_WINDOW}`, `fs` = `RSFREQ`, `target_fs` = `TARGET_FS` | Time window arguments of `FinetuneDataset`, which cuts every saved trial into one sample per patch |
 | `INJECTION_ONSET_RAMP`, `INJECTION_SOURCE_DEPTH`, `INJECTION_LABELS`, `MIXED_INJECTION_GAINS`, `INJECTION_N_ROI` | 0.02 s, 0.7, `["pericalcarine"]`, V1 +10 % / lateral occipital +25 % / lingual −10 %, 4 | Gain injection of `ridge_leakage.py` and `labram_inj_test.py`: raised-cosine ramp of the gain after onset, depth of the sphere-model dipole, aparc labels of the fsaverage source, sources and gains of a mixed injection, and the number of channels (where the injected pattern is strongest) the results are averaged over |
 | `N_NEIGHBOURS` | 4 | Nearest electrodes (HydroCel-65 positions) hidden together with a target channel in masked-channel reconstruction. Default of `--n_neighbors` in training and inference, and of the "cluster" scheme of `ridge_leakage.py` |
-| `LOSS_WINDOWS` | `{'pre': PRE_WINDOW, 'post': POST_WINDOW}` | Target bins of every patch used by the training loss, the validation metrics and the target normalization, masked with `valid_wavelet_bins`. The whole patch keeps every bin computed from the patch's own data (6 668 of 10 000 per patch). Set to `PRE_TARGET_WINDOW` / `POST_TARGET_WINDOW` to train on the scored bins only |
+| `LOSS_WINDOWS` | `{'pre': PRE_WINDOW, 'post': POST_WINDOW}` | Target bins of every patch used by the training loss, the validation metrics and the target normalization, masked with `valid_wavelet_bins`. The whole patch keeps every bin computed from the patch's own data (1 231 of 2 000 pooled bins per patch). Set to `PRE_TARGET_WINDOW` / `POST_TARGET_WINDOW` to train on the scored bins only |
 | `PRE_TARGET_WINDOW` | (−1.0, −0.7) s | Scored part of the pre patch. Wavelet support −1.29 … −0.41 s |
 | `POST_TARGET_WINDOW` | (0.0, 0.4) s | Scored part of the post patch, before any button press. Wavelet support −0.29 … 0.69 s |
 | `PAD_TIME` → `PADDING` | 0.3 s → 60 samples | Reflect padding of each patch for its CWT. It only reaches bins outside the scored windows |
@@ -183,14 +185,14 @@ Every script and notebook reads its configuration from this module at import tim
 | Setting | Value | Meaning |
 |---|---|---|
 | `LABRAM_VERSION` | `labram_base_patch200_200` | 12 blocks, embed dim 200, 10 heads, patch size 200 |
-| `SPECTRAL_DECODER_PARAMS['freq_window']` | (5, 60) Hz | Wavelet frequency range. Below 5 Hz the wavelets reach further than a patch allows |
+| `SPECTRAL_DECODER_PARAMS['freq_window']` | (5, 45) Hz | Wavelet frequency range. Below 5 Hz the wavelets reach further than a patch allows, above 45 Hz muscle activity and line noise dominate. `FREQ_WINDOW_LABEL` = "5-45 Hz" names the band of all bins |
 | `N_FREQS` | 50 | Number of wavelet frequencies |
-| `FREQS` | `np.geomspace(5, 60, 50)` | Log-spaced frequency axis |
+| `FREQS` | `np.geomspace(5, 45, 50)` | Log-spaced frequency axis |
 | `WAVELET_PARAMS` | `max_cycles` = `MORLET_CYCLES` ≈ 5.44, `max_reach` ≈ 0.286 s | Complex Morlet (`cmorB-1.0`). Cycles per frequency `n(f) = min(5.44, 2π·f·max_reach/3)`: 3 cycles at 5 Hz (`MIN_CYCLES`), rising to 5.44 (the previous `cmor1.5-1.0`) from about 9.1 Hz. Every wavelet reaches at most 0.286 s (3 SD) |
-| `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 200 = 10 000 | Head output size per channel token: one patch's wavelet target |
+| `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 40 = 2 000 | Head output size per channel token: one patch's pooled wavelet target |
 | `AUTOENCODER_PARAMS['target_dim']` | 200 | Head output size per channel token (raw-signal mode) |
-| `FREQ_BANDS` | θ 5–8, α 8–12, β 12–30, γ 30–60 Hz | Bands used for band-wise metrics (edges inclusive). The 3 Hz notch lowers power at about 48.5–51.5 Hz inside the γ band, identically in both sessions |
-| `FREQ_BAND_INDICES` | θ 0–9, α 10–17, β 18–35, γ 36–49 | Indices of the `FREQS` bins in each `FREQ_BANDS` band, computed once from the two. Passed to the metric and time series functions to index the frequency axis of the (23, 50, …) tensors |
+| `FREQ_BANDS` | θ 5–8, α 8–12, β 12–30, γ 30–45 Hz | Bands used for band-wise metrics (edges inclusive). The 50 Hz notch lies outside the frequency window |
+| `FREQ_BAND_INDICES` | θ 0–10, α 11–19, β 20–39, γ 40–49 | Indices of the `FREQS` bins in each `FREQ_BANDS` band, computed once from the two. Passed to the metric and time series functions to index the frequency axis of the (23, 50, …) tensors |
 
 ### Paths
 
@@ -346,7 +348,7 @@ Results (from the previous build with the (−0.6, 1.2) s autoreject window; re-
 ```text
 data/processed/{pre_patching|post_patching}/
 ├── input_epochs/        {subject}_{stimulus}_input{id}.pt     e.g. STMD11_center_2_input1.pt    (23, 400) float32, µV, −1.3 … 0.7 s
-├── wavelet_targets/     {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 400) float16, linear magnitude
+├── wavelet_targets/     {subject}_{stimulus}_wavelet{id}.pt   e.g. STMD11_center_2_wavelet1.pt  (23, 50, 80) float16, linear magnitude, 25 ms bins
 └── epochs_manifest.csv  one row per saved epoch (see below)
 ```
 
@@ -448,6 +450,7 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 | `--mse` | off | Use `nn.MSELoss` instead of the Huber loss |
 | `--masked` | off | Masked-channel reconstruction: hide a target channel with its nearest electrodes and train on the target channel only (see 2.3) |
 | `--n_neighbors` | `N_NEIGHBOURS` = 4 | Nearest electrodes hidden with the target channel with `--masked`, 0 hides the target channel only |
+| `--hide_interpolated` / `--no-hide_interpolated` | on | With `--masked`: hide every trial's interpolated channels from the input as well (see 2.3) |
 
 #### 2.1 Data split: `core.datasets.KFoldSplitter`
 
@@ -475,12 +478,12 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 
 `FinetuneDataset(epochs_dict, **PATCH_PARAMS, target_mode, log, normalize, masks, target_stats, interpolations, seed, n_eval_channels)` holds all samples in memory.
 
-- **One sample per patch.** Every trial's (23, 400) input and (23, 50, 400) target over `EPOCH_WINDOW` are cut with `cut_to_timewindow` into the `patch_windows` of `PATCH_PARAMS`: a pre sample (−1.3 … −0.3 s) and a post sample (−0.3 … 0.7 s), each with a (23, 200) input and a (23, 50, 200) target. `metadata = {"subject", "condition", "id", "allowed", "patch"}`, with `patch` = `"pre"` or `"post"`. A dataset therefore has twice as many samples as trials.
+- **One sample per patch.** Every trial's (23, 400) input (at `fs`) and (23, 50, 80) pooled target (at `target_fs`) over `EPOCH_WINDOW` are cut with `cut_to_timewindow` into the `patch_windows` of `PATCH_PARAMS`: a pre sample (−1.3 … −0.3 s) and a post sample (−0.3 … 0.7 s), each with a (23, 200) input and a (23, 50, 40) target. `metadata = {"subject", "condition", "id", "allowed", "patch"}`, with `patch` = `"pre"` or `"post"`. A dataset therefore has twice as many samples as trials.
 - **Allowed target channels**: `metadata["allowed"]` is a (23,) bool tensor, False for the trial's interpolated channels. `interpolations` comes from `io.load_interpolated_channels(<dataset dir>/epochs_manifest.csv)`: the union of `rec_interpolated` and `ar_interpolated` per `(subject, stimulus, id)`. Without `interpolations` (training without `--masked`) every channel is allowed.
 - **EEG input**: the (23, 200) µV patch. In `train_one_epoch`, `evaluate` and inference it is **divided by 100** (LaBraM's 0.1 mV input convention) and rearranged to `(B, 23, 1, 200)`, i.e. 23 channels × 1 patch × 200 samples.
 - **Wavelet target** (`target_mode='wavelet'`): converted from float16 to float32 and, with `log=True`, to dB, `20·log10(mag + 1e-7)`. The samples keep the dB targets.
 - **Autoencoder target** (`target_mode='autoencoder'`): the input patch itself (in µV, not divided by 100).
-- **Masks**: `masks = {patch: (50, 200) bool}` marks the target bins the loss and metrics use in each patch. The script builds them with `utils.valid_wavelet_bins(FREQS, patch_window, LOSS_WINDOWS[patch], RSFREQ, **WAVELET_PARAMS)` in wavelet mode. Without masks every bin is used.
+- **Masks**: `masks = {patch: (50, 40) bool}` marks the target bins the loss and metrics use in each patch. The script builds them with `utils.valid_wavelet_bins(FREQS, patch_window, LOSS_WINDOWS[patch], RSFREQ, **WAVELET_PARAMS, pool=TARGET_POOL)` in wavelet mode: the mask of the 200 samples, pooled so that a 25 ms bin is valid only if all its 5 samples are. Without masks every bin is used.
 - **`__getitem__`** returns `(input, target, metadata, mask, target_ch, eval_chs)`:
   - `mask`: the patch's validity mask repeated over channels, a bool tensor of the target's shape.
   - `target_ch`: the training target channel of the current epoch for `--masked` (see 2.3), set with `set_epoch(epoch)`.
@@ -506,9 +509,11 @@ With `channel_mask=None` or all False the output is identical to the model witho
 
 **Clusters**: `utils.build_neighbor_mask(n_neighbours, 23)` is a (23, 23) bool table; row *c* is channel *c* and its `n_neighbours` nearest electrodes (`utils.nearest_electrodes`, HydroCel-65 positions), the same clusters as `ridge_leakage.py`. `--n_neighbors 0` hides the target only.
 
-**Training target channel**: every sample has a fixed random permutation of its allowed channels (`utils.channel_permutation`, seeded with `SEED` and the sample's `(subject, stimulus, id, patch)` key via `zlib.crc32`), and epoch *e* uses `perm[e % len(perm)]` (`FinetuneDataset.set_epoch`). Every allowed channel is the target ⌊epochs / L⌋ or ⌈epochs / L⌉ times per sample (L allowed channels), in random order, the same in every run, fold and dataset order. Interpolated channels are never targets, but they stay visible as input.
+**Training target channel**: every sample has a fixed random permutation of its allowed channels (`utils.channel_permutation`, seeded with `SEED` and the sample's `(subject, stimulus, id, patch)` key via `zlib.crc32`), and epoch *e* uses `perm[e % len(perm)]` (`FinetuneDataset.set_epoch`). Every allowed channel is the target ⌊epochs / L⌋ or ⌈epochs / L⌉ times per sample (L allowed channels), in random order, the same in every run, fold and dataset order. Interpolated channels are never targets, and with `--hide_interpolated` (the default) never inputs either.
 
-**Loss**: `engine_for_finetuning.target_channel_masks(masks, target_ch, neighbour_table)` returns the hidden clusters and a loss mask that keeps only the valid bins of each sample's target channel (the hidden neighbours are not scored). `criterion(output[loss_mask], target[loss_mask])`, so only the target channel's bins get a gradient. Training MSE / R² and the validation metrics use the same mask.
+**Hiding interpolated channels** (`--hide_interpolated`, default on with `--masked`): the trial's interpolated channels (`~metadata["allowed"]`) are added to the hidden cluster in every training, validation and inference pass, so they get the same `mask_token`. An interpolated channel is a spherical-spline estimate from the good channels of the recording, the hidden target and its neighbours included, so as a visible input it would carry part of the hidden target's signal. The model doesn't need to know why a channel is missing, so one token serves both. The number of hidden channels therefore varies between trials. `metadata.json` records the setting as `hide_interpolated`, and inference and `labram_inj_test.py` follow it.
+
+**Loss**: `engine_for_finetuning.target_channel_masks(masks, target_ch, neighbour_table, interpolated)` returns the hidden clusters (plus the interpolated channels) and a loss mask that keeps only the valid bins of each sample's target channel (the hidden neighbours are not scored). `criterion(output[loss_mask], target[loss_mask])`, so only the target channel's bins get a gradient. Training MSE / R² and the validation metrics use the same mask.
 
 **Validation channels**: each validation sample is evaluated on 3 fixed channels (`N_EVAL_CHANNELS` in the script), one forward pass each, every pass scored on its target channel only. `utils.balanced_eval_channels` assigns them greedily in dataset order: every sample takes the allowed channels evaluated least so far, ties rotated by the sample index. Interpolation makes some channels allowed in only 62 % of the trials, so picking evenly within each sample (random or by sample index) evaluates channels between ~120 and ~210 times on the manifest; the greedy assignment gives 161–168. The channels are the same in every epoch, so changes between validations come from the model only.
 
@@ -524,7 +529,7 @@ Linear(200 → hidden) → LayerNorm(hidden) → GELU → Linear(hidden → targ
 
 | Model | hidden | target_dim | Output per sample (patch) |
 |---|---|---|---|
-| `EEGSpectralDecoder` (`wavelet`) | 1024 | 10 000 (= 50 × 200) | `(23, 50, 200)` |
+| `EEGSpectralDecoder` (`wavelet`) | 1024 | 2 000 (= 50 × 40) | `(23, 50, 40)` |
 | `EEGAutoencoder` (`autoencoder`) | 512 | 200 | `(23, 200)` |
 
 Forward pass (wavelet mode):
@@ -535,9 +540,9 @@ Forward pass (wavelet mode):
  → + channel position embedding (selected via input_chans) + temporal embedding
  → 12 transformer blocks (10 heads, MLP ratio 4, QK-norm)
  → patch tokens ([CLS] dropped) → fc_norm LayerNorm      (return_patch_tokens=True)
- → MLP head per token                      → (B, 23, 10 000)
- → forward():                 flatten → (B, 230 000)      (used for the loss)
- → get_unflattened_output():  reshape → (B, 23, 50, 200)  (used for inference/plots)
+ → MLP head per token                      → (B, 23, 2 000)
+ → forward():                 flatten → (B, 46 000)       (used for the loss)
+ → get_unflattened_output():  reshape → (B, 23, 50, 40)   (used for inference/plots)
 ```
 
 There is exactly one 1 s patch per channel, so **each channel's token predicts that channel's own full spectrogram**. Both `forward` and `get_unflattened_output` take `channel_mask` ((B, 23) bool, see 2.3); a hidden channel's token then predicts its spectrogram from the visible channels.
@@ -596,7 +601,7 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 `metadata.json` contains:
 
-- `hyperparameters`: `target_mode`, `k_folds`, batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, and with `--masked` `n_neighbors` and `n_eval_channels`. Inference reads `target_mode`, `k_folds`, `masked` and `n_neighbors` from here. The file is written when all folds are done. Inference has to use the same `n_neighbors`.
+- `hyperparameters`: `target_mode`, `k_folds`, batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, with `--masked` `n_neighbors` and `n_eval_channels`, `hide_interpolated`, and in wavelet mode `target_pool` and `freq_window`. Inference reads `target_mode`, `k_folds`, `masked`, `n_neighbors` and `hide_interpolated` from here. The file is written when all folds are done. Inference has to use the same `n_neighbors`.
 - `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken.
 - `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`.
 
@@ -612,10 +617,9 @@ Reconstructs every fold's **held-out baseline test trials** with that fold's bes
 |---|---|---|
 | `--model_name` | *required* | Folder under `outputs/finetune_outputs/` |
 | `--postpatch` | off | Also reconstruct post-patching trials, each in one fold (see step 7) |
-| `--target_mode`, `--masked`, `--n_neighbors` | `wavelet`, off, `N_NEIGHBOURS` | **Fallbacks only.** Inference reads these from the run's `metadata.json`; the CLI values are used, with a warning, only for runs whose metadata doesn't record them |
-| `--injection` | off | Placeholder, only prints a message |
+| `--target_mode`, `--masked`, `--n_neighbors`, `--hide_interpolated` | `wavelet`, off, `N_NEIGHBOURS`, off | **Fallbacks only.** Inference reads these from the run's `metadata.json`; the CLI values are used, with a warning, only for runs whose metadata doesn't record them |
 
-**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, and `k_folds` falls back to the number of numbered fold folders.
+**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors`, `hide_interpolated` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, and `k_folds` falls back to the number of numbered fold folders.
 
 **Steps**
 
@@ -630,15 +634,15 @@ Reconstructs every fold's **held-out baseline test trials** with that fold's bes
 **Post-patching folds.** With within-subject folds every subject is a test subject of every fold, so the post-patching trials are split into the same *k* folds with the same stratified slicing per subject × stimulus. Every baseline and every post-patching trial is reconstructed exactly once, and each subject's trials of both sessions are spread evenly over the *k* models, so differences between the fold models cancel in the session contrast.
 
 **`run_reconstruction`**, per batch of 256 samples (patches):
-- **Reconstruction** (`reconstruct_batch`): without masking, one pass of `get_unflattened_output`. With masking, one pass per channel *c*: *c*'s cluster is hidden in every sample of the batch, and row *c* of the output is taken from that pass. That is 23 passes per batch.
+- **Reconstruction** (`reconstruct_batch`): without masking, one pass of `get_unflattened_output`. With masking, one pass per channel *c*: *c*'s cluster is hidden in every sample of the batch, and row *c* of the output is taken from that pass. That is 23 passes per batch. With the run's `hide_interpolated`, every sample's interpolated channels are hidden in all its passes as well.
 - **Back to dB**: `dataset.target_stats.denormalize(output)`. The fold's normalization is one global scale, so errors in dB are the normalized errors times the fold's σ: R² and NMAE are unchanged, and all folds share one scale.
 - **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them.
-- **Metrics per window** of `METRIC_WINDOWS`: the output is set to NaN outside the patch's valid bins (`valid_wavelet_bins` over the whole patch, i.e. the bins that don't reach into the reflect padding), both arrays are cut to the window with `cut_to_timewindow` ([start, end)), and `get_inference_metrics` computes the NaN-aware metrics. The saved output keeps all bins of the allowed channels.
+- **Metrics per window** of `METRIC_WINDOWS`: the output is set to NaN outside the patch's valid bins (`valid_wavelet_bins` over the whole patch, i.e. the bins that don't reach into the reflect padding), both arrays are cut to the window with `cut_to_timewindow` ([start, end), at `TARGET_FS`), and `get_inference_metrics` computes the NaN-aware metrics. The saved output keeps all bins of the allowed channels.
 
 | Window | pre patch | post patch | Scored bins per channel |
 |---|---|---|---|
-| `full` | −1.3 … −0.3 s | −0.3 … 0.7 s | all valid bins: 6 668 of 10 000 |
-| `analysis` | −1.0 … −0.7 s (`PRE_TARGET_WINDOW`) | 0.0 … 0.4 s (`POST_TARGET_WINDOW`) | 60 × 50 = 3 000 / 80 × 50 = 4 000 (all valid) |
+| `full` | −1.3 … −0.3 s | −0.3 … 0.7 s | all valid bins: 1 231 of 2 000 |
+| `analysis` | −1.0 … −0.7 s (`PRE_TARGET_WINDOW`) | 0.0 … 0.4 s (`POST_TARGET_WINDOW`) | 12 × 50 = 600 / 16 × 50 = 800 (all valid) |
 
 The per-trial pre-stimulus correction is ΔE = `analysis` of the post patch − `analysis` of the pre patch.
 
@@ -651,8 +655,8 @@ baseline_reconstruction.h5   /   postpatch_reconstruction.h5        postpatch_ke
         └── {id}/                      e.g. 17  (HDF5 key, i.e. a string)
             ├── attrs: interpolated    indices of the trial's interpolated channels (NaN rows with masking)
             ├── pre/                   pre-stimulus patch (−1.3 … −0.3 s)
-            │   ├── target   (23, 50, 200) float32, gzip   dB wavelet target
-            │   ├── output   (23, 50, 200) float32, gzip   reconstruction in dB, NaN rows for interpolated channels
+            │   ├── target   (23, 50, 40) float32, gzip    dB wavelet target, 25 ms bins
+            │   ├── output   (23, 50, 40) float32, gzip    reconstruction in dB, NaN rows for interpolated channels
             │   └── attrs (one pair per time window):
             │       ├── {window}_metrics_json           trial-level Metrics as JSON
             │       └── {window}_channel_metrics_json   {"ch_0": Metrics, …, "ch_22": Metrics} as JSON
@@ -677,6 +681,7 @@ Metrics are computed per trial and patch, **in dB** (the model outputs are conve
 | `recon_volatility` | same for `σ_rec` | same for `σ_rec` |
 | `nmae` | `mae / signal_volatility` (+ EPS) | `mae / (signal_volatility + EPS)` of the channel |
 | `signal_mean`, `recon_mean` | mean of target / output | mean of the channel's target / output |
+| `level_error` | mean over the allowed channels of their `level_error`, so errors of different channels don't cancel | \|`signal_mean` − `recon_mean`\|: the error of the predicted mean level over the window's bins (over the band's bins for `level_error_bandwise`). The unpredictable bin-to-bin fluctuation, about 5 dB per bin, averages out here, while it dominates `mae`, so `level_error` follows a missed level change about linearly |
 | `corrected_mae` | volatility-corrected MAE, **not stored**: filled in at analysis time by `plot_data_processing.fill_corrected_maes` (see below) | same, corrected per channel |
 | `*_bandwise` | a dict `{band: value}` of the metrics above, restricted to the frequencies in each `FREQ_BANDS` band. Band volatility = mean of the (channel-averaged) `σ` over the band's frequencies | same, within the channel |
 
@@ -702,7 +707,7 @@ trials = io.load_inference_trials(settings.INFERENCE_DIR / "my_model" / "1" / "b
 t = trials[0]
 t.subject, t.condition, t.idx, t.window  # metadata
 t.target_data, t.recon_data            # np.ndarray, read lazily from HDF5 on every access
-t.metrics.nmae_bandwise["gamma (30-60Hz)"]   # selected window (here: analysis)
+t.metrics.nmae_bandwise["gamma (30-45Hz)"]   # selected window (here: analysis)
 t.channel_metrics["ch_8"].nmae         # O1, selected window
 t.full_metrics.mae                     # a specific window, independent of t.window: {full,analysis}_metrics / _channel_metrics
 ```
@@ -711,7 +716,7 @@ t.full_metrics.mae                     # a specific window, independent of t.win
 
 #### Time series metrics
 
-The stored metrics average over time. For errors and signals **over time**, `plot_data_processing.calc_metric_time_series(trial, metric, band_indices)` computes one of `TIME_SERIES_METRICS` on the full (23, 50, 200) tensors and averages it over each band's frequency bins:
+The stored metrics average over time. For errors and signals **over time**, `plot_data_processing.calc_metric_time_series(trial, metric, band_indices)` computes one of `TIME_SERIES_METRICS` on the full (23, 50, 40) tensors and averages it over each band's frequency bins:
 
 | Metric | Value per (channel, frequency, time) |
 |---|---|
@@ -719,7 +724,7 @@ The stored metrics average over time. For errors and signals **over time**, `plo
 | `error` | target − output |
 | `target`, `recon` | target / output |
 
-It returns `{band: (23, 200) array}` for every band and `"all bands"`. Time is kept, so `[:, t]` is every channel at sample *t* (sample = (seconds + 0.2) · 200), and `.mean(axis=0)` gives the whole-head series. The time means equal the stored `mae` / `mae_bandwise` metrics.
+It returns `{band: (23, 40) array}` for every band and `"all bands"`. Time is kept, so `[:, t]` is every channel at bin *t* (bin = (seconds − patch start) · `TARGET_FS`, e.g. (s + 0.3) · 40 in the post patch), and `.mean(axis=0)` gives the whole-head series. The time means equal the stored `mae` / `mae_bandwise` metrics.
 
 Reading the full tensors takes about 10 ms per trial (gzip), about 85 s for all folds and both sessions. The band time series can therefore be saved once to a separate HDF5 file with `io.save_time_series_metrics_hdf` and read back much faster:
 
@@ -957,6 +962,7 @@ uv run python labram_inj_test.py --model_name my_model --injection 0.1 0.25 0.5 
 ## Known issues & caveats
 
 **Design change in progress**
+- **Pooled 5–45 Hz targets need a new dataset and new runs.** `make_dataset.py` has to be re-run (empty `wavelet_targets/` first). Runs trained on the earlier 200-bin, 5–60 Hz targets can't be loaded with the current settings, and their inference files have 200 time bins, which the current analysis code cuts with the wrong rate.
 - `run_general_finetune.py` trains on pre/post patches with masked loss and, with `--masked`, masked-channel reconstruction. It has been run end to end on synthetic data on the CPU only, not yet on the rebuilt dataset on a GPU.
 - `run_inference.py` follows the new design (see [3. Inference](#3-inference-run_inferencepy)). Training and inference have been run end to end on synthetic data on the CPU only, not yet on the rebuilt dataset on a GPU.
 - **The inference files can't be analysed yet.** `io.load_inference_trials` and `Trial` don't read the `pre/` / `post/` subgroups, the plasticity notebooks still select the removed `reference` window, the aggregation in `plot_data_processing` uses `np.mean` and would propagate the NaN metrics of interpolated channels, and the time series writer (`save_time_series_metrics_hdf`) has no patch level.

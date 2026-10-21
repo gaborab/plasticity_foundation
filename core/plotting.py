@@ -239,7 +239,7 @@ def set_heatmap_formatting(ax, target_mode, im=None, cbar_label="Power (dB)"):
 
             plt.colorbar(im, cax=cax, label=cbar_label)
 
-        my_ticks = [5, 8, 12, 20, 30, 60]  # the targets start at 5 Hz
+        my_ticks = [5, 8, 12, 20, 30, 45]  # the frequency window of the targets
         ax.set_yticks(my_ticks)
         ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
@@ -268,9 +268,10 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
     ncols = 3 if target_mode in ["wavelet", "superlet"] else 1
     gs = fig.add_gridspec(nrows=total_rows, ncols=ncols)
 
+    fs = settings.RSFREQ if target_mode == "autoencoder" else settings.TARGET_FS  # time bins per second of the targets
     time_start = time_window[0] if time_window is not None else 0.0
     if analysis_window is not None:
-        data = [{key: cut_to_timewindow(values, time_window, analysis_window, settings.RSFREQ) for key, values in channel_data.items()}
+        data = [{key: cut_to_timewindow(values, time_window, analysis_window, fs) for key, values in channel_data.items()}
                 for channel_data in data]
         time_start = analysis_window[0]
     if apply_log:
@@ -303,7 +304,7 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
                 all_bandwise_data.append([np.nan if interpolated else np.nanmean(abs_error[idxs]) for idxs in bands.values()])
             mae_text = "interpolated, no output" if interpolated else f"MAE: {mae:.2f} dB"
 
-            time = (time_start + np.arange(channel_true.shape[-1]) / settings.RSFREQ) * 1000  # ms relative to stimulus onset
+            time = (time_start + np.arange(channel_true.shape[-1]) / fs) * 1000  # ms relative to stimulus onset, start of every bin
 
             if target_mode == "autoencoder":
                 # Maps exactly to row 'i', column '0'

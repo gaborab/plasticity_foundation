@@ -4,8 +4,8 @@ Gain injection test of a trained masked-channel model, the LaBraM counterpart of
 In a fold's held-out baseline test trials, the activity of a visual-cortex source is made (1 + gain) times stronger after
 stimulus onset (core.utils.inject_sources). The wavelet targets of the post-stimulus patch are recomputed from the original
 and the injected inputs (core.datasets.InjectionDataset), the model reconstructs both, and both are scored on the analysis
-window (settings.POST_TARGET_WINDOW, 0 to 0.4 s), as ridge_leakage.py scores its injection, per band (all 5-60 Hz bins
-and every settings.FREQ_BANDS band):
+window (settings.POST_TARGET_WINDOW, 0 to 0.4 s), as ridge_leakage.py scores its injection, per band (all bins of the
+frequency window and every settings.FREQ_BANDS band):
     error change  = log(SSE injected / SSE original) of the reconstruction, summed over a subject's trials, per channel;
                     the same bins are scored with and without the injection, so this is log(MSE injected / MSE original)
     signal change = log(power injected / power original) of the target (linear power of the dB target), the same way
@@ -40,38 +40,20 @@ from einops import rearrange
 from core import utils as core_utils
 from core.plot_data_processing import create_topomap_info
 from core.plotting import plot_topomap_row, symmetric_limit
+from run_inference import reconstruct_batch
 
 OUTPUT_ROOT = settings.BASE_DIR / "outputs" / "labram_injection"
 PLOT_ROOT = settings.PLOT_DIR / "labram_injection"
 BATCH_SIZE = 32  # trials per batch, each with its original and every injected patch
 
 
-def reconstruct_batch(model, eeg, input_chans, n_chans, neighbour_table=None):
-    """
-    Returns the (batch, n_chans, ...) reconstruction of a batch. Masked (neighbour_table given): row c comes from the pass
-    that hides channel c with its cluster in every sample. Unmasked: one pass.
-    """
-    if neighbour_table is None:
-        with torch.cuda.amp.autocast():
-            return model.get_unflattened_output(eeg, input_chans=input_chans).float()
-    output = None
-    for ch in range(n_chans):
-        hidden = neighbour_table[ch].expand(eeg.shape[0], -1)  # (batch, n_chans), the same cluster for every sample
-        with torch.cuda.amp.autocast():
-            ch_output = model.get_unflattened_output(eeg, input_chans=input_chans, channel_mask=hidden)[:, ch].float()
-        if output is None:
-            output = torch.empty(eeg.shape[0], n_chans, *ch_output.shape[1:], device=eeg.device)
-        output[:, ch] = ch_output
-    return output
-
-
 def run_injection(model, dataset: InjectionDataset, gains: List[float], ch_names, device, bands: Dict[str, np.ndarray],
-                  neighbour_table=None) -> pd.DataFrame:
+                  neighbour_table=None, hide_interpolated=False) -> pd.DataFrame:
     """
     Reconstructs every trial of dataset with and without every injection and returns one row per trial, allowed channel,
     band and gain: the summed squared reconstruction error and the summed linear power of the target on the analysis
     window of the post patch, over the band's frequency bins (bands: {band: frequency indices}), original and injected.
-    Interpolated channels (metadata["allowed"] False) are left out.
+    Interpolated channels (metadata["allowed"] False) are left out, and hidden from the input if hide_interpolated.
     """
     loader = torch_utils.data.DataLoader(dataset, sampler=torch_utils.data.SequentialSampler(dataset), batch_size=BATCH_SIZE)
     window = settings.METRIC_WINDOWS["analysis"]["post"]
@@ -83,11 +65,13 @@ def run_injection(model, dataset: InjectionDataset, gains: List[float], ch_names
             n_trials, n_versions = inputs.shape[:2]  # versions: original, then one per gain
             eeg = inputs.flatten(0, 1).float().to(device, non_blocking=True) / 100 # merge batch and versions
             eeg = rearrange(eeg, 'B N (A T) -> B N A T', T=200)
-            output = reconstruct_batch(model, eeg, input_chans, eeg.shape[1], neighbour_table)
+            # every version of a trial has the trial's interpolated channels
+            interpolated = (~metadata["allowed"]).repeat_interleave(n_versions, dim=0).to(device) if hide_interpolated else None
+            output = reconstruct_batch(model, eeg, input_chans, eeg.shape[1], neighbour_table, interpolated)
             output = dataset.target_stats.denormalize(output).cpu().unflatten(0, (n_trials, n_versions))  # back to dB, back to batch, versions
 
-            output = core_utils.cut_to_timewindow(output, dataset.patch_window, window, dataset.fs)
-            targets = core_utils.cut_to_timewindow(targets, dataset.patch_window, window, dataset.fs)
+            output = core_utils.cut_to_timewindow(output, dataset.patch_window, window, dataset.target_fs)
+            targets = core_utils.cut_to_timewindow(targets, dataset.patch_window, window, dataset.target_fs)
             # sums over time per frequency, then over every band's frequencies: (trials, versions, channels)
             sse_freqs = ((output - targets) ** 2).sum(-1).numpy()
             power_freqs = (10 ** (targets / 10)).sum(-1).numpy()  # linear power of the dB targets
@@ -160,14 +144,15 @@ def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, 
 
 def load_run_settings(model_dir: Path) -> Dict[str, Any]:
     """
-    Returns the settings of the training run the test has to match ({"masked", "n_neighbors", "k_folds"}) from the run's
-    metadata.json. Only wavelet models are supported.
+    Returns the settings of the training run the test has to match ({"masked", "n_neighbors", "k_folds", "hide_interpolated"})
+    from the run's metadata.json, hide_interpolated False for runs that don't record it. Only wavelet models are supported.
     """
     with open(model_dir / "metadata.json", "r", encoding="utf-8") as f:
         hyperparameters = json.load(f)["hyperparameters"]
     if hyperparameters.get("target_mode") != "wavelet":
         raise ValueError(f"Only wavelet models are supported, the run's target mode is {hyperparameters.get('target_mode')}")
-    return {name: hyperparameters[name] for name in ("masked", "n_neighbors", "k_folds")}
+    return {**{name: hyperparameters[name] for name in ("masked", "n_neighbors", "k_folds")},
+            "hide_interpolated": hyperparameters.get("hide_interpolated", False)}
 
 
 def load_target_stats(fold_dir: Path) -> Optional[TargetStats]:
@@ -234,8 +219,8 @@ def main(opts):
     plot_dir.mkdir(parents=True, exist_ok=True)
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes
     plot_sources(topographies, relative_gains, info, ch_names, plot_dir)
-    # every bin of 5-60 Hz and the settings.FREQ_BANDS bands, as the bands of ridge_leakage.py
-    bands = {"5-60 Hz": np.arange(len(settings.FREQS)), **settings.FREQ_BAND_INDICES}
+    # every bin of the frequency window and the settings.FREQ_BANDS bands, as the bands of ridge_leakage.py
+    bands = {settings.FREQ_WINDOW_LABEL: np.arange(len(settings.FREQS)), **settings.FREQ_BAND_INDICES}
 
     # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster
     trial_interpolations = None
@@ -243,7 +228,8 @@ def main(opts):
     if masked:
         trial_interpolations = load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=run_settings["n_neighbors"], n_chans=settings.N_CHANNELS)
-        print(f"Masked-channel reconstruction: every target channel is hidden with its {run_settings['n_neighbors']} nearest electrodes")
+        print(f"Masked-channel reconstruction: every target channel is hidden with its {run_settings['n_neighbors']} nearest electrodes"
+              + (", interpolated channels are hidden from the input" if run_settings["hide_interpolated"] else ""))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     all_trial_errors = []
@@ -265,7 +251,8 @@ def main(opts):
 
         dataset = InjectionDataset(fold.testing_epochs, settings.EPOCH_WINDOW, settings.PATCH_WINDOWS["post"], settings.RSFREQ,
                                    G, gain_sets, settings.INJECTION_ONSET_RAMP, settings.FREQS, settings.PADDING,
-                                   settings.WAVELET_PARAMS, interpolations=trial_interpolations, target_stats=target_stats)
+                                   settings.WAVELET_PARAMS, pool=settings.TARGET_POOL, interpolations=trial_interpolations,
+                                   target_stats=target_stats)
 
         model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS)
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -276,7 +263,8 @@ def main(opts):
         model.eval()
         fold_neighbour_table = torch.as_tensor(neighbour_table, device=device) if neighbour_table is not None else None
 
-        trial_errors = run_injection(model, dataset, opts.injection, ch_names, device, bands, fold_neighbour_table)
+        trial_errors = run_injection(model, dataset, opts.injection, ch_names, device, bands, fold_neighbour_table,
+                                     masked and run_settings["hide_interpolated"])
         trial_errors.insert(0, "fold", i + 1)
         all_trial_errors.append(trial_errors)
 

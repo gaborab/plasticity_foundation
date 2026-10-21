@@ -68,6 +68,9 @@ def get_args():
                         help='Masked-channel reconstruction: hide a target channel and its nearest electrodes, train on the target channel only')
     parser.add_argument('--n_neighbors', type=int, default=settings.N_NEIGHBOURS,
                         help='Nearest electrodes hidden together with the target channel with --masked, 0 hides the target channel only')
+    parser.add_argument('--hide_interpolated', action=argparse.BooleanOptionalAction, default=True,
+                        help='When --masked: hide every trial\'s interpolated channels from the input as well (same mask token), '
+                             'so their spline estimates cannot carry signal of the hidden target. --no-hide_interpolated keeps them as inputs')
 
     return parser.parse_args()
 
@@ -83,7 +86,8 @@ def main(opts):
     # (freqs, time) masks of the target bins the loss and the target stats use in every patch
     masks = None
     if opts.target_mode == 'wavelet':
-        masks = {patch: core_utils.valid_wavelet_bins(settings.FREQS, patch_window, settings.LOSS_WINDOWS[patch], settings.RSFREQ, **settings.WAVELET_PARAMS)
+        masks = {patch: core_utils.valid_wavelet_bins(settings.FREQS, patch_window, settings.LOSS_WINDOWS[patch], settings.RSFREQ, **settings.WAVELET_PARAMS,
+                                                      pool=settings.TARGET_POOL)
                  for patch, patch_window in settings.PATCH_PARAMS['patch_windows'].items()}
         print("Masked-in target bins per patch:", {patch: int(mask.sum()) for patch, mask in masks.items()})
     metrics = ["mse", "mae", "r2"]  # evaluation metrics for autoencoding
@@ -101,7 +105,9 @@ def main(opts):
         trial_interpolations = io.load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS)
         print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
-              f"{N_EVAL_CHANNELS} evaluation channels per validation sample")
+              f"{N_EVAL_CHANNELS} evaluation channels per validation sample"
+              + (", interpolated channels are hidden from the input" if opts.hide_interpolated else ""))
+    hide_interpolated = opts.masked and opts.hide_interpolated
 
     LR = opts.lr
     WEIGHT_DECAY = opts.weight_decay
@@ -132,6 +138,9 @@ def main(opts):
             "masked": opts.masked,
             "n_neighbors": opts.n_neighbors if opts.masked else None,
             "n_eval_channels": N_EVAL_CHANNELS if opts.masked else None,
+            "hide_interpolated": hide_interpolated,
+            "target_pool": settings.TARGET_POOL if opts.target_mode == 'wavelet' else None,
+            "freq_window": settings.SPECTRAL_DECODER_PARAMS['freq_window'] if opts.target_mode == 'wavelet' else None,
         },
         "description": opts.model_desc
     }
@@ -288,7 +297,7 @@ def main(opts):
                 log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
                 lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
-                ch_names=ch_names, neighbour_table=fold_neighbour_table
+                ch_names=ch_names, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated
             )
             print("train statistics: ", train_stats)
             print(f"Saving model to {output_dir}")
@@ -305,7 +314,8 @@ def main(opts):
             if epoch % 3 == 0 or epoch == EPOCHS - 1:
                 print(f" Evaluating on validation set at epoch {epoch}")
                 val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
-                                     is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table)
+                                     is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table,
+                                     hide_interpolated=hide_interpolated)
                 print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
 
                 print(f"Logging val stats to {log_dir}")

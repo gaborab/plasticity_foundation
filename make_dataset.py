@@ -180,12 +180,14 @@ def patch_wavelet_target(tensor_data: torch.Tensor) -> torch.Tensor:
     Computes the wavelet target of a full-length trial (channels, time over settings.WHOLE_EPOCH_WINDOW) as (channels, freqs, time over settings.EPOCH_WINDOW).
     The pre- and post-stimulus patches are transformed separately, each from its own data with reflect padding, and only then joined
     at their shared edge, so no wavelet bin contains data of the other patch.
+    The time axis is pooled into bins of settings.TARGET_POOL samples (utils.pool_power), sampled at settings.TARGET_FS.
     Returned as float16 to halve the storage, convert it to float32 before taking the log.
     """
     patch_targets = []
     for patch_window in (settings.PRE_WINDOW, settings.POST_WINDOW):
         patch_data = utils.cut_to_timewindow(tensor_data, settings.WHOLE_EPOCH_WINDOW, patch_window, settings.RSFREQ)
         mag, _ = utils.calc_wavelet(patch_data, fs=settings.RSFREQ, freqs=settings.FREQS, pad=settings.PADDING, **settings.WAVELET_PARAMS)
+        mag = utils.pool_power(mag, settings.TARGET_POOL)
         # reorder to (channels, freqs, time) for LaBraM compatibility
         patch_targets.append(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2))
     return torch.cat(patch_targets, dim=-1).to(torch.float16)
