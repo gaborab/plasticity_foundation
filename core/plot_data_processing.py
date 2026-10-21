@@ -43,6 +43,21 @@ def calc_time_series_metrics(trial: Trial, metric_names: List[str], band_indices
         metrics_time_series[metric_name] = metric_time_series
     return metrics_time_series
 
+def subtract_channel_dicts(dict1: Dict[str, Dict[str, Dict[str, float]]], dict2: Dict[str, Dict[str, Dict[str, float]]]) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """
+    Returns dict1 - dict2 for every channel, subject and band of dict1, e.g. the post-stimulus minus the pre-stimulus subject means.
+    Expects both dicts as {channel: {subject: {band: value}}}, the format of calc_subjectwise_channel_metric_stats(..., group_by='channel').
+    A value missing from dict2 gives NaN. The inputs are not changed.
+    """
+    res = {}
+    for channel, subjects in dict1.items():
+        res[channel] = {}
+        for subject, bands in subjects.items():
+            other = dict2.get(channel, {}).get(subject, {})
+            res[channel][subject] = {band: value - other.get(band, np.nan) for band, value in bands.items()}
+    return res
+
+
 def calc_subject_adjusted_metric(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, bands: List[str]) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, float]]:
     """
     Calculates volatility-adjusted subject means of metric_name for the whole tensor (every band and "all bands").
@@ -98,9 +113,9 @@ def _adjust_subject_means(b_metric_means: Dict[str, Dict[str, float]], p_metric_
 
     slopes = {}
     for b in band_keys:
-        vol_changes = [delta_vols[s][b] for s in subjects]
-        metric_changes = [delta_metrics[s][b] for s in subjects]
-        slopes[b] = float(np.polyfit(vol_changes, metric_changes, 1)[0])
+        vol_changes = np.array([delta_vols[s][b] for s in subjects])
+        metric_changes = np.array([delta_metrics[s][b] for s in subjects])
+        slopes[b] = _fit_slope(vol_changes, metric_changes)
 
     # filter baseline means for subjects that are in both sessions (adjustment not applied to baseline)
     b_means = {s: {b: b_metric_means[s][b] for b in band_keys} for s in subjects}
@@ -166,21 +181,21 @@ def _fill_corrected_metrics(session_groups: List[List[Metrics]], baseline_metric
 
     # get one slope per band by fitting a line to the centered volatility and MAE of all trials across all subjects
     for k in band_keys:
-        centered_vols, centered_maes = [], []
+        centered_powers, centered_maes = [], []
         # center volatility and MAE within each session group (subject + session)
         for group in session_groups:
-            centered_vols.extend(_center([_band_value(m, 'signal_volatility', k) for m in group]))
+            centered_powers.extend(_center([_band_value(m, 'signal_mean', k) for m in group]))
             centered_maes.extend(_center([_band_value(m, 'mae', k) for m in group]))
-        slopes[k] = float(np.polyfit(centered_vols, centered_maes, 1)[0])
+        slopes[k] = _fit_slope(np.array(centered_powers), np.array(centered_maes))
 
-    # correct every trial's MAE relative to the mean baseline volatility
+    # correct every trial's MAE relative to the mean baseline volatility (NaN stays NaN, e.g. interpolated channels)
     for m in all_metrics:
         m.corrected_mae_bandwise = {}
     for k in band_keys:
-        b_mean_volatility = float(np.mean([_band_value(m, 'signal_volatility', k) for m in baseline_metrics]))
+        b_mean_power = _nan_stats([_band_value(m, 'signal_mean', k) for m in baseline_metrics])[0]
         for m in all_metrics:
             corrected = _band_value(m, 'mae', k) - slopes[k] * (
-                        _band_value(m, 'signal_volatility', k) - b_mean_volatility)
+                        _band_value(m, 'signal_mean', k) - b_mean_power)
             if k == ALL_BANDS:
                 m.corrected_mae = corrected
             else:
@@ -194,9 +209,36 @@ def _band_value(metrics: Metrics, metric_name: str, band: str) -> float:
 
 
 def _center(values: List[float]) -> List[float]:
-    """Subtracts the mean of values from each value."""
-    mean_value = np.mean(values)
+    """Subtracts the mean of the finite values from each value, NaN values stay NaN."""
+    finite = [value for value in values if np.isfinite(value)]
+    mean_value = np.mean(finite) if finite else np.nan
     return [value - mean_value for value in values]
+
+
+def _fit_slope(x: np.ndarray, y: np.ndarray) -> float:
+    """Slope of a line fitted to the pairs where both x and y are finite, NaN if fewer than 2 pairs remain."""
+    finite = np.isfinite(x) & np.isfinite(y)
+    if finite.sum() < 2:
+        return np.nan
+    return float(np.polyfit(x[finite], y[finite], 1)[0])
+
+
+def _nan_stats(values) -> Tuple[float, float, float]:
+    """
+    Mean, SEM (ddof=1) and SD (ddof=0) of the finite values, e.g. leaving out the NaN metrics of interpolated channels.
+    NaN if there is no finite value (a channel interpolated in every trial), the SEM also if there is only one.
+    """
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)] # drop NaN values
+    if len(v) == 0:
+        return np.nan, np.nan, np.nan
+    return float(v.mean()), float(sem(v)) if len(v) > 1 else np.nan, float(v.std())
+
+
+def _nan_mean_sem(values: np.ndarray, axis: int = 0) -> Tuple[np.ndarray, np.ndarray]:
+    """Mean and SEM (ddof=1) along axis over the finite values, NaN where fewer than 1 (mean) or 2 (SEM) remain."""
+    count = np.isfinite(values).sum(axis=axis) # get all non-nans for sem calculation
+    return np.nanmean(values, axis=axis), np.nanstd(values, axis=axis, ddof=1) / np.sqrt(count)
 
 def calc_subjectwise_channel_metric_stats(trial_list: List[Trial], bands: List[str], metric: str,  ch_names: List[str]=None, group_by: str = 'subject') -> Tuple[Dict[str, Dict[str, Dict[str, float]]], Dict[str, Dict[str, Dict[str, float]]]]:
     """
@@ -272,6 +314,7 @@ def calc_subjectwise_time_series(trial_list: List[Trial], metric_name: str, band
     """
     Calculates the mean time series of metric_name in band for each subject, averaged over the subject's trials and the given channels.
     Expects trials loaded with a time series file. channels: indices into the channel dimension, None averages all channels.
+    NaN rows (interpolated channels) are left out of the average.
     Returns {subject: array of shape (time,)}.
     """
     subjectwise_series = {}
@@ -279,7 +322,7 @@ def calc_subjectwise_time_series(trial_list: List[Trial], metric_name: str, band
         series = np.stack([trial.time_series(metric_name, bands=[band])[band] for trial in trials])  # (trials, channels, time)
         if channels is not None:
             series = series[:, channels, :]
-        subjectwise_series[subject] = series.mean(axis=(0, 1))
+        subjectwise_series[subject] = np.nanmean(series, axis=(0, 1))
     return subjectwise_series
 
 def get_subjectwise_time_series_mean(trial_list: List[Trial], metric_name: str, band: str, channels: List[int] = None) -> Tuple[np.ndarray, np.ndarray, int]:
@@ -288,7 +331,8 @@ def get_subjectwise_time_series_mean(trial_list: List[Trial], metric_name: str, 
     Returns the mean and SEM, both of shape (time,), and the number of subjects.
     """
     subject_series = np.stack(list(calc_subjectwise_time_series(trial_list, metric_name, band, channels).values()))
-    return subject_series.mean(axis=0), sem(subject_series, axis=0), subject_series.shape[0]
+    mean, sem_ = _nan_mean_sem(subject_series, axis=0)
+    return mean, sem_, subject_series.shape[0]
 
 def get_subjectwise_time_series_difference(b_trial_list: List[Trial], p_trial_list: List[Trial], metric_name: str, band: str, channels: List[int] = None) -> Tuple[np.ndarray, np.ndarray, int]:
     """
@@ -300,20 +344,24 @@ def get_subjectwise_time_series_difference(b_trial_list: List[Trial], p_trial_li
     p_series = calc_subjectwise_time_series(p_trial_list, metric_name, band, channels)
     subjects = [s for s in b_series if s in p_series]
     diffs = np.stack([p_series[s] - b_series[s] for s in subjects])
-    return diffs.mean(axis=0), sem(diffs, axis=0), len(subjects)
+    mean, sem_ = _nan_mean_sem(diffs, axis=0)
+    return mean, sem_, len(subjects)
 
 def calc_subjectwise_channel_d(b_metrics: Dict[str, Dict[str, Dict[str, float]]], p_metrics: Dict[str, Dict[str, Dict[str, float]]], group_by_bands: bool, ddof: int = 1, effect_size: str = "d_z") -> Dict[str, Dict[str, float]]:
     """
     Calculates a subject-level effect size of the change after patching for every channel and band, with d = the subjects' differences (post - baseline):
         "d_z":   Cohen's d_z = mean(d) / sd(d), the paired effect size (consistency of the change across subjects)
         "glass": Glass's delta = mean(d) / sd(baseline subject means), the change relative to how much subjects differ at baseline
+        "mean":  mean(d), the mean change in the units of the metric (e.g. dB for MAE)
     Expects subject means as {channel: {subject: {band: value}}} for both sessions, e.g. the outputs of calc_subject_adjusted_channel_metric
     or of calc_subjectwise_channel_metric_stats(..., group_by='channel'). Only subjects with both sessions are used.
     ddof: delta degrees of freedom of the standard deviation in the denominator. 1 (default) gives the sample SD, which for d_z matches the paired t-test (d_z = t / sqrt(N)).
+    A subject is only used for a channel and band if both sessions have a finite value there, so a channel interpolated
+    throughout one session of a subject leaves out only that subject. Fewer than 2 subjects give NaN.
     Returns {channel: {band: effect size}}, or {band: {channel: effect size}} if group_by_bands is True (one dict per topomap).
     """
-    if effect_size not in ("d_z", "glass"):
-        raise ValueError(f"Unknown effect_size '{effect_size}', expected 'd_z' or 'glass'")
+    if effect_size not in ("d_z", "glass", "mean"):
+        raise ValueError(f"Unknown effect_size '{effect_size}', expected 'd_z', 'glass' or 'mean'")
 
     channel_d = {}
     for ch in b_metrics.keys():
@@ -325,11 +373,19 @@ def calc_subjectwise_channel_d(b_metrics: Dict[str, Dict[str, Dict[str, float]]]
             for band in b_metrics[ch][subject].keys():
                 bw_subject_diffs.setdefault(band, [])
                 bw_baselines.setdefault(band, [])
-                subj_diff = p_metrics[ch][subject][band] - b_metrics[ch][subject][band]
-                bw_subject_diffs[band].append(subj_diff)
-                bw_baselines[band].append(b_metrics[ch][subject][band])
-        denominators = bw_subject_diffs if effect_size == "d_z" else bw_baselines
-        bw_d = {band: float(np.mean(diffs) / np.std(denominators[band], ddof=ddof)) for band, diffs in bw_subject_diffs.items()}
+                b_value, p_value = b_metrics[ch][subject][band], p_metrics[ch][subject][band]
+                if not (np.isfinite(b_value) and np.isfinite(p_value)):
+                    continue  # the channel has no value in one of the subject's sessions
+                bw_subject_diffs[band].append(p_value - b_value)
+                bw_baselines[band].append(b_value)
+
+        if effect_size == "mean":
+            bw_d = {band: float(np.mean(diffs)) if len(diffs) > 1 else np.nan
+                    for band, diffs in bw_subject_diffs.items()} # mean returns difference in the original units of the metric
+        else:
+            denominators = bw_subject_diffs if effect_size == "d_z" else bw_baselines # std of differences for d_z, std of baseline means for glass's delta
+            bw_d = {band: float(np.mean(diffs) / np.std(denominators[band], ddof=ddof)) if len(diffs) > 1 else np.nan
+                    for band, diffs in bw_subject_diffs.items()}
         channel_d[ch] = bw_d
 
     if group_by_bands:
@@ -470,6 +526,7 @@ def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names
     Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a global (not band-wise) channel-level metric, e.g. "nmae".
     A "_bandwise" suffix is removed, so "nmae_bandwise" also returns the global channel value.
     If ch_names is provided, only those channels are used.
+    NaN values (trials in which the channel was interpolated) are left out; a channel without any finite value gets NaN.
     Returns three dictionaries {channel: value}.
     """
     if "bandwise" in metric_name:
@@ -482,9 +539,7 @@ def get_channel_metric_stats(trial_list: List[Trial], metric_name: str, ch_names
         if len(vals) == 0:
             print(f"WARNING: No values found for channel {ch_name} for metric {metric_name}. This channel will be skipped in the averaging.")
             continue
-        ch_means[ch_name] = np.mean(vals)
-        ch_sems[ch_name] = sem(vals)
-        ch_stds[ch_name] = np.std(vals)
+        ch_means[ch_name], ch_sems[ch_name], ch_stds[ch_name] = _nan_stats(vals)
     return ch_means, ch_sems, ch_stds
 
 
@@ -493,6 +548,7 @@ def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str,
     Calculates the mean, SEM (ddof=1) and SD (ddof=0) over the trials in trial_list of a band-wise channel-level metric for every band in bands.
     "_bandwise" is appended to metric_name if missing, so "nmae" and "nmae_bandwise" are equivalent.
     If ch_names is provided, only those channels are used.
+    NaN values (trials in which the channel was interpolated) are left out; a channel without any finite value gets NaN.
     Returns three dictionaries {channel: {band: value}}.
     """
     if 'bandwise' not in metric_name:
@@ -506,9 +562,10 @@ def get_channel_bandwise_metric_stats(trial_list: List[Trial], metric_name: str,
         if len(vals) == 0:
             print(f"WARNING: No values found for channel {ch_name} for metric {metric_name}")
             continue
-        ch_means[ch_name] = {b: np.mean(band_vals) for b, band_vals in vals.items()}
-        ch_sems[ch_name] = {b: sem(band_vals) for b, band_vals in vals.items()}
-        ch_stds[ch_name] = {b: np.std(band_vals) for b, band_vals in vals.items()}
+        stats = {b: _nan_stats(band_vals) for b, band_vals in vals.items()}
+        ch_means[ch_name] = {b: s[0] for b, s in stats.items()}
+        ch_sems[ch_name] = {b: s[1] for b, s in stats.items()}
+        ch_stds[ch_name] = {b: s[2] for b, s in stats.items()}
     return ch_means, ch_sems, ch_stds
 
 

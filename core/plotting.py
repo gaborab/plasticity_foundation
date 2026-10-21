@@ -14,6 +14,7 @@ import core.io
 from core import settings, io_utils
 from core.io_models import Trial
 from core.plot_data_processing import order_to_channel_viewer_format
+from core.utils import cut_to_timewindow
 
 
 def correlation_plot(x: Dict[str, List[float]], y: Dict[str, List[float]], xlabel: str, ylabel: str, title: str,
@@ -216,7 +217,7 @@ def single_channel_viewer(dataset_data: List[List[Trial]], dataset_metrics: List
     display(ui)
 
 
-def set_heatmap_formatting(ax, target_mode, im=None):
+def set_heatmap_formatting(ax, target_mode, im=None, cbar_label="Power (dB)"):
     if target_mode == "autoencoder":
         ax.set_xlabel("Time (ms)")
         ax.set_ylabel("Amplitude [uV]")
@@ -236,9 +237,9 @@ def set_heatmap_formatting(ax, target_mode, im=None):
             # 1.00 = Make it exactly 100% the height of the heatmap
             cax = ax.inset_axes([1.04, 0, 0.05, 1.0])
 
-            plt.colorbar(im, cax=cax, label='Z-scored Power')
+            plt.colorbar(im, cax=cax, label=cbar_label)
 
-        my_ticks = [2, 4, 5, 10, 20, 50]
+        my_ticks = [5, 8, 12, 20, 30, 60]  # the targets start at 5 Hz
         ax.set_yticks(my_ticks)
         ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
         ax.yaxis.set_minor_formatter(ticker.NullFormatter())
@@ -248,7 +249,17 @@ def set_heatmap_formatting(ax, target_mode, im=None):
 def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str, Any]], suptitle, plot_title,
                          target_mode, freqs,
                          save_filename=None, save=False, show=True, rows=2, apply_log=False, bands=None, param_text="",
-                         **kwargs):
+                         time_window=None, analysis_window=None, **kwargs):
+    """
+    Plots the target, reconstruction and error (all in dB) of one channel for every dataset (one row each), and the
+    band-wise MAE of the shown part.
+    time_window: (start, end) in s of the stored patch, e.g. settings.PATCH_WINDOWS["post"], so the time axis is relative to
+    stimulus onset; None starts the axis at 0.
+    analysis_window: (start, end) in s inside time_window, e.g. settings.POST_TARGET_WINDOW; only this part is plotted and
+    the errors are computed from it. Needs time_window. None plots the whole patch.
+    bands: {band name: frequency bin indices}, e.g. settings.FREQ_BAND_INDICES, for the band-wise MAE.
+    metrics_data: one {"metadata": {subject, condition, id}} dict per dataset, see get_channel_viewer_metrics.
+    """
     # 1. Height Adjustment & Constrained Layout (Fixes stretching and overlapping)
     total_rows = rows + 1 if target_mode in ["wavelet", "superlet"] else rows
     fig = plt.figure(figsize=(16, 4 * total_rows), layout="constrained")
@@ -257,37 +268,42 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
     ncols = 3 if target_mode in ["wavelet", "superlet"] else 1
     gs = fig.add_gridspec(nrows=total_rows, ncols=ncols)
 
+    time_start = time_window[0] if time_window is not None else 0.0
+    if analysis_window is not None:
+        data = [{key: cut_to_timewindow(values, time_window, analysis_window, settings.RSFREQ) for key, values in channel_data.items()}
+                for channel_data in data]
+        time_start = analysis_window[0]
+    if apply_log:
+        data = [{**channel_data, "output": 20 * np.log10(channel_data["output"] + 1e-7)} for channel_data in data]
+
+    # one power scale for all rows, from the 1st to the 99th percentile so single very low bins do not squash it
+    finite = np.concatenate([values[np.isfinite(values)] for channel_data in data for values in channel_data.values()])
+    v_min, v_max = np.percentile(finite, [1, 99]) if finite.size else (0.0, 1.0)
+    errors = [channel_data["target"] - channel_data["output"] for channel_data in data]
+    finite_errors = np.concatenate([np.abs(error[np.isfinite(error)]) for error in errors])
+    err_max = np.percentile(finite_errors, 99) if finite_errors.size else 1.0
+
     all_bandwise_data = []
-    v_max = max([max(channel_data["output"].max(), channel_data["target"].max()) for channel_data in data])
-    v_min = min([min(channel_data["output"].min(), channel_data["target"].min()) for channel_data in data])
     for i in range(len(data)):
         try:
-            channel_data = data[i]
-            channel_metrics = metrics_data[i]
-            channel_recon = channel_data["output"]
-            channel_true = channel_data["target"]
-            metrics = channel_metrics["metrics"]
-            meta = channel_metrics["metadata"]
+            channel_recon = data[i]["output"]
+            channel_true = data[i]["target"]
+            meta = metrics_data[i]["metadata"]
             fig.suptitle(suptitle + meta["condition"] + f"\n{param_text}", fontweight="bold", fontsize=16)
 
             subj = meta.get("subject", "unknown")
             idx = meta.get("id", "unknown")
             row_label = f"({subj}, {idx})"
 
-            bandwise_nmae = metrics.get("nmae_bandwise", [])
-            nmae = metrics.get("nmae", 0.0)
+            # errors of the shown part only, NaN for a channel interpolated in this trial (no output)
+            abs_error = np.abs(errors[i])
+            interpolated = not np.isfinite(abs_error).any()
+            mae = np.nan if interpolated else np.nanmean(abs_error)
+            if bands is not None:
+                all_bandwise_data.append([np.nan if interpolated else np.nanmean(abs_error[idxs]) for idxs in bands.values()])
+            mae_text = "interpolated, no output" if interpolated else f"MAE: {mae:.2f} dB"
 
-            if bandwise_nmae:
-                if isinstance(bandwise_nmae, dict) and bands is not None:
-                    # If metrics are saved as a dictionary, convert to an ordered list
-                    all_bandwise_data.append([bandwise_nmae.get(b, 0.0) for b in bands])
-                else:
-                    all_bandwise_data.append(bandwise_nmae)
-
-            if apply_log:
-                channel_recon = 20 * np.log10(channel_recon + 1e-7)
-
-            time = np.arange(channel_true.shape[-1]) / settings.RSFREQ * 1000
+            time = (time_start + np.arange(channel_true.shape[-1]) / settings.RSFREQ) * 1000  # ms relative to stimulus onset
 
             if target_mode == "autoencoder":
                 # Maps exactly to row 'i', column '0'
@@ -295,31 +311,30 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
                 ax1.plot(time, channel_true, label='True', alpha=0.7)
                 ax1.plot(time, channel_recon, label='Reconstructed', linestyle='--', alpha=0.9)
                 ax1.set_title(f"{plot_title} - {row_label}", loc='left')
-                ax1.text(0.95, 0.05, f"NMAE: {nmae:.4f}", transform=ax1.transAxes, ha='right', va='top', fontsize=10,
+                ax1.text(0.95, 0.05, mae_text, transform=ax1.transAxes, ha='right', va='top', fontsize=10,
                          bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
                 set_heatmap_formatting(ax1, target_mode)
 
             elif target_mode in ["wavelet", "superlet"]:
                 # Column 1: True
                 ax1 = fig.add_subplot(gs[i, 0])
-                im1 = ax1.pcolormesh(time, freqs, channel_true, vmin=-v_max, vmax=v_max)
+                im1 = ax1.pcolormesh(time, freqs, channel_true, shading="gouraud", vmin=v_min, vmax=v_max)
                 ax1.set_title(f"True | {row_label}", pad=10)
                 set_heatmap_formatting(ax1, target_mode, im1)
 
                 # Column 2: Recon
                 ax2 = fig.add_subplot(gs[i, 1])
-                im2 = ax2.pcolormesh(time, freqs, channel_recon, shading="gouraud", vmin=-v_max, vmax=v_max)
+                im2 = ax2.pcolormesh(time, freqs, channel_recon, shading="gouraud", vmin=v_min, vmax=v_max)
                 ax2.set_title(f"Reconstructed | {row_label}", pad=10)
                 set_heatmap_formatting(ax2, target_mode, im2)
 
-                # Column 3: Error
+                # Column 3: Error, its own symmetric scale
                 ax3 = fig.add_subplot(gs[i, 2])
-                im3 = ax3.pcolormesh(time, freqs, channel_true - channel_recon, shading="gouraud", vmin=-v_max,
-                                     vmax=v_max)
+                im3 = ax3.pcolormesh(time, freqs, errors[i], shading="gouraud", vmin=-err_max, vmax=err_max, cmap="RdBu_r")
                 ax3.set_title(f"Error (True - Recon) | {row_label}", pad=10)
-                set_heatmap_formatting(ax3, target_mode, im3)
+                set_heatmap_formatting(ax3, target_mode, im3, cbar_label="Error (dB)")
 
-                ax3.text(0.95, 0.05, f"Total NMAE: {nmae:.4f}", transform=ax3.transAxes, ha='right', va='top',
+                ax3.text(0.95, 0.05, mae_text, transform=ax3.transAxes, ha='right', va='top',
                          fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
 
         except Exception as e:
@@ -336,13 +351,14 @@ def show_reconstructions(data: List[Dict[str, Any]], metrics_data: List[Dict[str
                                                                             range(len(data))]
 
         plot_grouped_bar(
-            x_text=bands,
+            x_text=list(bands.keys()),
             width=0.8 / len(data),
             means=all_bandwise_data,
             labels=dataset_labels,
-            title="Comparison of Band-wise NMAE",
+            title="Comparison of Band-wise MAE",
             single_channel=True,
-            ax=comp_ax
+            ax=comp_ax,
+            y_label="MAE (dB)"
         )
 
     # Note: No plt.tight_layout() here because layout="constrained" handles it automatically!

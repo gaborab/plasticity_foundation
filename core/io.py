@@ -177,12 +177,13 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
             value_str = json.dumps(value, cls=NumpyEncoder)
             group.create_dataset(key, data=value_str)
 
-def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, h5file: h5py.File, time_series_metrics: Dict[str, Dict[str, np.ndarray]]):
+def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, patch: str, h5file: h5py.File, time_series_metrics: Dict[str, Dict[str, np.ndarray]]):
     """
-    Saves the time series metrics of one trial as {subject}/{condition}/{idx}/{metric}/{band}, one (channels, time) dataset per band.
+    Saves the time series metrics of one patch of a trial as {subject}/{condition}/{idx}/{patch}/{metric}/{band}, one (channels, time) dataset per band,
+    the layout of the inference files (see save_inference_trial_hdf).
     Expects time_series_metrics as {metric: {band: (channels, time) array}}, e.g. {"mae": calc_metric_time_series(trial, "mae", band_indices)}.
     """
-    trial_path = f"{subject}/{condition}/{idx}"
+    trial_path = f"{subject}/{condition}/{idx}/{patch}"
     trial_group = h5file.create_group(trial_path)
 
     for metric_name, metric_bands in time_series_metrics.items():
@@ -215,7 +216,7 @@ def load_training_split_keys(path: Path, k_folds:int) -> List[Dict[str, List[Tup
         result.append({split: [tuple(key) for key in keys] for split, keys in fold_keys.items()})
     return result
 
-def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full", time_series_path: Optional[Path] = None) -> List[Trial]:
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full", time_series_path: Optional[Path] = None, stim_patch: str="post") -> List[Trial]:
     """
     Loads the trials of an inference HDF5 file as lazy Trial objects, keeping the file open while they are in use.
     subjects, conditions, idxs: only keep these (None keeps all). idxs are compared with the HDF5 keys, so pass them as strings.
@@ -223,6 +224,7 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     window: key of settings.METRIC_WINDOWS, the time window whose metrics trial.metrics / trial.channel_metrics return.
     time_series_path: optional HDF5 file of time series metrics (see save_time_series_metrics_hdf). Its matching trial groups are attached
     as trial.time_series_data, so trial.time_series(metric) can read them. Trials missing from it are kept without time series data.
+    stim_patch: the patch of every trial to load, "pre" or "post" (also the patch of the attached time series).
     """
     print("Loading inference trials...")
     try:
@@ -255,11 +257,11 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
             for idx, trial_group in cond_group.items():
                 if idxs is not None and idx not in {str(i) for i in idxs}:
                     continue
-                trial = Trial(trial_group, subject, condition, idx, window=window)
+                trial = Trial(trial_group[stim_patch], subject, condition, idx, window=window)
 
                 if ts_data is not None:
                     try:
-                        trial.time_series_data = ts_data[f"{subject}/{condition}/{idx}"]
+                        trial.time_series_data = ts_data[f"{subject}/{condition}/{idx}/{stim_patch}"]
                     except KeyError:
                         n_missing_ts += 1
 

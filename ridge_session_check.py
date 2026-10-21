@@ -29,7 +29,7 @@ from core import settings
 
 OUTPUT_ROOT = settings.BASE_DIR / "outputs" / "ridge_leakage"
 SESSIONS = {"baseline": settings.FINETUNE_DIR.name, "post-patching": settings.PATCH_DIR.name}
-BANDS = ["5-60 Hz", *settings.FREQ_BANDS]
+BANDS = [settings.FREQ_WINDOW_LABEL, *settings.FREQ_BANDS]  # as ridge_leakage.BANDS
 N_CH = len(settings.CHORDER_STANDARD)
 
 

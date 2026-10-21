@@ -86,7 +86,6 @@ PADDING = int(PAD_TIME * RSFREQ)  # Padding in samples for wavelet/superlet targ
 WHOLE_EPOCH_WINDOW = EPOCH_WINDOW  # Whole epoch time window for preprocessing
 BASELINE_WINDOW = None  # no MNE baseline correction: a baseline window would shift each patch by data of the other one
 ANALYSIS_WINDOW = POST_TARGET_WINDOW  # before every button press
-REFERENCE_WINDOW = PRE_TARGET_WINDOW
 
 # time windows the inference metrics are computed on, cut from each patch; bins computed partly from the patch's reflect
 # padding are left out (run_inference), so 'full' is every valid bin of the patch and 'analysis' the scored windows
