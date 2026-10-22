@@ -84,6 +84,18 @@ class Trial:
         return self.trial_data["output"][()]
 
     @property
+    def occlusion_data(self) -> Optional[np.ndarray]:
+        """The (n_chans, n_classes) occlusion logits of a class trial of a model trained with masking, None without them."""
+        return self.trial_data["occlusion"][()] if "occlusion" in self.trial_data else None
+
+    @property
+    def interpolated(self) -> np.ndarray:
+        """Indices of the trial's interpolated channels: an attribute of the trial group, the parent of a patch group in
+        reconstruction files and the loaded group itself in class files."""
+        group = self.trial_data if "interpolated" in self.trial_data.attrs else self.trial_data.parent
+        return np.asarray(group.attrs["interpolated"], dtype=int)
+
+    @property
     def metrics(self) -> Metrics:
         """Trial-level metrics of the selected window, the same cached object as {window}_metrics (e.g. analysis_metrics)."""
         return getattr(self, f"{self.window}_metrics")

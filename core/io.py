@@ -232,7 +232,7 @@ def load_training_split_keys(path: Path, k_folds: int, filename: str = "keys.jso
 
 def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None,
                           idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full",
-                          time_series_path: Optional[Path] = None, stim_patch: str = "post") -> List[Trial]:
+                          time_series_path: Optional[Path] = None, stim_patch: Optional[str] = "post") -> List[Trial]:
     """
     Loads the trials of an inference HDF5 file as lazy Trial objects, keeping the file open while they are in use.
     subjects, conditions, idxs: only keep these (None keeps all). idxs are compared with the HDF5 keys, so pass them as strings.
@@ -241,6 +241,7 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
     time_series_path: optional HDF5 file of time series metrics (see save_time_series_metrics_hdf). Its matching trial groups are attached
     as trial.time_series_data, so trial.time_series(metric) can read them. Trials missing from it are kept without time series data.
     stim_patch: the patch of every trial to load, "pre" or "post" (also the patch of the attached time series).
+    None for files without a patch level (class runs, {subject}/{condition}/{id}): the trial group itself is loaded.
     """
     print("Loading inference trials...")
     try:
@@ -273,7 +274,7 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
             for idx, trial_group in cond_group.items():
                 if idxs is not None and idx not in {str(i) for i in idxs}:
                     continue
-                trial = Trial(trial_group[stim_patch], subject, condition, idx, window=window)
+                trial = Trial(trial_group[stim_patch] if stim_patch is not None else trial_group, subject, condition, idx, window=window)
 
                 if ts_data is not None:
                     try:

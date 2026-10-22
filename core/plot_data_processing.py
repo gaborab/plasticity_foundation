@@ -5,11 +5,60 @@ import numpy as np
 
 from core import settings
 from core.io_models import Trial, Metrics
+from scipy.special import softmax
 from scipy.stats import sem
 import numpy as np
+import pandas as pd
 from collections import defaultdict
 
 ALL_BANDS = "all bands"
+
+def class_trials_frame(trials: List[Trial], model: str, session: str) -> pd.DataFrame:
+    """
+    One row per trial of a class run (load_inference_trials with stim_patch=None): model, session, subject, condition, id,
+    label, pred and the class probabilities p0 ... p{n_classes - 1}.
+    The class logits are the mean of the trial's output rows (23 per-channel rows for LaBraM, one row for the logistic
+    regression), the probabilities their softmax and pred their argmax.
+    """
+    rows = []
+    for trial in trials:
+        logits = trial.recon_data.mean(axis=0) # take mean along channels
+        rows.append({"model": model, "session": session, "subject": trial.subject, "condition": trial.condition,
+                     "id": int(trial.idx), "label": int(trial.target_data), "pred": int(logits.argmax()),
+                     **{f"p{k}": p for k, p in enumerate(softmax(logits))}})
+    return pd.DataFrame(rows)
+
+
+def class_channels_frame(trials: List[Trial], model: str, session: str, ch_names: List[str]) -> pd.DataFrame:
+    """
+    One row per trial and channel of a class run with per-channel output rows (LaBraM): model, session, subject,
+    condition, id, label, channel, interpolated,
+      channel_pred, channel_p_true: the prediction and the true-class probability of the channel's row alone (its softmax);
+                                    after attention, so the channel's vote, not the information it carries
+    and for a model trained with masking:
+      occluded_p_true:  the true-class probability with the channel's cluster hidden (NaN for interpolated channels,
+                        whose clusters were never hidden in training)
+      occlusion_effect: the true-class probability without hiding minus occluded_p_true, the drop caused by the cluster.
+    ch_names: one name per output row.
+    """
+    rows = []
+    for trial in trials:
+        output, label = trial.recon_data, int(trial.target_data)
+        p_true = softmax(output.mean(axis=0))[label]
+        channel_proba = softmax(output, axis=-1)
+        occlusion = trial.occlusion_data
+        occluded_p_true = softmax(occlusion, axis=-1)[:, label] if occlusion is not None else None  # NaN rows stay NaN
+        interpolated = set(trial.interpolated.tolist())
+        for c, ch_name in enumerate(ch_names):
+            row = {"model": model, "session": session, "subject": trial.subject, "condition": trial.condition,
+                   "id": int(trial.idx), "label": label, "channel": ch_name, "interpolated": c in interpolated,
+                   "channel_pred": int(output[c].argmax()), "channel_p_true": channel_proba[c, label]}
+            if occluded_p_true is not None:
+                row["occluded_p_true"] = occluded_p_true[c]
+                row["occlusion_effect"] = p_true - occluded_p_true[c]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
 
 TIME_SERIES_METRICS = {
     'mae': lambda target, recon: np.abs(target - recon),
