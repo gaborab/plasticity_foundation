@@ -118,6 +118,10 @@ METRIC_WINDOWS = {
     'analysis': {'pre': PRE_TARGET_WINDOW, 'post': POST_TARGET_WINDOW},
 }
 
+CLASS_METRIC_WINDOWS = {
+    'full': CLASS_PATCH_WINDOW,
+}
+
 
 ICA_PARAMS = {
     'n_components': 15,

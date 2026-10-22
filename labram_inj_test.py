@@ -67,7 +67,7 @@ def run_injection(model, dataset: InjectionDataset, gains: List[float], ch_names
             eeg = rearrange(eeg, 'B N (A T) -> B N A T', T=200)
             # every version of a trial has the trial's interpolated channels
             interpolated = (~metadata["allowed"]).repeat_interleave(n_versions, dim=0).to(device) if hide_interpolated else None
-            output = reconstruct_batch(model, eeg, input_chans, eeg.shape[1], neighbour_table, interpolated)
+            output, _ = reconstruct_batch(model, eeg, input_chans, neighbour_table, interpolated)
             output = dataset.target_stats.denormalize(output).cpu().unflatten(0, (n_trials, n_versions))  # back to dB, back to batch, versions
 
             output = core_utils.cut_to_timewindow(output, dataset.patch_window, window, dataset.target_fs)

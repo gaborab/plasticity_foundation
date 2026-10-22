@@ -407,7 +407,10 @@ def channel_permutation(key, allowed, seed, n_unmasked: int = 0):
     return rng.permutation(np.concatenate([np.flatnonzero(allowed), np.full(n_unmasked, -1)]))
 
 
-
+def prepare_eeg(samples, device):
+    """ADDED: moves a (batch, n_chans, time) EEG batch to device in LaBraM's units and patch layout (batch, n_chans, n_patches, 200)."""
+    samples = samples.float().to(device, non_blocking=True) / 100
+    return rearrange(samples, 'B N (A T) -> B N A T', T=200)
 
 
 

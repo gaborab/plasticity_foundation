@@ -193,11 +193,14 @@ def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, patch: 
 
 
 
-def save_inference_trial_hdf(subject: str, condition: str, idx: int, patch: str, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]]):
-    trial_path = f"{subject}/{condition}/{str(idx)}/{patch}"
+def save_inference_trial_hdf(subject: str, condition: str, idx: int, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]], patch: str=None, trial_occlusion_output=None):
+    trial_path = f"{subject}/{condition}/{str(idx)}/{patch}" if patch is not None else f"{subject}/{condition}/{str(idx)}"
     trial_group = h5file.create_group(trial_path)
-    trial_group.create_dataset("target", data=trial_target, compression="gzip")
+    # a class id is a scalar, which h5py can't compress
+    trial_group.create_dataset("target", data=trial_target, compression="gzip" if np.ndim(trial_target) else None)
     trial_group.create_dataset("output", data=trial_output, compression="gzip")
+    if trial_occlusion_output is not None:
+        trial_group.create_dataset("occlusion", data=trial_occlusion_output, compression="gzip")
 
     for name, (metrics, ch_metrics) in window_metrics.items():
         trial_group.attrs[f"{name}_metrics_json"] = json.dumps(metrics, cls=NumpyEncoder)

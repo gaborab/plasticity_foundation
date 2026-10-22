@@ -16,11 +16,9 @@ from . import utils as utils
 from einops import rearrange
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
+from core import utils as  core_utils
 
-def prepare_eeg(samples, device):
-    """ADDED: moves a (batch, n_chans, time) EEG batch to device in LaBraM's units and patch layout (batch, n_chans, n_patches, 200)."""
-    samples = samples.float().to(device, non_blocking=True) / 100
-    return rearrange(samples, 'B N (A T) -> B N A T', T=200)
+
 
 
 # ADDED: one step function per task. A step computes the loss of one batch and returns (loss, batch_stats), where
@@ -43,7 +41,7 @@ def reconstruction_step(model, batch, criterion, device, input_chans, neighbour_
     interpolated = ~metadata["allowed"].to(device, non_blocking=True) if hide_interpolated else None
     hidden, loss_mask = target_channel_masks(masks, target_ch.to(device, non_blocking=True), neighbour_table, interpolated)
 
-    output = model(prepare_eeg(samples, device), input_chans, channel_mask=hidden)
+    output = model(core_utils.prepare_eeg(samples, device), input_chans, channel_mask=hidden)
     loss = criterion(output[loss_mask], targets[loss_mask])
 
     def batch_stats():
@@ -66,7 +64,7 @@ def classification_step(model, batch, criterion, device, input_chans, neighbour_
     labels = labels.to(device, non_blocking=True)
     hidden = class_channel_mask(metadata, hidden_centre, device, neighbour_table, hide_interpolated)
 
-    logits = model(prepare_eeg(samples, device), input_chans, channel_mask=hidden)
+    logits = model(core_utils.prepare_eeg(samples, device), input_chans, channel_mask=hidden)
     loss = criterion(logits, labels)
 
     def batch_stats():
@@ -276,8 +274,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
         EEG = batch[0]
         target = batch[1]
 
-        EEG = EEG.float().to(device, non_blocking=True) / 100
-        EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
+        EEG = core_utils.prepare_eeg(EEG, device)  # to device, float32, divide by 100, (batch, n_chans, n_freqs, time)
         mask = batch[3].to(device, non_blocking=True) if len(batch) > 3 else torch.ones_like(target, dtype=torch.bool, device=device)
         target = target.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
         interpolated = ~batch[2]["allowed"].to(device, non_blocking=True) if hide_interpolated else None
@@ -313,7 +310,7 @@ def evaluate_classification(data_loader, model, device, criterion, header='Val:'
     for samples, labels, metadata, hidden_centre in data_loader:
         hidden = class_channel_mask(metadata, hidden_centre, device, hide_interpolated=hide_interpolated)
         with torch.cuda.amp.autocast():
-            all_logits.append(model(prepare_eeg(samples, device), input_chans=input_chans, channel_mask=hidden).float())
+            all_logits.append(model(core_utils.prepare_eeg(samples, device), input_chans=input_chans, channel_mask=hidden).float())
         all_labels.append(labels.to(device, non_blocking=True))
     logits, labels = torch.cat(all_logits), torch.cat(all_labels)
 

@@ -631,14 +631,14 @@ Task D of the decoding handoff (`HANDOFF_location_decoding.md`): LaBraM fine-tun
 **Training**: `nn.CrossEntropyLoss(label_smoothing=0.1)`, otherwise the optimiser settings of 2.5. Validation with `evaluate_classification`: loss, accuracy, **balanced accuracy** (mean recall over the classes, chance 1/8), per-class recall and the confusion matrix (rows: true class). The best checkpoint is the one with the highest validation balanced accuracy.
 
 **Not implemented yet**:
-- **Inference for class runs.** Like `run_inference.py` for reconstruction, a script has to rebuild every fold's test set from its `keys.json`, load `checkpoint-best_val.pth` and save per-trial probabilities and per-channel logits with subject, stimulus and id: the out-of-fold baseline results (handoff D4) and, with every fold model applied to its share of the post-patching trials, the post results (D6). Training saves everything it needs (`keys.json`, the best checkpoint, and `target_mode`, `k_folds`, the classes and the window in `metadata.json`), but doesn't score the test folds itself.
+- **Analysis of class runs.** `run_inference.py` writes the out-of-fold baseline logits (handoff D4) and the post-patching logits (D6) per trial, and for masked-trained runs the occlusion logits (see 3. Inference). Accuracy, balanced accuracy and AUC per participant, the side contrasts and the occlusion maps are not computed anywhere yet.
 - **Class-count equalization** per participant, class and session (handoff ground rule 5).
 
 ---
 
 ### 3. Inference: `run_inference.py`
 
-Reconstructs every fold's **held-out baseline test trials** with that fold's best checkpoint and, with `--postpatch`, a sixth of the post-patching trials per fold. It stores targets, reconstructions and per-trial metrics for both patches of every trial.
+Runs every fold's best checkpoint on the fold's **held-out baseline test trials** and, with `--postpatch`, on a sixth of the post-patching trials per fold. Reconstruction runs store targets, reconstructions and per-trial metrics for both patches of every trial; class runs store the class id and the logits of every trial (see *Class runs* below).
 
 **CLI**
 
@@ -648,24 +648,27 @@ Reconstructs every fold's **held-out baseline test trials** with that fold's bes
 | `--postpatch` | off | Also reconstruct post-patching trials, each in one fold (see step 7) |
 | `--target_mode`, `--masked`, `--n_neighbors`, `--hide_interpolated` | `wavelet`, off, `N_NEIGHBOURS`, off | **Fallbacks only.** Inference reads these from the run's `metadata.json`; the CLI values are used, with a warning, only for runs whose metadata doesn't record them |
 
-**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors`, `hide_interpolated` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, and `k_folds` falls back to the number of numbered fold folders.
+**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors`, `hide_interpolated`, `task_classify` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, `task_classify` falls back to False, and `k_folds` to the number of numbered fold folders.
 
 **Steps**
 
 1. Load all baseline input/target pairs with `KFoldSplitter` and rebuild every fold's split from its saved `keys.json` (`io.load_training_split_keys`, `KFoldSplitter.split_from_keys`), so the test sets are exactly those of training. Keys missing from the loaded data, e.g. after a rebuild of the dataset, are reported.
 2. With `--postpatch`, split the post-patching trials with `split_within_subjects` (same seed and *k*) and use fold *i*'s test set for fold *i*'s model (see below).
-3. With `masked`, load the interpolated channels of both sessions from their `epochs_manifest.csv` and build the cluster table with the run's `n_neighbors`.
+3. Load the interpolated channels of both sessions from their `epochs_manifest.csv`, for every run: they are never scored and every trial records them. They are hidden from the input only if training hid them (the run's `hide_interpolated`, which training sets only with `--masked`). With `masked`, build the cluster table with the run's `n_neighbors`.
 4. Per fold: skip the fold if it has no `checkpoint-best_val.pth`, and load `target_stats.json` (required in wavelet mode).
-5. Build the test `FinetuneDataset` with `normalize=False` (dB targets), the fold's `target_stats` and the interpolations, load the model strictly from the checkpoint and switch it to `eval()`.
+5. Build the test dataset (`build_test_dataset`): a `FinetuneDataset` with `normalize=False` (dB targets), the fold's `target_stats` and the interpolations, or for class runs a `ClassFinetuneDataset` on `CLASS_PATCH_WINDOW`. Load the model strictly from the checkpoint and switch it to `eval()`.
 6. Delete the fold's output folder `{model_name}/{fold}/` if it exists, so no file of a previous run is left next to the new outputs. Anything stored there by hand is deleted too.
 7. `run_reconstruction` on the baseline test set, then, with `--postpatch`, on the fold's post-patching trials, whose keys are saved as `postpatch_keys.json`.
 
 **Post-patching folds.** With within-subject folds every subject is a test subject of every fold, so the post-patching trials are split into the same *k* folds with the same stratified slicing per subject × stimulus. Every baseline and every post-patching trial is reconstructed exactly once, and each subject's trials of both sessions are spread evenly over the *k* models, so differences between the fold models cancel in the session contrast.
 
 **`run_reconstruction`**, per batch of 256 samples (patches):
-- **Reconstruction** (`reconstruct_batch`): without masking, one pass of `get_unflattened_output`. With masking, one pass per channel *c*: *c*'s cluster is hidden in every sample of the batch, and row *c* of the output is taken from that pass. That is 23 passes per batch. With the run's `hide_interpolated`, every sample's interpolated channels are hidden in all its passes as well.
+- **Passes** (`reconstruct_batch`, returns `(output, occlusion)`), built from two functions:
+  - `unmasked_pass`: one pass of `get_unflattened_output` that hides nothing but (with the run's `hide_interpolated`) the interpolated channels.
+  - `masked_pass`: one pass per channel *c* that hides *c*'s cluster in every sample of the batch, 23 passes per batch. Reconstruction keeps row *c* of each pass, the hidden channel's reconstruction; classification keeps the mean over all channel tokens, the class logits with *c*'s cluster hidden (the same pooling as in training, so hidden tokens count as they did there).
+  - Reconstruction uses the masked pass for a model trained with masking and the unmasked pass otherwise; `occlusion` is None. Classification always uses the unmasked pass as `output` (the per-channel logits) and, for a model trained with masking, the masked pass as `occlusion`. A regularly trained model gets no occlusion passes: hidden clusters would be inputs it never saw.
 - **Back to dB**: `dataset.target_stats.denormalize(output)`. The fold's normalization is one global scale, so errors in dB are the normalized errors times the fold's σ: R² and NMAE are unchanged, and all folds share one scale.
-- **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them.
+- **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them. The interpolations are loaded for every run, so this also holds for runs trained without `--masked`, whose earlier inference files scored the interpolated channels.
 - **Metrics per window** of `METRIC_WINDOWS`: the output is set to NaN outside the patch's valid bins (`valid_wavelet_bins` over the whole patch, i.e. the bins that don't reach into the reflect padding), both arrays are cut to the window with `cut_to_timewindow` ([start, end), at `TARGET_FS`), and `get_inference_metrics` computes the NaN-aware metrics. The saved output keeps all bins of the allowed channels.
 
 | Window | pre patch | post patch | Scored bins per channel |
@@ -695,6 +698,22 @@ baseline_reconstruction.h5   /   postpatch_reconstruction.h5        postpatch_ke
 `{window}` is every key of `METRIC_WINDOWS`: `full` and `analysis`. Files of the previous design have no `pre/` / `post/` level and also contain `button` and `reference` windows; the current code doesn't read them. Metrics of interpolated channels are NaN (JSON `NaN`).
 
 (In `autoencoder` mode, `target`/`output` are (23, 200) µV, there are no band-wise metrics and no valid-bin masking.)
+
+**Class runs** (`task_classify` in the run's metadata): the same folds, keys and files, one group per trial (no patch level). Every trial is run once without hiding a cluster, and a model trained with masking also once per cluster (occlusion):
+
+```text
+baseline_reconstruction.h5   /   postpatch_reconstruction.h5
+└── {subject}/{stimulus}/{id}/         lateral and top stimuli only, global has no class
+    ├── attrs: interpolated    indices of the trial's interpolated channels
+    ├── target     scalar int           class id (LOCATION_CLASSES)
+    ├── output     (23, 8) float32      per-channel logits; their mean over the channels is the class logits,
+    │                                    softmax and argmax give the probabilities and the prediction
+    └── occlusion  (23, 8) float32      only for a model trained with masking: row c = class logits with channel c's
+                                         cluster hidden. NaN rows for clusters centred on the trial's interpolated channels
+```
+
+No metrics are stored per trial: accuracy, balanced accuracy, per-class AUC and occlusion effects (class logits without
+hiding minus the occlusion rows) need many trials and are computed in the analysis, per participant.
 
 #### Metric definitions: `core.utils.get_inference_metrics` / `calculate_bandwise_metrics`
 

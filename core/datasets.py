@@ -147,10 +147,11 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
 
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], epoch_window: Tuple[float, float],
                  patch_window: Tuple[float, float], fs: int, condition_classes: Dict[str, int],
-                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0):
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0, unmasked: bool=True):
         self.samples = []
         self.perms = []
         self.epoch = 0
+        self.target_stats = None
         for subj, conds in epochs_dict.items():
             for cond, epoch_list in conds.items():
                 if cond not in condition_classes:
@@ -162,7 +163,7 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
                     metadata = {"subject": subj, "condition": cond, "id": idx, "allowed": allowed}
                     patch_input = utils.cut_to_timewindow(input_tensor.clone().detach(), epoch_window, patch_window, fs)
                     self.samples.append((patch_input, condition_classes[cond], metadata))
-                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed, n_unmasked=int(allowed.sum())))
+                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed, n_unmasked=int(allowed.sum()) if unmasked else 0))
 
     def __len__(self):
         """Returns the number of samples, one per trial of a condition with a class."""
