@@ -291,6 +291,47 @@ def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], met
     return subjectwise_metric, subjectwise_sem
 
 
+LOG_AGGREGATIONS = ("mean_of_logs", "log_of_mean")
+
+def calc_subject_channel_band_means(trial_list: List[Trial], metric_name: str, bands: List[str], log: str = None) -> Tuple[List[str], np.ndarray, np.ndarray]:
+    """
+    Calculates every subject's mean of a channel-level metric (e.g. "mae") for every channel and band, as one array for subject-level tests.
+    Channels are ch_0 ... ch_{N_CHANNELS-1} in channel order, bands are bands followed by "all bands" (the channel's global value).
+    log: None averages the values, "mean_of_logs" averages the natural log of every trial's value (the log of the geometric mean),
+         "log_of_mean" takes the natural log of the subject mean. Both raise a ValueError if a value to take the log of is not positive.
+    NaN values (trials in which the channel was interpolated) are left out; a cell without any finite value gets NaN.
+    Returns the subjects (sorted), the means of shape (subjects, channels, bands + 1) and the number of trials averaged into every mean (same shape).
+    """
+    if log is not None and log not in LOG_AGGREGATIONS:
+        raise ValueError(f"Unknown log '{log}', expected None or one of {LOG_AGGREGATIONS}")
+    band_keys = [*bands, ALL_BANDS]
+    channels = [f"ch_{ch}" for ch in range(settings.N_CHANNELS)]
+    trials_by_subject = _group_by(trial_list, 'subject')
+    subjects = sorted(trials_by_subject)
+
+    means = np.full((len(subjects), len(channels), len(band_keys)), np.nan)
+    counts = np.zeros(means.shape, dtype=int)
+    for i, subject in enumerate(subjects):
+        values = np.array([[[_band_value(trial.channel_metrics[ch], metric_name, band) for band in band_keys] for ch in channels]
+                           for trial in trials_by_subject[subject]], dtype=float)  # (trials, channels, bands)
+        if log == "mean_of_logs":
+            values = _positive_log(values, f"trial values of {metric_name} ({subject})")
+        finite = np.isfinite(values)
+        counts[i] = finite.sum(axis=0)
+        with np.errstate(invalid="ignore"):
+            means[i] = np.where(finite, values, 0.0).sum(axis=0) / counts[i]  # 0 / 0 = NaN for cells without a finite value
+    if log == "log_of_mean":
+        means = _positive_log(means, f"subject means of {metric_name}")
+    return subjects, means, counts
+
+
+def _positive_log(values: np.ndarray, label: str) -> np.ndarray:
+    """Natural log of values, NaN stays NaN. Raises a ValueError if a value is not positive instead of silently dropping it."""
+    n_not_positive = np.sum(values <= 0)  # NaN compares False
+    if n_not_positive:
+        raise ValueError(f"{n_not_positive} {label} are not positive, their log is undefined")
+    return np.log(values)
+
 
 def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metric_name: str) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
