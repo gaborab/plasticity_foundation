@@ -180,6 +180,17 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
         """Sets the epoch number, which selects every sample's hidden cluster of this epoch from its order."""
         self.epoch = epoch
 
+    def get_stacked_items(self):
+        inputs = []
+        targets = []
+        metas = []
+        for input_tensor, label, metadata in self.samples:
+            inputs.append(input_tensor)
+            targets.append(label)
+            metas.append(metadata)
+
+        return np.array(inputs).reshape(len(self.samples), -1), np.array(targets), metas
+
 
 class InjectionDataset(torch.utils.data.Dataset):
     """
@@ -426,8 +437,8 @@ class KFoldSplitter:
             val_set = set(val_keys)
             train_keys = [key for key in grouped_shuffle_keys if key not in test_set and key not in val_set]
             keys = {"train": train_keys, "val": val_keys, "test": test_keys}
-            splits.append(FinetuneSplits(training_dict=self._select(train_keys), validation_dict=self._select(val_keys),
-                                         testing_dict=self._select(test_keys), keys=keys))
+            splits.append(FinetuneSplits(training_dict=self.select(train_keys), validation_dict=self.select(val_keys),
+                                         testing_dict=self.select(test_keys), keys=keys))
         return splits
 
     def split_from_keys(self, keys: List[Dict[str, List[Tuple[str, str, int]]]]) -> List[FinetuneSplits]:
@@ -443,8 +454,8 @@ class KFoldSplitter:
             if any(missing.values()):
                 print(f"WARNING: fold {i + 1} has saved keys missing from the loaded data: {missing}")
             splits.append(
-                FinetuneSplits(training_dict=self._select(fold["train"]), validation_dict=self._select(fold["val"]),
-                               testing_dict=self._select(fold["test"]), keys=fold))
+                FinetuneSplits(training_dict=self.select(fold["train"]), validation_dict=self.select(fold["val"]),
+                               testing_dict=self.select(fold["test"]), keys=fold))
         return splits
 
     @staticmethod
@@ -455,7 +466,7 @@ class KFoldSplitter:
         return [(subject, cond, idx) for subject, conds in epochs.items() for cond, epoch_list in conds.items() for
                 idx, _ in epoch_list]
 
-    def _select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
+    def select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """
         Returns the epochs with the given (subject, condition, id) keys in the {subject: {condition: [(id, (input, target)), ...]}} format of FinetuneDataset.
         """

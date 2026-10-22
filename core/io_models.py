@@ -38,22 +38,6 @@ class Metrics:
     recon_volatility: float = None
     recon_volatility_bandwise: Dict[str, float] = None
 
-@dataclass
-class ClassMetrics:
-    """Trial-level metrics of a classification trial, including the confusion matrix and per-class metrics."""
-
-    @classmethod
-    def from_dict(cls, dict: Dict) -> 'ClassMetrics':
-        metrics_keys = {f.name for f in fields(cls)}
-        filtered_dict = {k: v for k, v in dict.items() if k in metrics_keys}
-        return cls(**filtered_dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    confusion_matrix: np.ndarray = None
-    per_class_metrics: Dict[str, Metrics] = None
-
 
 
 def ch_metrics_from_json(ch_json: str) -> Dict[str, Metrics]:

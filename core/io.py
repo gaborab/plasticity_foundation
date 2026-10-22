@@ -14,8 +14,10 @@ import h5py
 import json
 import numpy as np
 
+
 class NumpyEncoder(json.JSONEncoder):
     """ Special json encoder for numpy types """
+
     def default(self, obj):
         if isinstance(obj, np.integer):
             return int(obj)
@@ -24,6 +26,7 @@ class NumpyEncoder(json.JSONEncoder):
         elif isinstance(obj, np.ndarray):
             return obj.tolist()
         return super(NumpyEncoder, self).default(obj)
+
 
 class EpochIO:
     """
@@ -36,7 +39,8 @@ class EpochIO:
     def __init__(self, ext: Optional[str] = '.pt'):
         self.ext = ext
 
-    def save(self, tensor_data: Any, directory: Path, subject: str, condition: str, epoch_id: int, saved_type = 'epoch') -> Path:
+    def save(self, tensor_data: Any, directory: Path, subject: str, condition: str, epoch_id: int,
+             saved_type='epoch') -> Path:
         """
         Saves a copy of tensor_data to directory as {subject}_{condition}_{saved_type}{epoch_id}{ext} and returns its path.
         """
@@ -78,17 +82,18 @@ class EpochIO:
             for cond, pairs in conds.items():
                 pairs.sort(key=lambda t: t[0])
 
-
         return epochs
 
-    def load_subject(self, directory: Path, subject: str, marker: str = '_epoch') -> Optional[Dict[str, List[tuple[int, Any]]]]:
+    def load_subject(self, directory: Path, subject: str, marker: str = '_epoch') -> Optional[
+        Dict[str, List[tuple[int, Any]]]]:
         """
         Returns the epochs of one subject in `directory` as {condition: [(id1, epoch_tensor1), ...]}, None if there are none.
         """
         all_epochs = self.load_all_epochs(directory, marker=marker)
         return all_epochs.get(subject)
 
-    def load_all_input_target_data(self, input_dir: Path, target_dir: Optional[Path], target_mode: str) -> Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]]:
+    def load_all_input_target_data(self, input_dir: Path, target_dir: Optional[Path], target_mode: str) -> Dict[
+        str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]]:
         """
         Loads the input epochs in `input_dir` and pairs each with the target of the same (subject, condition, id) in `target_dir`.
         target_mode selects the target files by their marker, e.g. "wavelet" loads {subject}_{condition}_wavelet{id}.pt,
@@ -177,7 +182,9 @@ def save_dict_to_hdf(data: Dict, group: h5py.Group):
             value_str = json.dumps(value, cls=NumpyEncoder)
             group.create_dataset(key, data=value_str)
 
-def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, patch: str, h5file: h5py.File, time_series_metrics: Dict[str, Dict[str, np.ndarray]]):
+
+def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, patch: str, h5file: h5py.File,
+                                 time_series_metrics: Dict[str, Dict[str, np.ndarray]]):
     """
     Saves the time series metrics of one patch of a trial as {subject}/{condition}/{idx}/{patch}/{metric}/{band}, one (channels, time) dataset per band,
     the layout of the inference files (see save_inference_trial_hdf).
@@ -192,8 +199,9 @@ def save_time_series_metrics_hdf(subject: str, condition: str, idx: int, patch: 
             metric_group.create_dataset(band, data=metric_array)
 
 
-
-def save_inference_trial_hdf(subject: str, condition: str, idx: int, h5file: h5py.File, trial_target, trial_output, window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]], patch: str=None, trial_occlusion_output=None):
+def save_inference_trial_hdf(subject: str, condition: str, idx: int, h5file: h5py.File, trial_target, trial_output,
+                             window_metrics: Dict[str, Tuple[Metrics, Dict[str, Metrics]]], patch: str = None,
+                             trial_occlusion_output=None):
     trial_path = f"{subject}/{condition}/{str(idx)}/{patch}" if patch is not None else f"{subject}/{condition}/{str(idx)}"
     trial_group = h5file.create_group(trial_path)
     # a class id is a scalar, which h5py can't compress
@@ -206,7 +214,9 @@ def save_inference_trial_hdf(subject: str, condition: str, idx: int, h5file: h5p
         trial_group.attrs[f"{name}_metrics_json"] = json.dumps(metrics, cls=NumpyEncoder)
         trial_group.attrs[f"{name}_channel_metrics_json"] = json.dumps(ch_metrics, cls=NumpyEncoder)
 
-def load_training_split_keys(path: Path, k_folds:int) -> List[Dict[str, List[Tuple[str, str, int]]]]:
+
+def load_training_split_keys(path: Path, k_folds: int, filename: str = "keys.json") -> List[
+    Dict[str, List[Tuple[str, str, int]]]]:
     """
     Loads the keys.json of every fold of a training run in path (folders 1..k_folds) and returns one
     {"train": [...], "val": [...], "test": [...]} dict of (subject, condition, id) keys per fold.
@@ -214,12 +224,15 @@ def load_training_split_keys(path: Path, k_folds:int) -> List[Dict[str, List[Tup
     """
     result = []
     for i in range(k_folds):
-        with open(path / str(i+1) / "keys.json", "r", encoding="utf-8") as f:
+        with open(path / str(i + 1) / filename, "r", encoding="utf-8") as f:
             fold_keys = json.load(f)
         result.append({split: [tuple(key) for key in keys] for split, keys in fold_keys.items()})
     return result
 
-def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None, idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full", time_series_path: Optional[Path] = None, stim_patch: str="post") -> List[Trial]:
+
+def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditions: List[str] = None,
+                          idxs: List[int] | List[str] = None, exclude_subjects: List[str] = None, window: str = "full",
+                          time_series_path: Optional[Path] = None, stim_patch: str = "post") -> List[Trial]:
     """
     Loads the trials of an inference HDF5 file as lazy Trial objects, keeping the file open while they are in use.
     subjects, conditions, idxs: only keep these (None keeps all). idxs are compared with the HDF5 keys, so pass them as strings.
@@ -246,7 +259,7 @@ def load_inference_trials(h5file_path: Path, subjects: List[str] = None, conditi
 
     print(f"Filtering for subjects: {', '.join(subjects) if subjects is not None else 'all'}")
     print(f"Filtering for conditions: {', '.join(conditions) if conditions is not None else 'all'}")
-    print(f"Filtering for idxs: {', '.join(map(str,idxs)) if idxs is not None else 'all'}")
+    print(f"Filtering for idxs: {', '.join(map(str, idxs)) if idxs is not None else 'all'}")
     all_trials = []
     n_missing_ts = 0
     for subject, subj_group in data.items():
@@ -281,7 +294,8 @@ def load_interpolated_channels(manifest_path: Path) -> Dict[Tuple[str, str, int]
     A trial's interpolated channels are the union of the channels interpolated for its whole recording (rec_interpolated)
     and those autoreject interpolated in the epoch itself (ar_interpolated). Trials without interpolation get an empty list.
     """
-    manifest = pd.read_csv(manifest_path, dtype={"rec_interpolated": str, "ar_interpolated": str}, keep_default_na=False)
+    manifest = pd.read_csv(manifest_path, dtype={"rec_interpolated": str, "ar_interpolated": str},
+                           keep_default_na=False)
     interpolated = {}
     for row in manifest.itertuples(index=False):
         channels = {int(ch) for column in (row.rec_interpolated, row.ar_interpolated) for ch in column.split(';') if ch}
@@ -311,6 +325,7 @@ def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
         print(f"Figure saved to: {save_path}")
     except Exception as e:
         print(f"Error saving figure: {e}")
+
 
 def get_stored_subject_names(data_dir: Path) -> List[str]:
     """
