@@ -396,13 +396,15 @@ def balanced_eval_channels(allowed_masks, n_channels):
 
 
 
-def channel_permutation(key, allowed, seed):
+def channel_permutation(key, allowed, seed, n_unmasked: int = 0):
     """
     Returns a fixed random order of the allowed target channels of one sample, seeded by the sample's key,
     so it is the same in every run, fold and dataset order.
+    n_unmasked: entries of -1 ("hide nothing") shuffled in with the channels, e.g. as many as there are channels so that
+    half of a sample's epochs are unmasked. 0 gives exactly the permutation without them.
     """
     rng = np.random.default_rng([seed, zlib.crc32(repr(key).encode())])
-    return rng.permutation(np.flatnonzero(allowed))
+    return rng.permutation(np.concatenate([np.flatnonzero(allowed), np.full(n_unmasked, -1)]))
 
 
 
