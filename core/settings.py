@@ -233,5 +233,16 @@ FREQ_BANDS = {
     'gamma (30-45Hz)': (30, 45)
 }
 FREQ_WINDOW_LABEL = f"{SPECTRAL_DECODER_PARAMS['freq_window'][0]}-{SPECTRAL_DECODER_PARAMS['freq_window'][1]} Hz"  # all bins
+
+# time-resolved location decoding (decoding/run_sliding_lda.py, handoff Task A): the CLASS_PATCH_WINDOW of every trial is
+# band-passed into every band (broadband: low-pass only, it keeps the slow evoked response below 5 Hz), then decimated
+# by DECODING_DECIM (200 -> 100 Hz, all bands stay below the new Nyquist frequency)
+DECODING_BANDS = {f'broadband ({L_FREQ}-45Hz)': (None, 45), **FREQ_BANDS}
+DECODING_DECIM = 2
+# side contrasts (handoff Task B)
+Q4_ACCURACY_WINDOW = None  # (start, end) in s of the accuracy measure, fixed once from the baseline grand average (B1) before post data are looked at; None: the notebook suggests one
+Q4_LATENCY_SEARCH = (0.0, 0.5)  # s, the handoff's 0-0.6 s limited by the end of the window (button presses)
+Q4_LATENCY_SMOOTHING = 0.02  # s, moving average of the AUC curves before the latency
+Q4_PEAK_FRACTION = 0.5  # latency = first time the curve reaches this fraction of its peak above chance
 # indices of the FREQS bins falling into each band, used to index the frequency dimension of spectral tensors
 FREQ_BAND_INDICES = {name: np.where((FREQS >= low) & (FREQS <= high))[0] for name, (low, high) in FREQ_BANDS.items()}
