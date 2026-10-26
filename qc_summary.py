@@ -191,7 +191,8 @@ def subject_table(qc: Path, manifest: pd.DataFrame, bc: pd.DataFrame) -> pd.Data
             'detector-flagged channels per recording (all 65)': b.groupby('rec')['flagged'].sum().mean(),
             'autoreject repaired model channels per kept epoch': m['ar_list'].map(len).mean(),
             'autoreject repaired channels per kept epoch (all 65)': ((a['mean_interp_per_kept_epoch'] * (a['n_epochs'] - a['n_dropped'])).sum()
-                                                                     / (a['n_epochs'] - a['n_dropped']).sum()),
+                                                                     / (a['n_epochs'] - a['n_dropped']).sum()
+                                                                     if (a['n_epochs'] - a['n_dropped']).sum() else np.nan),
             'masked trial x model channel pairs (%)': 100 * m['masked_list'].map(len).mean() / len(settings.CHORDER_STANDARD),
             'ICA components removed per recording': len(removed) / n_recordings if n_recordings else np.nan,
             'ICA removed: eye': (removed['label'] == 'eye blink').sum(),
@@ -220,8 +221,9 @@ def subject_table(qc: Path, manifest: pd.DataFrame, bc: pd.DataFrame) -> pd.Data
     score = overall.loc[complete, SUBJECT_RANK_METRICS].rank(pct=True).mean(axis=1).reindex(overall.index)
     outliers = pd.concat({metric: tukey_outliers(overall.loc[complete, metric]) for metric in SUBJECT_RANK_METRICS}, axis=1)
     outlier_text = outliers.apply(lambda row: '; '.join(m for m, out in row.items() if out), axis=1).reindex(overall.index)
-    outlier_text[~complete] = 'missing QC data: ' + overall.loc[~complete, SUBJECT_RANK_METRICS].isna().apply(
-        lambda row: ', '.join(m for m, na in row.items() if na), axis=1)
+    for subject in overall.index[~complete]:
+        missing_metrics = [m for m in SUBJECT_RANK_METRICS if pd.isna(overall.loc[subject, m])]
+        outlier_text[subject] = 'missing QC data: ' + ', '.join(missing_metrics)
     overall_info = pd.DataFrame({'rank score (1 = worst)': score, 'outlier in': outlier_text.fillna('')})
     table = table.merge(overall_info, left_on='subject', right_index=True, how='left')
     table.loc[table['session'] != 'All', ['rank score (1 = worst)', 'outlier in']] = [np.nan, '']
