@@ -485,6 +485,18 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
 
+
+def show_delta(ax, x, val1, val2):
+    """Marks the gap between two curves at x (e.g. train and validation score at the best epoch) with its absolute size."""
+    delta = np.absolute(val2 - val1)
+    midpoint = (val1 + val2) / 2
+    ax.plot(x, val1, 'ko', markersize=4)
+    ax.plot(x, val2, 'ko', markersize=4)
+    ax.vlines(x=x, ymin=min(val1, val2), ymax=max(val1, val2), color='black', linestyle='--')
+    ax.annotate(rf"$\Delta$: {delta:.4f}", xy=(x, midpoint), xytext=(10, 0), textcoords='offset points', va='center',
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='black', alpha=0.8), color='black', fontsize=10)
+
+
 # functions for saving signal waveforms (for debugging purposes)
 def save_heatmap(channel_data, save_dir: Path, title="Wavelet transform heatmap", xlabel="Time (ms)", ylabel="Frequency (bins)"):
     plt.figure(figsize=(10, 6))

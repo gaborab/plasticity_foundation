@@ -74,6 +74,9 @@ def get_args():
                              'so their spline estimates cannot carry signal of the hidden target. --no-hide_interpolated keeps them as inputs')
     parser.add_argument("--task_classify", action='store_true', default=False,
                         help="Enable classification task instead of autoencoding or spectral decoding. The model will be trained to classify the input EEG epochs into classes instead of reconstructing the input or predicting spectral targets.")
+    parser.add_argument("--postpatch", action='store_true', default=False,
+                        help="Train on the post-patching session instead of the baseline. The folds are the stratified within-subject "
+                             "split with the same seed, so the test sets are the post-patching test sets of run_inference.py --postpatch")
     return parser.parse_args()
 
 
@@ -88,7 +91,13 @@ def main(opts):
     best_metric = 'balanced_accuracy' if opts.task_classify else 'r2'
 
     torch.manual_seed(settings.SEED)
-    kfold = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+    # the session the model is trained on: its input epochs, wavelet targets and epochs manifest (interpolated channels)
+    if opts.postpatch:
+        input_dir, target_dir, session_dir = settings.PATCH_INPUT_EPOCHS_DIR, settings.PATCH_WAVELET_DIR, settings.PATCH_DIR
+    else:
+        input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
+    print(f"Training on the {'post-patching' if opts.postpatch else 'baseline'} session ({input_dir})")
+    kfold = KFoldSplitter(input_data_dir=input_dir, target_data_dir=target_dir, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = kfold.split_within_subjects()
     # (freqs, time) masks of the target bins the loss and the target stats use in every patch
     masks = None
@@ -110,7 +119,7 @@ def main(opts):
     trial_interpolations = None
     neighbour_table = None
     if opts.masked:
-        trial_interpolations = io.load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
+        trial_interpolations = io.load_interpolated_channels(session_dir / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS)
         if opts.task_classify:
             print(f"Classification with cluster hiding: in half of a trial's training epochs a channel is hidden with its "
@@ -153,6 +162,7 @@ def main(opts):
             "hide_interpolated": hide_interpolated,
             "target_pool": settings.TARGET_POOL if opts.target_mode == 'wavelet' else None,
             "task_classify": opts.task_classify,
+            "postpatch": opts.postpatch,
             "freq_window": settings.SPECTRAL_DECODER_PARAMS['freq_window'] if opts.target_mode == 'wavelet' else None,
         },
         "description": opts.model_desc

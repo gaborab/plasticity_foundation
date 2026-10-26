@@ -154,9 +154,9 @@ def save_class_metrics(output, occlusion_output, target, metadata, allowed, h5fi
 def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
     """
     Returns the settings of the training run inference has to match ({"target_mode", "masked", "n_neighbors",
-    "hide_interpolated", "task_classify", "k_folds"}) from the run's metadata.json. Settings older metadata doesn't
-    record fall back to the CLI arguments, task_classify to False (runs before classification existed), k_folds to the
-    number of fold folders in model_dir.
+    "hide_interpolated", "task_classify", "postpatch", "k_folds"}) from the run's metadata.json. Settings older metadata
+    doesn't record fall back to the CLI arguments, task_classify and postpatch to False (runs before they existed, trained
+    on the baseline), k_folds to the number of fold folders in model_dir.
     """
     hyperparameters = {}
     metadata_path = model_dir / "metadata.json"
@@ -171,6 +171,7 @@ def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
         "n_neighbors": opts.n_neighbors,
         "hide_interpolated": opts.hide_interpolated,
         "task_classify": False,
+        "postpatch": False,
         "k_folds": len([d for d in model_dir.iterdir() if d.is_dir() and d.name.isdigit()]),
     }
     run_settings = {}
@@ -208,7 +209,10 @@ def get_args():
                         help='Name of the model architecture to use for inference')
     parser.add_argument('--target_mode', type=str, default='wavelet',
                         help='Fallback if the run\'s metadata.json doesn\'t record it: target mode of the model (wavelet or autoencoder)')
-    parser.add_argument('--postpatch', action='store_true', help='Whether to run inference on postpatch data')
+    parser.add_argument('--postpatch', action='store_true',
+                        help='Whether to run inference on postpatch data as well (a model trained on the baseline). '
+                             'A model trained on post-patching data (run_general_finetune.py --postpatch) is always '
+                             'evaluated on its own post-patching test sets only')
     parser.add_argument('--masked', action='store_true',
                         help='Fallback if the run\'s metadata.json doesn\'t record it: masked-channel reconstruction, '
                              'hide every target channel with its nearest electrodes in turn')
@@ -230,18 +234,27 @@ def main(opts):
     target_mode, masked, k_folds, task_classify = run_settings["target_mode"], run_settings["masked"], run_settings[
         "k_folds"], run_settings["task_classify"]
     spectral = target_mode in ["wavelet", "superlet"]
+    # the session the model was trained on: its test sets are rebuilt from the keys saved during training and saved as
+    # {session}_reconstruction.h5
+    session = "postpatch" if run_settings["postpatch"] else "baseline"
+    if session == "postpatch":
+        input_dir, target_dir, session_dir = settings.PATCH_INPUT_EPOCHS_DIR, settings.PATCH_WAVELET_DIR, settings.PATCH_DIR
+        if opts.postpatch:
+            print("Model trained on post-patching data: evaluated on its own post-patching test sets only")
+    else:
+        input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
 
-    # the baseline test sets are rebuilt from the keys saved during training
-    print("Loading training split keys and building baseline inference folds...")
-    splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR,
-                             target_data_dir=settings.FINETUNE_WAVELET_DIR,
+    print(f"Loading training split keys and building {session} inference folds...")
+    splitter = KFoldSplitter(input_data_dir=input_dir,
+                             target_data_dir=target_dir,
                              target_mode=target_mode, seed=settings.SEED, k_folds=k_folds,
                              no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))
 
-    # every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
+    # baseline model: every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
     postpatch_folds = None
-    if opts.postpatch:
+    run_postpatch = opts.postpatch and session == "baseline"
+    if run_postpatch:
         print("Building post-patching inference folds...")
         postpatch_splitter = KFoldSplitter(input_data_dir=settings.PATCH_INPUT_EPOCHS_DIR,
                                            target_data_dir=settings.PATCH_WAVELET_DIR,
@@ -265,8 +278,8 @@ def main(opts):
 
     # the interpolated channels of every trial: never scored (NaN) and recorded in the output files, in every run.
     # They are hidden from the input only if training hid them (the run's hide_interpolated)
-    trial_interpolations_prepatch = load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
-    trial_interpolations_postpatch = load_interpolated_channels(settings.PATCH_DIR / "epochs_manifest.csv") if opts.postpatch else None
+    trial_interpolations = load_interpolated_channels(session_dir / "epochs_manifest.csv")
+    trial_interpolations_postpatch = load_interpolated_channels(settings.PATCH_DIR / "epochs_manifest.csv") if run_postpatch else None
     hide_interpolated = run_settings["hide_interpolated"]
     # model trained with masking: reconstruction hides every target channel with its cluster, classification runs the
     # occlusion passes as well
@@ -296,7 +309,7 @@ def main(opts):
             raise FileNotFoundError(f"Target stats file not found for fold {i + 1}: {fold_dir / 'target_stats.json'}")
         print(f"Target stats: {target_stats}")
 
-        testing_dataset = build_test_dataset(task_classify, fold.testing_epochs, trial_interpolations_prepatch, target_mode, target_stats)
+        testing_dataset = build_test_dataset(task_classify, fold.testing_epochs, trial_interpolations, target_mode, target_stats)
 
         print("Setting up model with target mode:", target_mode)
         if target_mode == "autoencoder":
@@ -316,15 +329,19 @@ def main(opts):
         fold_neighbour_table = torch.as_tensor(neighbour_table, device=device) if neighbour_table is not None else None
 
         output_path = settings.INFERENCE_DIR / opts.model_name / str(i + 1)
-        baseline_file = output_path / "baseline_reconstruction.h5"
+        session_file = output_path / f"{session}_reconstruction.h5"
         shutil.rmtree(output_path, ignore_errors=True)  # delete existing output directory for this fold if it exists
         output_path.mkdir(parents=True, exist_ok=True)
-        print("Running baseline reconstruction...")
-        run_reconstruction(model, testing_dataset, ch_names, device, baseline_file, valid_bins, band_indices,
+        if session == "postpatch":
+            # the test keys, as a baseline model's inference saves them for its post-patching test sets
+            with open(output_path / "postpatch_keys.json", "w", encoding="utf-8") as f:
+                json.dump({"test": fold.keys["test"]}, f)
+        print(f"Running {session} reconstruction...")
+        run_reconstruction(model, testing_dataset, ch_names, device, session_file, valid_bins, band_indices,
                            fold_neighbour_table, hide_interpolated, classify=task_classify)
-        print("Baseline reconstruction finished.")
+        print(f"{session} reconstruction finished.")
 
-        if opts.postpatch:
+        if run_postpatch:
             print("Running post-patch reconstruction...")
             postpatch_file = output_path / "postpatch_reconstruction.h5"
             with open(output_path / "postpatch_keys.json", "w", encoding="utf-8") as f:
