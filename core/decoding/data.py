@@ -5,6 +5,11 @@ import numpy as np
 from scipy.signal import butter, hilbert, sosfiltfilt
 
 
+def band_file_name(band: str) -> str:
+    """The short name of a DECODING_BANDS band in file names: its first word, e.g. "theta" for "theta (5-8Hz)"."""
+    return band.split(" ")[0]
+
+
 def band_pass_trials(X: np.ndarray, fs: float, bands: Dict[str, Tuple[Optional[float], float]], decim: int = 1,
                      envelope: bool = False, order: int = 4) -> np.ndarray:
     """

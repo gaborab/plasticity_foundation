@@ -11,16 +11,17 @@ needs no model selection), every feature standardized per subject with the subje
 the fold's test trials. Every trial is in one test set, so every trial gets one out-of-fold prediction per band and time.
 
 With --searchlight, the same sliding LDA also runs on every channel's cluster alone (the channel and its N_NEIGHBOURS
-nearest electrodes, core.utils.build_neighbor_mask) in one band (--searchlight_band, default the broadband signal):
-where location is decodable.
+nearest electrodes, core.utils.build_neighbor_mask) in every band (--searchlight_bands to select some): where location
+is decodable, per band.
 
 Output (outputs/inference_outputs/{name}/{fold}/), in the layout of the class runs of run_inference.py:
     baseline_reconstruction.h5, postpatch_reconstruction.h5
         attrs: sets (band names), times (s), envelope
         {subject}/{condition}/{id}: target (class id), output (n_bands, n_times, n_classes) LDA decision values
         (their softmax is the class probabilities), attrs: interpolated
-    baseline_searchlight.h5, postpatch_searchlight.h5 (with --searchlight): the same, sets = the channels at the centre
-        of the clusters, output (n_clusters, n_times, n_classes), attrs also band and n_neighbors
+    baseline_searchlight_{band}.h5, postpatch_searchlight_{band}.h5 (with --searchlight), one per band, {band} its
+        first word (core.decoding.data.band_file_name, e.g. theta): the same, sets = the channels at the centre of the
+        clusters, output (n_clusters, n_times, n_classes), attrs also band and n_neighbors
 Run from the project root: python -m decoding.run_sliding_lda --keys_from class_nomask_10_22
 """
 import argparse
@@ -33,7 +34,7 @@ import numpy as np
 from core import io, settings
 from core import utils as core_utils
 from core.datasets import KFoldSplitter
-from core.decoding.data import band_pass_trials, decoding_times, stack_class_samples
+from core.decoding.data import band_file_name, band_pass_trials, decoding_times, stack_class_samples
 from core.decoding.models import decode_bands, searchlight
 
 CH_NAMES = [name.replace("EEG ", "").replace("-REF", "") for name in settings.CHORDER_STANDARD]
@@ -80,7 +81,8 @@ def main(opts):
                     "condition_classes": settings.CONDITION_CLASS_IDS}
     output_root = settings.INFERENCE_DIR / opts.name
     clusters = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS) if opts.searchlight else None
-    searchlight_band = list(settings.DECODING_BANDS)[opts.searchlight_band]
+    band_names = list(settings.DECODING_BANDS)
+    searchlight_bands = opts.searchlight_bands if opts.searchlight_bands is not None else range(len(band_names))
     print(f"Sliding LDA on {len(settings.DECODING_BANDS)} bands ({'envelopes' if opts.envelope else 'band-passed signals'}), "
           f"{k_folds} folds, output {output_root}")
 
@@ -97,12 +99,11 @@ def main(opts):
             times = decoding_times(settings.CLASS_PATCH_WINDOW, settings.RSFREQ, settings.DECODING_DECIM, X_test.shape[-1])
             save_outputs(fold_dir / f"{session}_reconstruction.h5", outputs, y_test, metas_test, times,
                          settings.DECODING_BANDS, envelope=opts.envelope)
-            if opts.searchlight:
-                b = opts.searchlight_band
+            for b in (searchlight_bands if opts.searchlight else []):
                 cluster_outputs = searchlight(X_train[:, :, b], y_train, [m["subject"] for m in metas_train], X_test[:, :, b],
                                               [m["subject"] for m in metas_test], clusters, n_jobs=opts.n_jobs)
-                save_outputs(fold_dir / f"{session}_searchlight.h5", cluster_outputs, y_test, metas_test, times, CH_NAMES,
-                             envelope=opts.envelope, band=searchlight_band, n_neighbors=opts.n_neighbors)
+                save_outputs(fold_dir / f"{session}_searchlight_{band_file_name(band_names[b])}.h5", cluster_outputs, y_test,
+                             metas_test, times, CH_NAMES, envelope=opts.envelope, band=band_names[b], n_neighbors=opts.n_neighbors)
             print(f"Fold {k + 1} {session}: {len(y_train)} training, {len(y_test)} test trials, {time.time() - start:.0f} s")
 
 
@@ -112,7 +113,8 @@ if __name__ == "__main__":
     parser.add_argument("--name", default="sliding_lda", help="Output folder in settings.INFERENCE_DIR")
     parser.add_argument("--envelope", action="store_true", help="Decode the Hilbert amplitude of every band instead of the band-passed signal")
     parser.add_argument("--n_jobs", type=int, default=1, help="Parallel jobs over the time points")
-    parser.add_argument("--searchlight", action="store_true", help="Also decode from every channel's cluster alone")
-    parser.add_argument("--searchlight_band", type=int, default=0, help="Index into DECODING_BANDS of the searchlight band (0 = broadband)")
+    parser.add_argument("--searchlight", action="store_true", help="Also decode from every channel's cluster alone, in every band")
+    parser.add_argument("--searchlight_bands", type=int, nargs="+", default=None,
+                        help="Indices into DECODING_BANDS of the searchlight bands (0 = broadband), default all")
     parser.add_argument("--n_neighbors", type=int, default=settings.N_NEIGHBOURS, help="Nearest electrodes in every searchlight cluster")
     main(parser.parse_args())
