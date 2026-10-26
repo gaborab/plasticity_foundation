@@ -191,9 +191,6 @@ Every script and notebook reads its configuration from this module at import tim
 | `WAVELET_PARAMS` | `max_cycles` = `MORLET_CYCLES` ≈ 5.44, `max_reach` ≈ 0.286 s | Complex Morlet (`cmorB-1.0`). Cycles per frequency `n(f) = min(5.44, 2π·f·max_reach/3)`: 3 cycles at 5 Hz (`MIN_CYCLES`), rising to 5.44 (the previous `cmor1.5-1.0`) from about 9.1 Hz. Every wavelet reaches at most 0.286 s (3 SD) |
 | `SPECTRAL_DECODER_PARAMS['target_dim']` | 50 × 40 = 2 000 | Head output size per channel token: one patch's pooled wavelet target |
 | `AUTOENCODER_PARAMS['target_dim']` | 200 | Head output size per channel token (raw-signal mode) |
-| `LOCATION_CLASSES`, `CONDITION_CLASS_IDS`, `N_LOCATION_CLASSES` | 8 classes | Location decoding: class id, label, side and eccentricity of every lateralised or top stimulus condition (handoff table 3.1), see 2.7. `global` has no class |
-| `CLASS_PATCH_WINDOW` | (−0.5, 0.5) s | Input of the location decoder: one patch, ending before any button press (see 2.7) |
-| `LOCATION_DECODER_PARAMS` | `n_classes` = 8, `model_version` = `LABRAM_VERSION` | Arguments of `LocationDecoder` |
 | `FREQ_BANDS` | θ 5–8, α 8–12, β 12–30, γ 30–45 Hz | Bands used for band-wise metrics (edges inclusive). The 50 Hz notch lies outside the frequency window |
 | `FREQ_BAND_INDICES` | θ 0–10, α 11–19, β 20–39, γ 40–49 | Indices of the `FREQS` bins in each `FREQ_BANDS` band, computed once from the two. Passed to the metric and time series functions to index the frequency axis of the (23, 50, …) tensors |
 
@@ -443,7 +440,7 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 | Argument | Default | Meaning |
 |---|---|---|
 | `--model_name` | *required* | Output folder name under `outputs/finetune_outputs/` |
-| `--target_mode` | `wavelet` | `wavelet` → `EEGSpectralDecoder`, `autoencoder` → `EEGAutoencoder` (`superlet` is accepted but has no targets). Set to `classify` by `--task_classify` |
+| `--target_mode` | `wavelet` | `wavelet` → `EEGSpectralDecoder`, `autoencoder` → `EEGAutoencoder` (`superlet` is accepted but has no targets) |
 | `--k_folds` | 6 | Number of CV folds |
 | `--lr` | 5e-4 | Peak learning rate |
 | `--weight_decay` | 5e-3 | Initial weight decay |
@@ -454,13 +451,12 @@ Trains one model per cross-validation fold on **baseline** epochs only.
 | `--masked` | off | Masked-channel reconstruction: hide a target channel with its nearest electrodes and train on the target channel only (see 2.3) |
 | `--n_neighbors` | `N_NEIGHBOURS` = 4 | Nearest electrodes hidden with the target channel with `--masked`, 0 hides the target channel only |
 | `--hide_interpolated` / `--no-hide_interpolated` | on | With `--masked`: hide every trial's interpolated channels from the input as well (see 2.3) |
-| `--task_classify` | off | Location classification instead of reconstruction: `LocationDecoder`, 8 classes, cross-entropy, best checkpoint by balanced accuracy (see 2.7) |
 
 #### 2.1 Data split: `core.datasets.KFoldSplitter`
 
 `KFoldSplitter(input_data_dir, target_data_dir, target_mode, seed, k_folds, no_press_threshold)` loads the data once with `EpochIO.load_all_input_target_data`:
 - The input epochs (`*_input{id}.pt` in `FINETUNE_INPUT_EPOCHS_DIR`) are paired by `(subject, stimulus, id)` with their targets (`*_wavelet{id}.pt` in `FINETUNE_WAVELET_DIR`) into `{subject: {stimulus: [(id, (input, target)), …]}}`, sorted by id. Files are read in sorted order, so the folds don't depend on the file system.
-- Inputs without a target are skipped with a warning. In `autoencoder` mode every input is its own target and the target folder is not read. In `classify` mode only the inputs are loaded, as `{subject: {stimulus: [(id, input), …]}}` (`EpochIO.load_all_epochs`); the class comes from the stimulus (see 2.7).
+- Inputs without a target are skipped with a warning. In `autoencoder` mode every input is its own target and the target folder is not read.
 - The splits pass the `(input, target)` pairs through unchanged, so a trial is the unit of splitting and both patches of a trial are always in the same split.
 
 `run_general_finetune.py` uses **`split_within_subjects`**. For every fold it:
@@ -568,20 +564,15 @@ The whole network is fine-tuned; nothing is frozen.
 | Learning rate | Linear warm-up from 0 over **8 epochs** (`WARMUP_EPOCHS`), then per-iteration **cosine decay** from `--lr` to `MIN_LR = 1e-6` |
 | Layer-wise LR decay | `LAYER_DECAY = 0.9`: LR scale = 0.9^(13 − layer_id). Head + `fc_norm` → 1.0, block 12 → 0.9, …, block 1 → 0.9¹², patch/pos/time embeddings + `cls_token` → 0.9¹³ ≈ 0.25 |
 | Weight decay | Cosine schedule **increasing** from `--weight_decay` to 2 × `--weight_decay` (the larger final value is meant to lock in learnt features). 0 for biases, 1-D parameters (LayerNorm) and `model.no_weight_decay()`: `pos_embed`, `cls_token`, `time_embed`, `mask_token`. Only weight matrices are decayed (53 of 228 parameter tensors) |
-| Loss | `nn.SmoothL1Loss(beta=--huber_beta)` (Huber, β = 0.1, in normalized target units), or `nn.MSELoss` with `--mse`, over the **masked-in bins** of the flattened output only: `criterion(output[mask], target[mask])`, with `--masked` only those of each sample's target channel. Bins outside the mask get no gradient. With `--task_classify`: `nn.CrossEntropyLoss(label_smoothing=0.1)` on the class logits |
+| Loss | `nn.SmoothL1Loss(beta=--huber_beta)` (Huber, β = 0.1, in normalized target units), or `nn.MSELoss` with `--mse`, over the **masked-in bins** of the flattened output only: `criterion(output[mask], target[mask])`, with `--masked` only those of each sample's target channel. Bins outside the mask get no gradient |
 | Precision | `torch.cuda.amp.autocast` + `NativeScalerWithGradNormCount` loss scaling |
 | Gradient clipping | None (`CLIP_GRAD = None`) |
 | EMA | Disabled (`USE_EMA = False`) |
 | Seed | `torch.manual_seed(42)`. The data split uses seed 42 too |
 
-The training/eval loops are the vendored `libs/labram/engine_for_finetuning.train_one_epoch` / `evaluate`, modified:
-- `train_one_epoch` is one loop for every task: LR/WD schedules, autocast, loss scaling, gradient accumulation and logging. The task is set by its `step` argument, a function that computes the loss of one batch and returns `(loss, batch_stats)`:
-  - `reconstruction_step`: batches of `FinetuneDataset`, loss over the masked-in bins, with `--masked` the target channel's cluster (and the interpolated channels) hidden. Its options are bound by the script with `functools.partial(reconstruction_step, neighbour_table=..., hide_interpolated=...)`. Logs MSE and R².
-  - `classification_step`: batches of `ClassFinetuneDataset`, loss on the class logits. Logs accuracy.
-  - `prepare_eeg` does what both share: divide by 100 and reshape to `(B, 23, n_patches, 200)`.
-- It reads the loss, the step's `batch_stats()`, grad norm and loss scale from the GPU **every 10 steps** (`print_freq`) and on the last step, not every step, because every read synchronizes the GPU. The epoch averages and TensorBoard curves are therefore over every 10th step, and a non-finite loss stops training at the next logged step (the AMP scaler skips steps with non-finite gradients in between).
+The training/eval loops are the vendored `libs/labram/engine_for_finetuning.train_one_epoch` / `evaluate`, modified for regression, over the masked-in bins only:
+- `train_one_epoch` reads loss, MSE, R², grad norm and loss scale from the GPU **every 10 steps** (`print_freq`) and on the last step, not every step, because every read synchronizes the GPU. The epoch averages and TensorBoard curves are therefore over every 10th step, and a non-finite loss stops training at the next logged step (the AMP scaler skips steps with non-finite gradients in between).
 - `evaluate` sums n, Σt, Σt², Σ(t − o)², Σ|t − o| and the loss on the device in float64 (`MaskedErrorSums`) instead of collecting all predictions and running sklearn on the CPU. It returns `{loss, mse, mae, r2}` pooled over all scored bins, identical to sklearn's values.
-- `evaluate_classification` (class runs) collects the logits and labels of all batches on the device and returns `{loss, accuracy, balanced_accuracy, per_class_recall, confusion_matrix}`.
 
 #### 2.6 Training loop, model selection, outputs
 
@@ -589,9 +580,9 @@ For each fold and epoch:
 
 1. `train_dataset.set_epoch(epoch)`, then `train_one_epoch`. Stats are printed and logged to TensorBoard.
 2. If `epoch % 10 == 0`, save `checkpoint-{epoch}.pth` and overwrite `checkpoint.pth`.
-3. **Every 3rd epoch and on the last epoch**: `evaluate` (`evaluate_classification` for class runs) on the validation set. The metrics are MSE, MAE and **R²**, where R² = 1 − SS_res / SS_tot over the scored bins of all validation predictions pooled, in normalized units. R² is the same as in dB; MSE and MAE are in units of σ (σ² for MSE), so they are not comparable with runs before the fold-level normalization.
+3. **Every 3rd epoch and on the last epoch**: `evaluate` on the validation set. The metrics are MSE, MAE and **R²**, where R² = 1 − SS_res / SS_tot over the scored bins of all validation predictions pooled, in normalized units. R² is the same as in dB; MSE and MAE are in units of σ (σ² for MSE), so they are not comparable with runs before the fold-level normalization.
 4. On the validated epochs, append one JSON line to `log.txt`, containing `train_*` and `val_*` metrics, `epoch` and `n_parameters`. Plot curves against the `epoch` field, not the line number.
-5. If validation R² (balanced accuracy for class runs) beats the best so far, save `checkpoint-best_val.pth`. The best value starts at −∞, so the first validation always saves one, even with a negative R². **This is the checkpoint used by inference and by the notebooks.**
+5. If validation R² beats the best so far, save `checkpoint-best_val.pth`. The best R² starts at −∞, so the first validation always saves one, even with a negative R². **This is the checkpoint used by inference and by the notebooks.**
 
 ```text
 outputs/finetune_outputs/{model_name}/
@@ -611,26 +602,8 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 `metadata.json` contains:
 
 - `hyperparameters`: `target_mode`, `k_folds`, batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, with `--masked` `n_neighbors` and `n_eval_channels`, `hide_interpolated`, and in wavelet mode `target_pool` and `freq_window`. Inference reads `target_mode`, `k_folds`, `masked`, `n_neighbors` and `hide_interpolated` from here. The file is written when all folds are done. Inference has to use the same `n_neighbors`.
-- `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken. Class runs store `balanced_accuracy_per_fold`, `mean_val_balanced_accuracy` and `max_balanced_accuracy_val_epochs` instead.
-- `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`. Class runs: `LOCATION_DECODER_PARAMS`, `patch_window`, the class table `classes` and `loss_type`. `hyperparameters.task_classify` marks a class run.
-
-#### 2.7 Location classification (`--task_classify`)
-
-Task D of the decoding handoff (`HANDOFF_location_decoding.md`): LaBraM fine-tuned to classify which of the **8 mismatch locations** a trial belongs to, one prediction per trial. LaBraM gives no time course (one 1 s patch per channel), so latency and time-resolved accuracy come from the linear decoders of the handoff, which are not implemented in this repository yet.
-
-**Classes** (`LOCATION_CLASSES`, handoff table 3.1): `left_1/2/3` → 0–2 (L_far, L_mid, L_near), `right_1/2/3` → 3–5, `center_2/3` → 6–7 (T_mid, T_near; the top wall has no far location). Eccentricity 1 = far, 2 = mid, 3 = near. `global` is a different mismatch type, not a location, so it has no class and its trials are left out. Adding it would make a 9-class stimulus-type decoder.
-
-**Input** (`CLASS_PATCH_WINDOW` = −0.5 … 0.5 s): one patch of real 200 Hz data, cut from the saved epochs (−1.3 … 0.7 s). It ends at `MIN_REACTION_TIME`: the response keys are location-specific (left/up/right arrow, down for global) and presses earlier than 0.5 s are dropped in `make_dataset.py`, so no button press falls into the window, and the decoder can't read the motor response instead of the visual one. The handoff's −0.2 … 0.8 s would need longer epochs and would include presses.
-
-**Data**: with `--task_classify` the script sets `target_mode = "classify"`. `KFoldSplitter` then loads the inputs only (`EpochIO.load_all_epochs`, `{subject: {stimulus: [(id, input), …]}}`) and splits them with `split_within_subjects` as usual (6 folds, 20 % of every subject × stimulus group's remaining trials for validation). `FinetuneSplits.initialize_class_datasets` builds a `ClassFinetuneDataset` per split: one sample per trial, `(input (23, 200), class id, {"subject", "condition", "id"})`, trials of conditions without a class left out.
-
-**Model**: `LocationDecoder` replaces LaBraM's head with `Linear(200, 8)`. LaBraM applies it to every channel token after its own LayerNorm (`fc_norm`), and `forward` returns the mean of the 23 channel tokens' logits. Because the head is linear, `get_unflattened_output` returns these per-channel logits (B, 23, 8) and their mean is exactly the class logits: every channel's contribution to the decision. The tokens are contextualised by attention, so a contribution shows where the evidence ends up, not where it was measured. LaBraM's standard classifier (mean of the tokens, then LayerNorm and head) gives no such split. `channel_mask` hides channels with the pretrained `mask_token`, as in masked-channel reconstruction.
-
-**Training**: `nn.CrossEntropyLoss(label_smoothing=0.1)`, otherwise the optimiser settings of 2.5. Validation with `evaluate_classification`: loss, accuracy, **balanced accuracy** (mean recall over the classes, chance 1/8), per-class recall and the confusion matrix (rows: true class). The best checkpoint is the one with the highest validation balanced accuracy.
-
-**Not implemented yet**:
-- **Inference for class runs.** Like `run_inference.py` for reconstruction, a script has to rebuild every fold's test set from its `keys.json`, load `checkpoint-best_val.pth` and save per-trial probabilities and per-channel logits with subject, stimulus and id: the out-of-fold baseline results (handoff D4) and, with every fold model applied to its share of the post-patching trials, the post results (D6). Training saves everything it needs (`keys.json`, the best checkpoint, and `target_mode`, `k_folds`, the classes and the window in `metadata.json`), but doesn't score the test folds itself.
-- **Class-count equalization** per participant, class and session (handoff ground rule 5).
+- `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken.
+- `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`.
 
 ---
 
@@ -879,7 +852,7 @@ Reads the QC reports in `outputs/qc/`. It currently plots the distribution of IC
 
 Code from the original LaBraM repository (Jiang et al., *Large Brain Model for Learning Generic Representations with Tremendous EEG Data in BCI*). It includes the pretrained `checkpoints/labram-base.pth`. `vqnsp.pth`, the neural tokenizer, is not used by this pipeline. Project-specific modifications:
 
-- `engine_for_finetuning.py`: `train_one_epoch` is one loop for every task, with the per-batch loss in a step function (`reconstruction_step`, `classification_step`, see 2.5). `evaluate` was rewritten for regression: samples are `(input, target, metadata, mask, target_ch, eval_chs)` tuples, targets and masks are flattened, and the loss, MSE and R² are computed over the masked-in bins only (`evaluate` uses every bin if a batch has no mask). Added `evaluate_classification` for class runs. Added `target_channel_masks` (hidden clusters and target-only loss mask for `--masked`) and `MaskedErrorSums` (validation metrics summed on the device). Training stats are read from the GPU every 10 steps. A TODO in the file plans to move this logic into `core/`.
+- `engine_for_finetuning.py`: `train_one_epoch` / `evaluate` were rewritten for regression. Samples are `(input, target, metadata, mask, target_ch, eval_chs)` tuples, targets and masks are flattened, and the loss, MSE and R² are computed over the masked-in bins only (`evaluate` uses every bin if a batch has no mask). Added `target_channel_masks` (hidden clusters and target-only loss mask for `--masked`) and `MaskedErrorSums` (validation metrics summed on the device). Training stats are read from the GPU every 10 steps. A TODO in the file plans to move this logic into `core/`.
 - `utils.py`: `get_metrics` routes `mse/mae/r2` to a new `autoencoder_metrics_fn`.
 - `optim_factory.py`: `get_num_layer_for_vit` strips the `model.` prefix of the wrapper, so layer-wise LR decay works on `BaseMLPWrapper`.
 - `modeling_finetune.py`: `Block` defaults `init_values` to 1e-4 when it is `None`. This means the LayerScale parameters (`gamma_1`/`gamma_2`) are always created, matching the pretrained checkpoint. The `return_patch_tokens` option used by the wrappers is original LaBraM code. `NeuralTransformer` has the pretraining `mask_token` again, and `forward` / `forward_features` take `bool_masked_pos`: the hidden channels' input is zeroed before the patch embedding and their tokens are replaced by `mask_token` (see [2.3](#23-masked-channel-reconstruction---masked)).
