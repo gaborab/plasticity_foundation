@@ -142,13 +142,21 @@ def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, 
                      plot_dir / "injected_source_topographies.png")
 
 
-def load_run_settings(model_dir: Path) -> Dict[str, Any]:
+def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
     """
     Returns the settings of the training run the test has to match ({"masked", "n_neighbors", "k_folds", "hide_interpolated"})
     from the run's metadata.json, hide_interpolated False for runs that don't record it. Only wavelet models are supported.
     """
     with open(model_dir / "metadata.json", "r", encoding="utf-8") as f:
         hyperparameters = json.load(f)["hyperparameters"]
+
+    if hyperparameters.get("target_mode") is None:
+        print(f"WARNING: target_mode is None in training run settings,using CLI provided target mode {opts.target_mode} as fallback.")
+        hyperparameters["target_mode"] = opts.target_mode
+    if hyperparameters.get("k_folds") is None:
+        print(f"WARNING: k_folds is None in training run settings,using CLI provided k_folds {opts.k_folds} as fallback.")
+        hyperparameters["k_folds"] = opts.k_folds
+
     if hyperparameters.get("target_mode") != "wavelet":
         raise ValueError(f"Only wavelet models are supported, the run's target mode is {hyperparameters.get('target_mode')}")
     return {**{name: hyperparameters[name] for name in ("masked", "n_neighbors", "k_folds")},
@@ -178,6 +186,9 @@ def get_args():
                         help='head model of the injected source: fsaverage template (downloads ~200 MB on first use) or an offline 3-shell sphere')
     parser.add_argument('--mixed_injection', action='store_true', default=False,
                         help='inject the settings.MIXED_INJECTION_GAINS sources at once, each with its own gain. Needs --head_model fsaverage')
+    parser.add_argument('--target_mode', type=str, help='user-provided target mode to use as fallback if training did not log target_mode')
+    parser.add_argument('--k_folds', type=int, default=6, help='user-provided number of folds for training as fallback')
+    parser.add_argument('--save_tag_name', type=str, default=None,)
     opts = parser.parse_args()
     if opts.injection is None:
         if not opts.mixed_injection:
@@ -189,7 +200,7 @@ def get_args():
 def main(opts):
     print(f"Running injection test with {opts.model_name} model")
     model_dir = settings.FINETUNE_OUTPUT_DIR / opts.model_name
-    run_settings = load_run_settings(model_dir)
+    run_settings = load_run_settings(model_dir, opts)
     print(f"Run settings: {run_settings}")
     masked, k_folds = run_settings["masked"], run_settings["k_folds"]
 
@@ -215,6 +226,8 @@ def main(opts):
     print(f"Injected source: {description}, strongest at {', '.join(roi)}")
     # one folder per injection, so single and mixed runs of the same model keep their own results
     injection_name = f"{'mixed' if opts.mixed_injection else 'single'}_{opts.head_model}"
+    if opts.save_tag_name is not None:
+        injection_name += opts.save_tag_name
     plot_dir = PLOT_ROOT / opts.model_name / injection_name
     plot_dir.mkdir(parents=True, exist_ok=True)
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes

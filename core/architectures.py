@@ -14,7 +14,7 @@ class LocationDecoder(nn.Module):
 
     def __init__(self, n_classes, model_version='labram_base_patch200_200', pretrained=True):
         super().__init__()
-        self.model = create_model(model_version, pretrained=pretrained)
+        self.model = create_model(model_version, pretrained=pretrained, drop_path_rate=0.1)
         self.n_classes = n_classes
         # LaBraM's forward applies self.model.head, a head stored anywhere else would never be used
         self.model.head = nn.Linear(self.model.embed_dim, n_classes)
