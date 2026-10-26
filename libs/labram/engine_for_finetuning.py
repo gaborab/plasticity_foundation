@@ -54,40 +54,21 @@ def reconstruction_step(model, batch, criterion, device, input_chans, neighbour_
     return loss, batch_stats
 
 
-def classification_step(model, batch, criterion, device, input_chans, neighbour_table=None, hide_interpolated=False):
+def classification_step(model, batch, criterion, device, input_chans):
     """
-    Loss of one batch of (input, class id, metadata, hidden_centre) from ClassFinetuneDataset, criterion on the class logits.
-    neighbour_table: (n_chans, n_chans) boolean cluster table on device: every sample's hidden_centre is hidden with its
-    cluster (nothing for -1), so the model can't rely on one region. None hides no clusters.
-    hide_interpolated: hide every sample's interpolated channels (metadata["allowed"] False) as well.
+    Loss of one batch of (input, class id, metadata) from ClassFinetuneDataset, criterion on the class logits.
     Logged: accuracy of the batch.
     """
-    samples, labels, metadata, hidden_centre = batch
+    samples, labels, _ = batch
     labels = labels.to(device, non_blocking=True)
-    hidden = class_channel_mask(metadata, hidden_centre, device, neighbour_table, hide_interpolated)
 
-    logits = model(prepare_eeg(samples, device), input_chans, channel_mask=hidden)
+    logits = model(prepare_eeg(samples, device), input_chans)
     loss = criterion(logits, labels)
 
     def batch_stats():
         return {"accuracy": (logits.detach().argmax(dim=1) == labels).float().mean().item()}
 
     return loss, batch_stats
-
-
-def class_channel_mask(metadata, hidden_centre, device, neighbour_table=None, hide_interpolated=False):
-    """
-    ADDED: the (batch, n_chans) boolean channel_mask of a classification batch: the cluster of every sample's hidden_centre
-    (neighbour_table row, none for -1) and, with hide_interpolated, the sample's interpolated channels. None if nothing is hidden.
-    """
-    hidden = None
-    if neighbour_table is not None:
-        centre = hidden_centre.to(device, non_blocking=True)
-        hidden = neighbour_table[centre.clamp(min=0)] & (centre >= 0)[:, None]  # -1 hides no cluster
-    if hide_interpolated:
-        interpolated = ~metadata["allowed"].to(device, non_blocking=True)
-        hidden = interpolated if hidden is None else hidden | interpolated
-    return hidden
 
 
 def target_channel_masks(masks, target_ch, neighbour_table, interpolated=None):
@@ -298,11 +279,9 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
 
 
 @torch.no_grad()
-def evaluate_classification(data_loader, model, device, criterion, header='Val:', ch_names=None, n_classes=None,
-                            hide_interpolated=False):
+def evaluate_classification(data_loader, model, device, criterion, header='Val:', ch_names=None, n_classes=None):
     """
-    ADDED: evaluates a classifier on batches of (input, class id, metadata, hidden_centre) from ClassFinetuneDataset.
-    No cluster is hidden; with hide_interpolated every sample's interpolated channels are, as in training.
+    ADDED: evaluates a classifier on batches of (input, class id, metadata) from ClassFinetuneDataset.
     The logits and labels of all batches are collected on the device and scored once at the end.
     Returns {"loss", "accuracy", "balanced_accuracy" (mean recall over the classes, chance 1 / n_classes),
     "per_class_recall" (list, NaN for a class without samples), "confusion_matrix" (list of rows: true class, columns: predicted)}.
@@ -310,10 +289,9 @@ def evaluate_classification(data_loader, model, device, criterion, header='Val:'
     input_chans = utils.get_input_chans(ch_names) if ch_names is not None else None
     model.eval()
     all_logits, all_labels = [], []
-    for samples, labels, metadata, hidden_centre in data_loader:
-        hidden = class_channel_mask(metadata, hidden_centre, device, hide_interpolated=hide_interpolated)
+    for samples, labels, _ in data_loader:
         with torch.cuda.amp.autocast():
-            all_logits.append(model(prepare_eeg(samples, device), input_chans=input_chans, channel_mask=hidden).float())
+            all_logits.append(model(prepare_eeg(samples, device), input_chans=input_chans).float())
         all_labels.append(labels.to(device, non_blocking=True))
     logits, labels = torch.cat(all_logits), torch.cat(all_labels)
 

@@ -105,20 +105,15 @@ def main(opts):
         print("Please specify model name")
         return
 
-    # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster.
-    # classification with --masked: a random cluster is hidden in half of the training epochs of every trial
+    # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster
     trial_interpolations = None
     neighbour_table = None
     if opts.masked:
         trial_interpolations = io.load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS)
-        if opts.task_classify:
-            print(f"Classification with cluster hiding: in half of a trial's training epochs a channel is hidden with its "
-                  f"{opts.n_neighbors} nearest electrodes" + (", interpolated channels are always hidden" if opts.hide_interpolated else ""))
-        else:
-            print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
-                  f"{N_EVAL_CHANNELS} evaluation channels per validation sample"
-                  + (", interpolated channels are hidden from the input" if opts.hide_interpolated else ""))
+        print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
+              f"{N_EVAL_CHANNELS} evaluation channels per validation sample"
+              + (", interpolated channels are hidden from the input" if opts.hide_interpolated else ""))
     hide_interpolated = opts.masked and opts.hide_interpolated
 
     LR = opts.lr
@@ -242,7 +237,7 @@ def main(opts):
 
         # the loss of one training batch: classification or (masked-channel) reconstruction
         if opts.task_classify:
-            train_step = partial(classification_step, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated)
+            train_step = classification_step
         else:
             train_step = partial(reconstruction_step, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated)
 
@@ -253,7 +248,7 @@ def main(opts):
         if opts.task_classify:
             train_dataset, val_dataset, test_dataset = fold.initialize_class_datasets(
                 epoch_window=settings.EPOCH_WINDOW, patch_window=settings.CLASS_PATCH_WINDOW, fs=settings.RSFREQ,
-                condition_classes=settings.CONDITION_CLASS_IDS, interpolations=trial_interpolations, seed=settings.SEED)
+                condition_classes=settings.CONDITION_CLASS_IDS)
             print(f"Class samples: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
         else:
             train_dataset, val_dataset, test_dataset = fold.initialize_datasets(patch_params=settings.PATCH_PARAMS,
@@ -345,7 +340,7 @@ def main(opts):
                 print(f" Evaluating on validation set at epoch {epoch}")
                 if opts.task_classify:
                     val_stats = evaluate_classification(val_loader, model, device, criterion, header='Val:', ch_names=ch_names,
-                                                        n_classes=settings.N_LOCATION_CLASSES, hide_interpolated=hide_interpolated)
+                                                        n_classes=settings.N_LOCATION_CLASSES)
                 else:
                     val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
                                          is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table,

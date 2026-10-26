@@ -137,47 +137,31 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
     epoch_window: (start, end) in s of the saved input epochs. patch_window: (start, end) in s of the classified input,
     a multiple of 1 s (one LaBraM patch per second). fs: sampling frequency of the inputs.
     condition_classes: {condition: class id}; trials of conditions without a class (e.g. global) are left out.
-    interpolations: {(subject, condition, id): interpolated channel indices}, see io.load_interpolated_channels.
-    metadata["allowed"] is False for them. Without it every channel is allowed.
-    seed: seed of the per-sample hiding orders. Like the target channels of FinetuneDataset, every sample has a fixed random
-    order of its allowed channels, here with as many "hide nothing" entries (-1) shuffled in, and epoch e uses entry e:
-    the centre of the channel cluster hidden in that epoch (see set_epoch). Over the epochs every allowed channel's cluster
-    is hidden equally often, and half of a sample's epochs are unmasked. Only the training step uses it.
     """
 
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], epoch_window: Tuple[float, float],
-                 patch_window: Tuple[float, float], fs: int, condition_classes: Dict[str, int],
-                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0):
+                 patch_window: Tuple[float, float], fs: int, condition_classes: Dict[str, int]):
         self.samples = []
-        self.perms = []
-        self.epoch = 0
         for subj, conds in epochs_dict.items():
             for cond, epoch_list in conds.items():
                 if cond not in condition_classes:
                     continue
                 for idx, input_tensor in epoch_list:
-                    allowed = torch.ones(input_tensor.shape[0], dtype=torch.bool)
-                    if interpolations is not None:
-                        allowed[interpolations.get((subj, cond, idx), [])] = False
-                    metadata = {"subject": subj, "condition": cond, "id": idx, "allowed": allowed}
+                    metadata = {"subject": subj, "condition": cond, "id": idx}
                     patch_input = utils.cut_to_timewindow(input_tensor.clone().detach(), epoch_window, patch_window, fs)
                     self.samples.append((patch_input, condition_classes[cond], metadata))
-                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed, n_unmasked=int(allowed.sum())))
 
     def __len__(self):
         """Returns the number of samples, one per trial of a condition with a class."""
         return len(self.samples)
 
     def __getitem__(self, idx):
-        """Returns (input, class id, metadata, hidden_centre) of one trial: hidden_centre is the centre channel of the
-        cluster hidden in the current epoch (see set_epoch), -1 to hide nothing."""
-        input_tensor, label, metadata = self.samples[idx]
-        perm = self.perms[idx]
-        return input_tensor, label, metadata, int(perm[self.epoch % len(perm)])
+        """Returns (input, class id, metadata) of one trial."""
+        return self.samples[idx]
 
     def set_epoch(self, epoch: int):
-        """Sets the epoch number, which selects every sample's hidden cluster of this epoch from its order."""
-        self.epoch = epoch
+        """Does nothing: the samples don't change between epochs. Kept so the training loop can treat both datasets alike."""
+        pass
 
 
 class InjectionDataset(torch.utils.data.Dataset):
@@ -314,14 +298,13 @@ class FinetuneSplits:
         return training_dataset, validation_dataset, testing_dataset
 
     def initialize_class_datasets(self, epoch_window: Tuple[float, float], patch_window: Tuple[float, float], fs: int,
-                                  condition_classes: Dict[str, int], interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None,
-                                  seed: int = 0) -> Tuple[ClassFinetuneDataset, ClassFinetuneDataset, ClassFinetuneDataset]:
+                                  condition_classes: Dict[str, int]) -> Tuple[ClassFinetuneDataset, ClassFinetuneDataset, ClassFinetuneDataset]:
         """
         Builds the training, validation and testing ClassFinetuneDataset of this fold, the arguments are those of ClassFinetuneDataset.
         Expects the fold's epochs without targets (KFoldSplitter with target_mode "classify").
         """
         datasets = [
-            ClassFinetuneDataset(epochs, epoch_window, patch_window, fs, condition_classes, interpolations, seed)
+            ClassFinetuneDataset(epochs, epoch_window, patch_window, fs, condition_classes)
             for epochs in (self.training_epochs, self.validation_epochs, self.testing_epochs)]
 
         training_dataset, validation_dataset, testing_dataset = datasets
