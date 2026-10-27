@@ -8,10 +8,11 @@ session by decoding.run_sliding_lda.run_lda, the first half saved as "baseline" 
 folder. Without a planted change ("null") no Task B contrast may come out significant (the handoff repeats this with 3 splits).
 C3/C4: the same, with a change planted into the pseudo post trials of one condition at a time (--conditions): a delay
 of every --delays size (core.decoding.data.plant_delay, no searchlight), and an attenuation of the posterior evoked
-response by every --attenuations size (plant_attenuation). The folds of the planted pseudo post equal the null ones.
+response by every --attenuations size (plant_attenuation; with --class_specific only its location-specific part,
+plant_class_attenuation). The folds of the planted pseudo post equal the null ones.
 
 Output: outputs/inference_outputs/{name}_{plant}_split{split_seed}/{fold}/, as decoding/run_sliding_lda.py, with plant
-"null", e.g. "delay_right_2_20ms" or "attenuation_right_2_0.25".
+"null", e.g. "delay_right_2_20ms", "attenuation_right_2_0.25" or "classattenuation_right_2_1".
 Run from the project root: python -m decoding.run_lda_injection --split_seed 0
 (the further null splits: python -m decoding.run_lda_injection --split_seed 1 --null_only)
 """
@@ -81,10 +82,15 @@ def main(opts):
             decode(delayed, f"delay_{condition}_{round(delay * 1000)}ms", None)  # the searchlight isn't needed for a delay
         posterior = [name in settings.POSTERIOR_CHANNELS for name in CH_NAMES]
         for attenuation in opts.attenuations:
-            attenuated = data.plant_attenuation(pseudo_post, [condition], attenuation=attenuation, channel_mask=posterior,
-                                                epoch_window=settings.EPOCH_WINDOW, fs=settings.RSFREQ,
-                                                window=settings.PLANT_ATTENUATION_WINDOW)
-            decode(attenuated, f"attenuation_{condition}_{attenuation:g}", searchlight_bands)
+            plant_args = {"channel_mask": posterior, "epoch_window": settings.EPOCH_WINDOW, "fs": settings.RSFREQ,
+                          "window": settings.PLANT_ATTENUATION_WINDOW}
+            if opts.class_specific:
+                attenuated = data.plant_class_attenuation(pseudo_post, [condition], attenuation=attenuation, **plant_args,
+                                                          location_conditions=list(settings.LOCATION_CLASSES))
+                decode(attenuated, f"classattenuation_{condition}_{attenuation:g}", searchlight_bands)
+            else:
+                attenuated = data.plant_attenuation(pseudo_post, [condition], attenuation=attenuation, **plant_args)
+                decode(attenuated, f"attenuation_{condition}_{attenuation:g}", searchlight_bands)
 
 
 if __name__ == '__main__':
@@ -98,6 +104,9 @@ if __name__ == '__main__':
     parser.add_argument("--delays", type=float, nargs="*", default=[0.01, 0.02, 0.04], help="Planted delays in s")
     parser.add_argument("--attenuations", type=float, nargs="*", default=[0.1, 0.25, 0.5],
                         help="Planted attenuations, fractions of the class-average evoked response subtracted")
+    parser.add_argument("--class_specific", action="store_true",
+                        help="Attenuate only the location-specific part of the response (plant_class_attenuation: the class "
+                             "mean minus the mean over the location classes), saved as classattenuation_{condition}_{size}")
     parser.add_argument("--n_jobs", type=int, default=1, help="Parallel jobs over the time points")
     parser.add_argument("--searchlight", action="store_true", help="Also run the searchlight")
     parser.add_argument("--searchlight_bands", type=int, nargs="+", default=None,

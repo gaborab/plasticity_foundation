@@ -98,6 +98,31 @@ def plant_attenuation(epochs: Epochs, conditions: Sequence[str], attenuation: fl
     return attenuated
 
 
+def plant_class_attenuation(epochs: Epochs, conditions: Sequence[str], attenuation: float, channel_mask: Sequence[bool],
+                            epoch_window: Tuple[float, float], fs: float, window: Tuple[float, float],
+                            location_conditions: Sequence[str]) -> Epochs:
+    """
+    Attenuates the location-specific part of the evoked response of conditions: as plant_attenuation, but subtracts
+    attenuation x (the subject's class mean - the mean of the subject's class means of location_conditions), the class's
+    deviation from the response all locations share, on the channels of channel_mask within window. attenuation = 1
+    moves the class's mean there onto the shared response, so even a decoder retrained on these epochs loses the class's
+    information on those channels; the trials' own variability is unchanged.
+    """
+    if not set(conditions) <= set(location_conditions):
+        raise ValueError(f"The planted conditions {list(conditions)} have to be location conditions")
+    class_means = {cond: calc_class_mean(epochs, cond, channel_mask, epoch_window, fs, window) for cond in location_conditions}
+    attenuated = {}
+    for subject, subject_epochs in epochs.items():
+        subject_means = [class_means[cond][subject] for cond in location_conditions if subject in class_means[cond]]
+        attenuated[subject] = {}
+        for condition, trials in subject_epochs.items():
+            if condition in conditions and subject in class_means[condition]:
+                deviation = class_means[condition][subject] - torch.stack(subject_means).mean(dim=0)
+                trials = [(idx, trial - attenuation * deviation) for (idx, trial) in trials]
+            attenuated[subject][condition] = trials
+    return attenuated
+
+
 def calc_class_mean(epochs: Epochs, condition: str, channel_mask: Sequence[bool], epoch_window: Tuple[float, float],
                     fs: float, window: Tuple[float, float]) -> Dict[str, torch.Tensor]:
     """
