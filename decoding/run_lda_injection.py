@@ -13,6 +13,7 @@ response by every --attenuations size (plant_attenuation). The folds of the plan
 Output: outputs/inference_outputs/{name}_{plant}_split{split_seed}/{fold}/, as decoding/run_sliding_lda.py, with plant
 "null", e.g. "delay_right_2_20ms" or "attenuation_right_2_0.25".
 Run from the project root: python -m decoding.run_lda_injection --split_seed 0
+(the further null splits: python -m decoding.run_lda_injection --split_seed 1 --null_only)
 """
 import argparse
 import random
@@ -72,6 +73,8 @@ def main(opts):
                 searchlight_bands=bands, n_neighbors=opts.n_neighbors)
 
     decode(pseudo_post, "null", searchlight_bands)
+    if opts.null_only:
+        return
     for condition in opts.conditions:
         for delay in opts.delays:
             delayed = data.plant_delay(pseudo_post, [condition], delay=delay, fs=settings.RSFREQ)
@@ -88,8 +91,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser("Planted-change checks of the sliding LDA on baseline pseudo-sessions")
     parser.add_argument("--name", default="lda_injection", help="Output folder prefix in settings.INFERENCE_DIR, _{plant}_split{seed} appended")
     parser.add_argument("--split_seed", type=int, default=settings.SEED, help="Seed of the split into pseudo-sessions")
+    parser.add_argument("--null_only", action="store_true",
+                        help="Run the null only (C2), e.g. for the further split seeds, without the planted runs")
     parser.add_argument("--conditions", nargs="*", default=["right_2", "left_2"],
-                        help="Conditions planted one at a time (handoff C3: R_mid, then L_mid), none for the null run only")
+                        help="Conditions planted one at a time (handoff C3: R_mid, then L_mid)")
     parser.add_argument("--delays", type=float, nargs="*", default=[0.01, 0.02, 0.04], help="Planted delays in s")
     parser.add_argument("--attenuations", type=float, nargs="*", default=[0.1, 0.25, 0.5],
                         help="Planted attenuations, fractions of the class-average evoked response subtracted")

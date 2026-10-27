@@ -79,8 +79,9 @@ def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, di
     n_folds = len(next(iter(folds.values())))
     clusters = core_utils.build_neighbor_mask(n_neighbours=n_neighbors, n_chans=settings.N_CHANNELS) if searchlight_bands else None
     band_names = list(settings.DECODING_BANDS)
-    print(f"Sliding LDA on {len(band_names)} bands ({'envelopes' if envelope else 'band-passed signals'}), "
-          f"{n_folds} folds, sessions {list(folds)}, output {output_root}")
+    searchlight_names = [band_file_name(band_names[b]) for b in searchlight_bands] if searchlight_bands else "none"
+    print(f"Sliding LDA on {len(band_names)} bands ({'envelopes' if envelope else 'band-passed signals'}), searchlight in "
+          f"{searchlight_names}, {n_folds} folds, sessions {list(folds)}, output {output_root}")
 
     for k in range(n_folds):
         fold_dir = output_root / str(k + 1)
