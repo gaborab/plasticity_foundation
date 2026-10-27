@@ -19,6 +19,7 @@ from core.io_models import TargetStats
 from libs.labram import utils
 from einops import rearrange
 from core import utils as core_utils
+from core.decoding import data as decoding_data
 
 
 def unmasked_pass(model, eeg, input_chans, interpolated=None):
@@ -221,6 +222,13 @@ def get_args():
     parser.add_argument('--hide_interpolated', action='store_true',
                         help='Fallback if the run\'s metadata.json doesn\'t record it: interpolated channels were hidden from the input '
                              'in training (masked-channel reconstruction)')
+    parser.add_argument('--class_occlusion_injection', type=float, nargs='+', default=None,
+                        help='Occlusion check of a masked class run trained on the baseline: for every attenuation given, the '
+                             'posterior evoked response of --injection_conditions is attenuated (core.decoding.data.plant_attenuation) '
+                             'in every fold\'s baseline test trials, and only these are run, saved as the post-patching session of '
+                             '{model_name}_inj_{attenuation}. The regular outputs are not run or touched')
+    parser.add_argument('--injection_conditions', type=str, nargs='+', default=['right_2'],
+                        help='Conditions attenuated with --class_occlusion_injection (default R_mid, as the LDA checks)')
 
     return parser.parse_args()
 
@@ -245,18 +253,40 @@ def main(opts):
         input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
 
     print(f"Loading training split keys and building {session} inference folds...")
-    splitter = KFoldSplitter(input_data_dir=input_dir,
+    splitter = KFoldSplitter(input_data=input_dir,
                              target_data_dir=target_dir,
                              target_mode=target_mode, seed=settings.SEED, k_folds=k_folds,
                              no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))
 
+    ch_names = settings.CHORDER_STANDARD
+    # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
+    ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
+
+    # occlusion injection check: the baseline epochs with the posterior evoked response of the injection conditions
+    # attenuated, one splitter per attenuation (the templates are the subjects' class means over all their baseline trials),
+    # from which every fold's test trials are selected
+    injected_splitters = {}
+    if opts.class_occlusion_injection:
+        if not (task_classify and masked and session == "baseline"):
+            raise ValueError("--class_occlusion_injection needs a masked class run trained on the baseline")
+        posterior = [name in settings.POSTERIOR_CHANNELS for name in ch_names]
+        for attenuation in opts.class_occlusion_injection:
+            injected = decoding_data.plant_attenuation(splitter.input_target_data, opts.injection_conditions, attenuation,
+                                                       posterior, settings.EPOCH_WINDOW, settings.RSFREQ,
+                                                       settings.PLANT_ATTENUATION_WINDOW)
+            injected_splitters[attenuation] = KFoldSplitter(input_data=injected, target_data_dir=None, target_mode=target_mode,
+                                                            seed=settings.SEED, k_folds=k_folds,
+                                                            no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+        print(f"Occlusion injection: {opts.injection_conditions} attenuated by {opts.class_occlusion_injection} on "
+              f"{settings.POSTERIOR_CHANNELS}, {settings.PLANT_ATTENUATION_WINDOW} s; only the injected test trials are run")
+
     # baseline model: every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
     postpatch_folds = None
-    run_postpatch = opts.postpatch and session == "baseline"
+    run_postpatch = opts.postpatch and session == "baseline" and not injected_splitters
     if run_postpatch:
         print("Building post-patching inference folds...")
-        postpatch_splitter = KFoldSplitter(input_data_dir=settings.PATCH_INPUT_EPOCHS_DIR,
+        postpatch_splitter = KFoldSplitter(input_data=settings.PATCH_INPUT_EPOCHS_DIR,
                                            target_data_dir=settings.PATCH_WAVELET_DIR,
                                            target_mode=target_mode, seed=settings.SEED, k_folds=k_folds,
                                            no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
@@ -269,10 +299,6 @@ def main(opts):
                                                            **settings.WAVELET_PARAMS,
                                                            pool=settings.TARGET_POOL)
                       for patch, window in settings.PATCH_WINDOWS.items()}
-
-    ch_names = settings.CHORDER_STANDARD
-    # cut off "-REF" and "EEG " from channel names for compatibility with get_input_chans function
-    ch_names = [name.split(' ')[-1].split('-')[0] for name in ch_names]
 
     band_indices = settings.FREQ_BAND_INDICES if spectral else None
 
@@ -327,6 +353,20 @@ def main(opts):
         model.to(device)
         model.eval()
         fold_neighbour_table = torch.as_tensor(neighbour_table, device=device) if neighbour_table is not None else None
+
+        if injected_splitters:
+            # the fold's own (unseen) test trials with the injection, saved as the post-patching session of {model}_inj_{a}
+            for attenuation, injected_splitter in injected_splitters.items():
+                injected_path = settings.INFERENCE_DIR / f"{opts.model_name}_inj_{attenuation:g}" / str(i + 1)
+                shutil.rmtree(injected_path, ignore_errors=True)
+                injected_path.mkdir(parents=True, exist_ok=True)
+                print(f"Running injected test trials, attenuation {attenuation:g}...")
+                injected_dataset = build_test_dataset(task_classify, injected_splitter.select(fold.keys["test"]),
+                                                      trial_interpolations, target_mode, target_stats)
+                run_reconstruction(model, injected_dataset, ch_names, device, injected_path / "postpatch_reconstruction.h5",
+                                   valid_bins, band_indices, fold_neighbour_table, hide_interpolated, classify=task_classify)
+            total_time += time.time() - start_time
+            continue
 
         output_path = settings.INFERENCE_DIR / opts.model_name / str(i + 1)
         session_file = output_path / f"{session}_reconstruction.h5"

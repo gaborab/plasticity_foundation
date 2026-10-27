@@ -244,5 +244,9 @@ Q4_ACCURACY_WINDOW = None  # (start, end) in s of the accuracy measure, fixed on
 Q4_LATENCY_SEARCH = (0.0, 0.5)  # s, the handoff's 0-0.6 s limited by the end of the window (button presses)
 Q4_LATENCY_SMOOTHING = 0.02  # s, moving average of the AUC curves before the latency
 Q4_PEAK_FRACTION = 0.5  # latency = first time the curve reaches this fraction of its peak above chance
+# planted-change checks (decoding/run_lda_injection.py, handoff Task C): the posterior channel set of handoff 3.5 (O*, P*
+# of the montage; T5/T6, which newer naming calls P7/P8, are left out) and the window of the planted attenuation
+POSTERIOR_CHANNELS = ['P3', 'P4', 'PZ', 'O1', 'O2']
+PLANT_ATTENUATION_WINDOW = (0.0, 0.5)
 # indices of the FREQS bins falling into each band, used to index the frequency dimension of spectral tensors
 FREQ_BAND_INDICES = {name: np.where((FREQS >= low) & (FREQS <= high))[0] for name, (low, high) in FREQ_BANDS.items()}

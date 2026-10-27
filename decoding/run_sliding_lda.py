@@ -27,13 +27,15 @@ Run from the project root: python -m decoding.run_sliding_lda --keys_from class_
 import argparse
 import json
 import time
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
 
 import h5py
 import numpy as np
 
 from core import io, settings
 from core import utils as core_utils
-from core.datasets import KFoldSplitter
+from core.datasets import FinetuneSplits, KFoldSplitter
 from core.decoding.data import band_file_name, band_pass_trials, decoding_times, stack_class_samples
 from core.decoding.models import decode_bands, searchlight
 
@@ -58,14 +60,56 @@ def save_outputs(path, outputs, labels, metas, times, set_names, **attrs):
             io.save_inference_trial_hdf(subject, condition, idx, h5file, int(label), output.astype(np.float32), window_metrics={}, patch=None)
             h5file[f"{subject}/{condition}/{idx}"].attrs["interpolated"] = np.flatnonzero(~meta["allowed"].numpy())
 
+def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, dict], output_root: Path,
+            envelope: bool = False, n_jobs: int = 1, searchlight_bands: Optional[Sequence[int]] = None,
+            n_neighbors: int = settings.N_NEIGHBOURS):
+    """
+    Trains the sliding LDA (and the searchlight) on the training and validation trials of every fold of every session and
+    saves the decision values of its test trials to {output_root}/{fold}/, see the module docstring.
+    folds: {session: one FinetuneSplits per fold}, e.g. {"baseline": [...], "postpatch": [...]}, the same number of folds
+    in every session; the files are named after the sessions. interpolations: {session: {(subject, condition, id):
+    interpolated channel indices}}, the manifest of the session the trials come from.
+    envelope: decode the Hilbert amplitude of every band. n_jobs: parallel jobs over the time points.
+    searchlight_bands: indices into DECODING_BANDS to run the searchlight in, None for no searchlight.
+    n_neighbors: nearest electrodes in every searchlight cluster.
+    """
+    class_window = {"epoch_window": settings.EPOCH_WINDOW, "patch_window": settings.CLASS_PATCH_WINDOW,
+                    "fs": settings.RSFREQ, "condition_classes": settings.CONDITION_CLASS_IDS}
+    output_root = Path(output_root)
+    n_folds = len(next(iter(folds.values())))
+    clusters = core_utils.build_neighbor_mask(n_neighbours=n_neighbors, n_chans=settings.N_CHANNELS) if searchlight_bands else None
+    band_names = list(settings.DECODING_BANDS)
+    print(f"Sliding LDA on {len(band_names)} bands ({'envelopes' if envelope else 'band-passed signals'}), "
+          f"{n_folds} folds, sessions {list(folds)}, output {output_root}")
+
+    for k in range(n_folds):
+        fold_dir = output_root / str(k + 1)
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        for session, session_folds in folds.items():
+            start = time.time()
+            train, val, test = session_folds[k].initialize_class_datasets(**class_window, interpolations=interpolations[session])
+            X_train, y_train, metas_train = band_data([train, val], envelope)
+            X_test, y_test, metas_test = band_data([test], envelope)
+            subjects_train, subjects_test = [m["subject"] for m in metas_train], [m["subject"] for m in metas_test]
+            outputs = decode_bands(X_train, y_train, subjects_train, X_test, subjects_test, n_jobs=n_jobs)
+            times = decoding_times(settings.CLASS_PATCH_WINDOW, settings.RSFREQ, settings.DECODING_DECIM, X_test.shape[-1])
+            save_outputs(fold_dir / f"{session}_reconstruction.h5", outputs, y_test, metas_test, times,
+                         settings.DECODING_BANDS, envelope=envelope)
+            for b in (searchlight_bands or []):
+                cluster_outputs = searchlight(X_train[:, :, b], y_train, subjects_train, X_test[:, :, b], subjects_test,
+                                              clusters, n_jobs=n_jobs)
+                save_outputs(fold_dir / f"{session}_searchlight_{band_file_name(band_names[b])}.h5", cluster_outputs,
+                             y_test, metas_test, times, CH_NAMES, envelope=envelope, band=band_names[b], n_neighbors=n_neighbors)
+            print(f"Fold {k + 1} {session}: {len(y_train)} training, {len(y_test)} test trials, {time.time() - start:.0f} s")
+
 
 def main(opts):
     keys_dir = settings.FINETUNE_OUTPUT_DIR / opts.keys_from
     k_folds = json.load(open(keys_dir / "metadata.json", encoding="utf-8"))["hyperparameters"]["k_folds"]
-    splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=None, target_mode="classify",
+    splitter = KFoldSplitter(input_data=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=None, target_mode="classify",
                              seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     baseline_folds = splitter.split_from_keys(io.load_training_split_keys(keys_dir, k_folds))
-    postpatch_splitter = KFoldSplitter(input_data_dir=settings.PATCH_INPUT_EPOCHS_DIR, target_data_dir=None, target_mode="classify",
+    postpatch_splitter = KFoldSplitter(input_data=settings.PATCH_INPUT_EPOCHS_DIR, target_data_dir=None, target_mode="classify",
                                        seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     postpatch_folds = postpatch_splitter.split_within_subjects()
 
@@ -77,34 +121,11 @@ def main(opts):
 
     interpolations = {"baseline": io.load_interpolated_channels(settings.FINETUNE_DIR / "epochs_manifest.csv"),
                       "postpatch": io.load_interpolated_channels(settings.PATCH_DIR / "epochs_manifest.csv")}
-    class_window = {"epoch_window": settings.EPOCH_WINDOW, "patch_window": settings.CLASS_PATCH_WINDOW, "fs": settings.RSFREQ,
-                    "condition_classes": settings.CONDITION_CLASS_IDS}
-    output_root = settings.INFERENCE_DIR / opts.name
-    clusters = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS) if opts.searchlight else None
-    band_names = list(settings.DECODING_BANDS)
-    searchlight_bands = opts.searchlight_bands if opts.searchlight_bands is not None else range(len(band_names))
-    print(f"Sliding LDA on {len(settings.DECODING_BANDS)} bands ({'envelopes' if opts.envelope else 'band-passed signals'}), "
-          f"{k_folds} folds, output {output_root}")
-
-    for k in range(k_folds):
-        fold_dir = output_root / str(k + 1)
-        fold_dir.mkdir(parents=True, exist_ok=True)
-        for session, fold in (("baseline", baseline_folds[k]), ("postpatch", postpatch_folds[k])):
-            start = time.time()
-            train, val, test = fold.initialize_class_datasets(**class_window, interpolations=interpolations[session])
-            X_train, y_train, metas_train = band_data([train, val], opts.envelope)
-            X_test, y_test, metas_test = band_data([test], opts.envelope)
-            outputs = decode_bands(X_train, y_train, [m["subject"] for m in metas_train], X_test,
-                                   [m["subject"] for m in metas_test], n_jobs=opts.n_jobs)
-            times = decoding_times(settings.CLASS_PATCH_WINDOW, settings.RSFREQ, settings.DECODING_DECIM, X_test.shape[-1])
-            save_outputs(fold_dir / f"{session}_reconstruction.h5", outputs, y_test, metas_test, times,
-                         settings.DECODING_BANDS, envelope=opts.envelope)
-            for b in (searchlight_bands if opts.searchlight else []):
-                cluster_outputs = searchlight(X_train[:, :, b], y_train, [m["subject"] for m in metas_train], X_test[:, :, b],
-                                              [m["subject"] for m in metas_test], clusters, n_jobs=opts.n_jobs)
-                save_outputs(fold_dir / f"{session}_searchlight_{band_file_name(band_names[b])}.h5", cluster_outputs, y_test,
-                             metas_test, times, CH_NAMES, envelope=opts.envelope, band=band_names[b], n_neighbors=opts.n_neighbors)
-            print(f"Fold {k + 1} {session}: {len(y_train)} training, {len(y_test)} test trials, {time.time() - start:.0f} s")
+    searchlight_bands = None
+    if opts.searchlight:
+        searchlight_bands = opts.searchlight_bands if opts.searchlight_bands is not None else list(range(len(settings.DECODING_BANDS)))
+    run_lda({"baseline": baseline_folds, "postpatch": postpatch_folds}, interpolations, settings.INFERENCE_DIR / opts.name,
+            envelope=opts.envelope, n_jobs=opts.n_jobs, searchlight_bands=searchlight_bands, n_neighbors=opts.n_neighbors)
 
 
 if __name__ == "__main__":

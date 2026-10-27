@@ -1,7 +1,8 @@
-"""Band-passed trial arrays for the sliding decoder."""
-from typing import Dict, List, Optional, Tuple
+"""Band-passed trial arrays for the sliding decoder, and the planted changes of the Task C checks."""
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import torch
 from scipy.signal import butter, hilbert, sosfiltfilt
 
 
@@ -49,3 +50,68 @@ def stack_class_samples(datasets) -> Tuple[np.ndarray, np.ndarray, List[dict]]:
 def decoding_times(window: Tuple[float, float], fs: float, decim: int, n_times: int) -> np.ndarray:
     """Times in s of the decimated samples of a window (the time of each sample's start)."""
     return window[0] + np.arange(n_times) * decim / fs
+
+# PLANTED CHANGES (handoff Task C), on epochs {subject: {condition: [(id, epoch (n_chans, n_times)), ...]}}. They return
+# a new dict with new tensors for the planted trials, the other trials are the same objects: the input stays unchanged
+Epochs = Dict[str, Dict[str, List[Tuple[int, Any]]]]
+
+
+def plant_delay(epochs: Epochs, conditions: Sequence[str], delay: float, fs: float) -> Epochs:
+    """
+    Delays the epochs of conditions by delay s: every sample moves round(delay * fs) samples later, zeros fill the start
+    and the end is dropped. Cutting a window afterwards equals cutting it delay s earlier (handoff C3), as long as the
+    window stays clear of the epoch's start and end.
+    """
+    shift = round(delay * fs)
+    delayed = {}
+    for subject, subject_epochs in epochs.items():
+        delayed[subject] = {}
+        for condition, trials in subject_epochs.items():
+            if condition not in conditions:
+                delayed[subject][condition] = trials
+                continue
+            delayed[subject][condition] = []
+            for (idx, trial) in trials:
+                shifted = torch.zeros_like(trial)
+                shifted[:, shift:] = trial[:, :trial.shape[-1] - shift]
+                delayed[subject][condition].append((idx, shifted))
+    return delayed
+
+
+def plant_attenuation(epochs: Epochs, conditions: Sequence[str], attenuation: float, channel_mask: Sequence[bool],
+                      epoch_window: Tuple[float, float], fs: float, window: Tuple[float, float]) -> Epochs:
+    """
+    Attenuates the evoked response of conditions (handoff C4): subtracts attenuation x the subject's mean epoch of the
+    condition (calc_class_mean, computed from these epochs) on the channels of channel_mask, within window (s, epoch
+    times from epoch_window sampled at fs).
+    """
+    attenuated = {}
+    cond_templates = {cond: calc_class_mean(epochs, cond, channel_mask, epoch_window, fs, window) for cond in conditions}
+    for subject, subject_epochs in epochs.items():
+        attenuated[subject] = {}
+        for condition, trials in subject_epochs.items():
+            if condition in conditions:
+                template = cond_templates[condition][subject]
+                attenuated[subject][condition] = [(idx, trial - attenuation * template) for (idx, trial) in trials]
+            else:
+                attenuated[subject][condition] = trials
+    return attenuated
+
+
+def calc_class_mean(epochs: Epochs, condition: str, channel_mask: Sequence[bool], epoch_window: Tuple[float, float],
+                    fs: float, window: Tuple[float, float]) -> Dict[str, torch.Tensor]:
+    """
+    Every subject's mean epoch of condition, the subject's class-average evoked response (n_chans, n_times), zero outside
+    the channels of channel_mask and outside window (s). Subjects without trials of the condition are left out.
+    """
+    templates = {}
+    for subject, subject_epochs in epochs.items():
+        trials = subject_epochs.get(condition, [])
+        if not trials:
+            continue
+        mean = torch.stack([epoch for _, epoch in trials]).mean(dim=0)
+        times = epoch_window[0] + torch.arange(mean.shape[-1]) / fs
+        in_window = (times >= window[0] - 1e-9) & (times <= window[1] + 1e-9)
+        mask = torch.as_tensor(channel_mask, dtype=torch.bool)[:, None] & in_window[None, :]
+        templates[subject] = mean * mask
+    return templates

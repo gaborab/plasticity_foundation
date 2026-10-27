@@ -97,7 +97,7 @@ def main(opts):
     else:
         input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
     print(f"Training on the {'post-patching' if opts.postpatch else 'baseline'} session ({input_dir})")
-    kfold = KFoldSplitter(input_data_dir=input_dir, target_data_dir=target_dir, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+    kfold = KFoldSplitter(input_data=input_dir, target_data_dir=target_dir, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = kfold.split_within_subjects()
     # (freqs, time) masks of the target bins the loss and the target stats use in every patch
     masks = None

@@ -206,7 +206,7 @@ def main(opts):
 
     # the baseline test sets are rebuilt from the keys saved during training
     print("Loading training split keys and building baseline inference folds...")
-    splitter = KFoldSplitter(input_data_dir=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR,
+    splitter = KFoldSplitter(input_data=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR,
                              target_mode="wavelet", seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))[:opts.n_folds]
 

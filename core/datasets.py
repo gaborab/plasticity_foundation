@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core import utils
 from core.io import EpochIO
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import torch
 import numpy as np
 
@@ -147,7 +147,8 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
 
     def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], epoch_window: Tuple[float, float],
                  patch_window: Tuple[float, float], fs: int, condition_classes: Dict[str, int],
-                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0, unmasked: bool=True):
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0,
+                 unmasked: bool = True):
         self.samples = []
         self.perms = []
         self.epoch = 0
@@ -163,7 +164,8 @@ class ClassFinetuneDataset(torch.utils.data.Dataset):
                     metadata = {"subject": subj, "condition": cond, "id": idx, "allowed": allowed}
                     patch_input = utils.cut_to_timewindow(input_tensor.clone().detach(), epoch_window, patch_window, fs)
                     self.samples.append((patch_input, condition_classes[cond], metadata))
-                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed, n_unmasked=int(allowed.sum()) if unmasked else 0))
+                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed,
+                                                                n_unmasked=int(allowed.sum()) if unmasked else 0))
 
     def __len__(self):
         """Returns the number of samples, one per trial of a condition with a class."""
@@ -326,8 +328,10 @@ class FinetuneSplits:
         return training_dataset, validation_dataset, testing_dataset
 
     def initialize_class_datasets(self, epoch_window: Tuple[float, float], patch_window: Tuple[float, float], fs: int,
-                                  condition_classes: Dict[str, int], interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None,
-                                  seed: int = 0) -> Tuple[ClassFinetuneDataset, ClassFinetuneDataset, ClassFinetuneDataset]:
+                                  condition_classes: Dict[str, int],
+                                  interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None,
+                                  seed: int = 0) -> Tuple[
+        ClassFinetuneDataset, ClassFinetuneDataset, ClassFinetuneDataset]:
         """
         Builds the training, validation and testing ClassFinetuneDataset of this fold, the arguments are those of ClassFinetuneDataset.
         Expects the fold's epochs without targets (KFoldSplitter with target_mode "classify").
@@ -339,26 +343,32 @@ class FinetuneSplits:
         training_dataset, validation_dataset, testing_dataset = datasets
         return training_dataset, validation_dataset, testing_dataset
 
+
 class KFoldSplitter:
     """
     Build a list of `FinetuneSplits` instances, one per fold.
-    The constructor loads the input epochs of `input_data_dir` paired with their targets in `target_data_dir` using `EpochIO`.
+    input_data: a directory, from which the constructor loads the input epochs paired with their targets in `target_data_dir`
+    using `EpochIO`, or epochs already loaded in the format below (e.g. part of a loaded directory), used as they are.
     target_mode: "wavelet" loads the wavelet targets, "autoencoder" uses every input as its own target and does not read target_data_dir,
     "classify" loads the inputs only, as {subject: {condition: [(id1, input_tensor1), ...]}} (the labels come from the condition).
     seed: seed of the shuffling, the same seed and data give the same folds.
     no_press_threshold: first subject number of the paradigm without button presses, split_by_subject stratifies by paradigm.
     """
 
-    def __init__(self, input_data_dir: Path, target_data_dir: Optional[Path], target_mode: str, seed: int,
-                 k_folds: int = 6, no_press_threshold: int = 59):
+    def __init__(self, input_data: Union[Path, str, Dict[str, Dict[str, List[Tuple[int, Any]]]]], target_data_dir: Optional[Path],
+                 target_mode: str, seed: int, k_folds: int = 6, no_press_threshold: int = 59):
         io_handler = EpochIO(ext='.pt')
-        if target_mode == "classify":
-            self.input_target_data = io_handler.load_all_epochs(input_data_dir, marker="_input")
+        if isinstance(input_data, (str, Path)):
+            input_data = Path(input_data)
+            if target_mode == "classify":
+                self.input_target_data = io_handler.load_all_epochs(input_data, marker="_input")
+            else:
+                # loads data in format {subject: {condition: [(id1, (input_tensor1, target_tensor1)), ...]}}
+                self.input_target_data = io_handler.load_all_input_target_data(input_dir=input_data,
+                                                                               target_dir=target_data_dir,
+                                                                               target_mode=target_mode)
         else:
-            # loads data in format {subject: {condition: [(id1, (input_tensor1, target_tensor1)), ...]}}
-            self.input_target_data = io_handler.load_all_input_target_data(input_dir=input_data_dir,
-                                                                           target_dir=target_data_dir,
-                                                                           target_mode=target_mode)
+            self.input_target_data = input_data
         self.k_folds = k_folds
         self.seed = seed
         self.no_press_threshold = no_press_threshold
