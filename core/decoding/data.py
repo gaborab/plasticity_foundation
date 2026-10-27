@@ -1,4 +1,5 @@
-"""Band-passed trial arrays for the sliding decoder, and the planted changes of the Task C checks."""
+"""Band-passed trial arrays for the sliding decoder, and the pseudo-sessions and planted changes of the Task C checks."""
+import random
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -54,6 +55,40 @@ def decoding_times(window: Tuple[float, float], fs: float, decim: int, n_times: 
 # PLANTED CHANGES (handoff Task C), on epochs {subject: {condition: [(id, epoch (n_chans, n_times)), ...]}}. They return
 # a new dict with new tensors for the planted trials, the other trials are the same objects: the input stays unchanged
 Epochs = Dict[str, Dict[str, List[Tuple[int, Any]]]]
+
+
+def split_halves(epochs: Epochs, seed: int) -> Tuple[Epochs, Epochs]:
+    """
+    Splits epochs {subject: {condition: [(id, epoch), ...]}} into two halves, each with a random half of every subject's
+    trials of every condition (the first half gets the smaller one of an odd count), sorted by id like EpochIO loads them.
+    """
+    rng = random.Random(seed)
+    first, second = {}, {}
+    for subject, conditions in epochs.items():
+        for condition, trials in conditions.items():
+            shuffled = list(trials)
+            rng.shuffle(shuffled)
+            half = len(shuffled) // 2
+            first.setdefault(subject, {})[condition] = sorted(shuffled[:half], key=lambda trial: trial[0])
+            second.setdefault(subject, {})[condition] = sorted(shuffled[half:], key=lambda trial: trial[0])
+    return first, second
+
+
+def pseudo_session_epochs(epochs: Epochs, half: str, split_seed: int, plant_condition: Optional[str] = None,
+                          plant_attenuation: Optional[float] = None, **plant_args) -> Epochs:
+    """
+    One pseudo-session of epochs (split_halves with split_seed): half "pre" the first half, "post" the second. With
+    plant_condition (post only), that condition's location-specific posterior response is attenuated by plant_attenuation
+    (plant_class_attenuation, plant_args: its channel_mask, epoch_window, fs, window and location_conditions).
+    """
+    pre, post = split_halves(epochs, split_seed)
+    if half == "pre":
+        if plant_condition is not None:
+            raise ValueError("Changes are planted into the post half only")
+        return pre
+    if plant_condition is None:
+        return post
+    return plant_class_attenuation(post, [plant_condition], plant_attenuation, **plant_args)
 
 
 def plant_delay(epochs: Epochs, conditions: Sequence[str], delay: float, fs: float) -> Epochs:

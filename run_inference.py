@@ -20,6 +20,7 @@ from libs.labram import utils
 from einops import rearrange
 from core import utils as core_utils
 from core.decoding import data as decoding_data
+from run_general_finetune import pseudo_session
 
 
 def unmasked_pass(model, eeg, input_chans, interpolated=None):
@@ -182,6 +183,9 @@ def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
         else:
             run_settings[name] = fallback
             print(f"WARNING: {name} not in the run's metadata, using {fallback}")
+    # pseudo-session runs (run_general_finetune.py --pseudo_session), None for every other run
+    for name in ("pseudo_session", "split_seed", "plant_condition", "plant_attenuation"):
+        run_settings[name] = hyperparameters.get(name)
     return run_settings
 
 
@@ -251,9 +255,18 @@ def main(opts):
             print("Model trained on post-patching data: evaluated on its own post-patching test sets only")
     else:
         input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
+    input_data = input_dir
+    # a pseudo-session run: the same half of the baseline (and plant) as in training, saved as baseline (pre) or postpatch (post)
+    pseudo = run_settings["pseudo_session"] is not None
+    if pseudo:
+        session = "baseline" if run_settings["pseudo_session"] == "pre" else "postpatch"
+        input_data = pseudo_session(run_settings["pseudo_session"], run_settings["split_seed"], run_settings["plant_condition"],
+                                    run_settings["plant_attenuation"])
+        print(f"Pseudo {run_settings['pseudo_session']} run (split seed {run_settings['split_seed']}, plant "
+              f"{run_settings['plant_condition']} {run_settings['plant_attenuation']}): saved as the {session} session")
 
     print(f"Loading training split keys and building {session} inference folds...")
-    splitter = KFoldSplitter(input_data=input_dir,
+    splitter = KFoldSplitter(input_data=input_data,
                              target_data_dir=target_dir,
                              target_mode=target_mode, seed=settings.SEED, k_folds=k_folds,
                              no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
@@ -268,7 +281,7 @@ def main(opts):
     # from which every fold's test trials are selected
     injected_splitters = {}
     if opts.class_occlusion_injection:
-        if not (task_classify and masked and session == "baseline"):
+        if not (task_classify and masked and session == "baseline" and not pseudo):
             raise ValueError("--class_occlusion_injection needs a masked class run trained on the baseline")
         posterior = [name in settings.POSTERIOR_CHANNELS for name in ch_names]
         for attenuation in opts.class_occlusion_injection:
@@ -283,7 +296,7 @@ def main(opts):
 
     # baseline model: every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
     postpatch_folds = None
-    run_postpatch = opts.postpatch and session == "baseline" and not injected_splitters
+    run_postpatch = opts.postpatch and session == "baseline" and not injected_splitters and not pseudo
     if run_postpatch:
         print("Building post-patching inference folds...")
         postpatch_splitter = KFoldSplitter(input_data=settings.PATCH_INPUT_EPOCHS_DIR,

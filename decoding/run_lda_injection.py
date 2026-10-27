@@ -17,33 +17,14 @@ Run from the project root: python -m decoding.run_lda_injection --split_seed 0
 (the further null splits: python -m decoding.run_lda_injection --split_seed 1 --null_only)
 """
 import argparse
-import random
-from typing import Tuple
 
 from core import io, settings
 from core.datasets import KFoldSplitter
 from core.decoding import data
-from core.decoding.data import Epochs
+from core.decoding.data import Epochs, split_halves
 from decoding.run_sliding_lda import CH_NAMES, run_lda
 
 K_FOLDS = 3  # within each pseudo-session, which holds half of the trials
-
-
-def split_halves(epochs: Epochs, seed: int) -> Tuple[Epochs, Epochs]:
-    """
-    Splits epochs {subject: {condition: [(id, epoch), ...]}} into two halves, each with a random half of every subject's
-    trials of every condition (the first half gets the smaller one of an odd count), sorted by id like EpochIO loads them.
-    """
-    rng = random.Random(seed)
-    first, second = {}, {}
-    for subject, conditions in epochs.items():
-        for condition, trials in conditions.items():
-            shuffled = list(trials)
-            rng.shuffle(shuffled)
-            half = len(shuffled) // 2
-            first.setdefault(subject, {})[condition] = sorted(shuffled[:half], key=lambda trial: trial[0])
-            second.setdefault(subject, {})[condition] = sorted(shuffled[half:], key=lambda trial: trial[0])
-    return first, second
 
 
 def main(opts):

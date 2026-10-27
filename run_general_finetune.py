@@ -10,6 +10,7 @@ from core import settings, io
 from core import utils as core_utils
 from core.architectures import EEGAutoencoder, EEGSpectralDecoder, LocationDecoder
 from core.datasets import KFoldSplitter
+from core.decoding import data as decoding_data
 import torch.nn as nn
 
 from libs.labram import utils
@@ -51,6 +52,20 @@ SAVE_PLOTS = True
 
 
 
+def pseudo_session(half, split_seed, plant_condition=None, plant_attenuation=None):
+    """
+    The epochs of one pseudo-session of the baseline (core.decoding.data.pseudo_session_epochs): half "pre" or "post",
+    with plant_condition's location-specific posterior response attenuated by plant_attenuation in post. Shared with
+    run_inference.py, which rebuilds the same trials.
+    """
+    epochs = io.EpochIO(ext='.pt').load_all_epochs(settings.FINETUNE_INPUT_EPOCHS_DIR, marker="_input")
+    posterior = [name.split(' ')[-1].split('-')[0] in settings.POSTERIOR_CHANNELS for name in settings.CHORDER_STANDARD]
+    return decoding_data.pseudo_session_epochs(epochs, half, split_seed, plant_condition, plant_attenuation, channel_mask=posterior,
+                                               epoch_window=settings.EPOCH_WINDOW, fs=settings.RSFREQ,
+                                               window=settings.PLANT_ATTENUATION_WINDOW,
+                                               location_conditions=list(settings.LOCATION_CLASSES))
+
+
 def get_args():
     """Parses the command line arguments of the fine-tuning run."""
     parser = argparse.ArgumentParser('LaBraM fine-tuning and evaluation script for EEG classification', add_help=False)
@@ -77,6 +92,15 @@ def get_args():
     parser.add_argument("--postpatch", action='store_true', default=False,
                         help="Train on the post-patching session instead of the baseline. The folds are the stratified within-subject "
                              "split with the same seed, so the test sets are the post-patching test sets of run_inference.py --postpatch")
+    parser.add_argument("--pseudo_session", choices=["pre", "post"], default=None,
+                        help="Within-session injection check (classification only): train on one half of every subject's "
+                             "baseline trials (core.decoding.data.pseudo_session_epochs, split with --split_seed), pre the first, "
+                             "post the second half")
+    parser.add_argument("--split_seed", type=int, default=settings.SEED, help="Seed of the split into pseudo-sessions")
+    parser.add_argument("--plant_condition", type=str, default=None,
+                        help="With --pseudo_session post: the condition whose location-specific posterior response is attenuated "
+                             "(plant_class_attenuation), e.g. right_2; none for the null")
+    parser.add_argument("--plant_attenuation", type=float, default=1.0, help="Attenuation of --plant_condition")
     return parser.parse_args()
 
 
@@ -96,8 +120,16 @@ def main(opts):
         input_dir, target_dir, session_dir = settings.PATCH_INPUT_EPOCHS_DIR, settings.PATCH_WAVELET_DIR, settings.PATCH_DIR
     else:
         input_dir, target_dir, session_dir = settings.FINETUNE_INPUT_EPOCHS_DIR, settings.FINETUNE_WAVELET_DIR, settings.FINETUNE_DIR
-    print(f"Training on the {'post-patching' if opts.postpatch else 'baseline'} session ({input_dir})")
-    kfold = KFoldSplitter(input_data=input_dir, target_data_dir=target_dir, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+    input_data = input_dir
+    if opts.pseudo_session:
+        if not opts.task_classify or opts.postpatch:
+            raise ValueError("--pseudo_session needs --task_classify and the baseline")
+        input_data = pseudo_session(opts.pseudo_session, opts.split_seed, opts.plant_condition, opts.plant_attenuation)
+        print(f"Training on the pseudo {opts.pseudo_session} half of the baseline (split seed {opts.split_seed})"
+              + (f", {opts.plant_condition} attenuated by {opts.plant_attenuation:g}" if opts.plant_condition else ""))
+    else:
+        print(f"Training on the {'post-patching' if opts.postpatch else 'baseline'} session ({input_dir})")
+    kfold = KFoldSplitter(input_data=input_data, target_data_dir=target_dir, target_mode=opts.target_mode, seed=settings.SEED, k_folds=opts.k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
     folds = kfold.split_within_subjects()
     # (freqs, time) masks of the target bins the loss and the target stats use in every patch
     masks = None
@@ -163,6 +195,10 @@ def main(opts):
             "target_pool": settings.TARGET_POOL if opts.target_mode == 'wavelet' else None,
             "task_classify": opts.task_classify,
             "postpatch": opts.postpatch,
+            "pseudo_session": opts.pseudo_session,
+            "split_seed": opts.split_seed if opts.pseudo_session else None,
+            "plant_condition": opts.plant_condition if opts.pseudo_session else None,
+            "plant_attenuation": opts.plant_attenuation if opts.pseudo_session and opts.plant_condition else None,
             "freq_window": settings.SPECTRAL_DECODER_PARAMS['freq_window'] if opts.target_mode == 'wavelet' else None,
         },
         "description": opts.model_desc
