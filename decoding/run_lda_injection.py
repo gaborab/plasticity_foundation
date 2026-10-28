@@ -52,7 +52,7 @@ def main(opts):
             raise ValueError(f"The folds of the planted pseudo post ({plant}) differ from the null ones")
         run_lda({"baseline": folds["baseline"], "postpatch": post_folds}, interpolations,
                 settings.INFERENCE_DIR / f"{opts.name}_{plant}_split{opts.split_seed}", n_jobs=opts.n_jobs,
-                searchlight_bands=bands, n_neighbors=opts.n_neighbors)
+                searchlight_bands=bands, n_neighbors=opts.n_neighbors, per_subject=opts.per_subject)
 
     decode(pseudo_post, "null", searchlight_bands)
     if opts.null_only:
@@ -93,4 +93,6 @@ if __name__ == '__main__':
     parser.add_argument("--searchlight_bands", type=int, nargs="+", default=None,
                         help="Indices into DECODING_BANDS of the searchlight bands (0 = broadband), default all")
     parser.add_argument("--n_neighbors", type=int, default=settings.N_NEIGHBOURS, help="Nearest electrodes in every searchlight cluster")
+    parser.add_argument("--per_subject", action="store_true",
+                        help="Separate models per subject instead of one pooled model (use another --name to keep the pooled runs)")
     main(parser.parse_args())

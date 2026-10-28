@@ -316,13 +316,13 @@ def save_report(rows, filename: str, save_dir: Path):
 
 def save_figure(name_input: str, save_dir: Path, fig, default_name="untitled"):
     filename = name_input.strip() or default_name
-    if not filename.endswith(".png"):
-        filename += ".png"
+    if not filename.endswith(".svg"):
+        filename += ".svg"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         save_path = save_dir / filename
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, bbox_inches='tight')
         print(f"Figure saved to: {save_path}")
     except Exception as e:
         print(f"Error saving figure: {e}")

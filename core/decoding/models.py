@@ -1,5 +1,5 @@
 """The sliding (time-resolved) LDA decoder."""
-from typing import List
+from typing import Callable, List
 
 import numpy as np
 from mne.decoding import SlidingEstimator
@@ -41,6 +41,31 @@ def decode_bands(X_train: np.ndarray, y_train: np.ndarray, subjects_train: List[
     """
     X_train, X_test = subject_standardize(X_train, subjects_train, X_test, subjects_test)
     return np.stack([sliding_lda(X_train[:, :, b], y_train, X_test[:, :, b], n_jobs) for b in range(X_train.shape[2])], axis=1)
+
+
+def fit_per_subject(decode: Callable[..., np.ndarray], X_train: np.ndarray, y_train: np.ndarray, subjects_train: List[str],
+                    X_test: np.ndarray, subjects_test: List[str], *args, **kwargs) -> np.ndarray:
+    """
+    Runs decode (decode_bands or searchlight, with its further args) separately on every subject's trials: each
+    subject's test trials get the decision function of models trained on that subject's training trials only, in the
+    original order. The classes are those of all training trials together (the last axis); a class missing from a
+    subject's training trials gets -inf, probability 0 after the softmax.
+    """
+    subjects_train, subjects_test = np.asarray(subjects_train), np.asarray(subjects_test)
+    classes = np.unique(y_train)
+    outputs = None
+    for subject in np.unique(subjects_test):
+        train, test = subjects_train == subject, subjects_test == subject
+        subject_classes = np.unique(y_train[train])
+        decision = decode(X_train[train], y_train[train], subjects_train[train], X_test[test], subjects_test[test], *args, **kwargs)
+        if len(subject_classes) == 2:  # binary LDA: one column, the score of the second class
+            decision = np.stack([-decision, decision], axis=-1)
+        if outputs is None: # fill all classes with -inf (in case a class is missing from training trials)
+            outputs = np.full((len(subjects_test), *decision.shape[1:-1], len(classes)), -np.inf, dtype=decision.dtype)
+        subject_outputs = np.full((test.sum(), *decision.shape[1:-1], len(classes)), -np.inf, dtype=decision.dtype)
+        subject_outputs[..., np.searchsorted(classes, subject_classes)] = decision
+        outputs[test] = subject_outputs
+    return outputs
 
 
 def searchlight(X_train: np.ndarray, y_train: np.ndarray, subjects_train: List[str], X_test: np.ndarray,

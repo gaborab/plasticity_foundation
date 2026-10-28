@@ -9,6 +9,8 @@ DECODING_BANDS band and decimated to 100 Hz (core.decoding.data), giving trials 
 Per fold and session one pooled model is trained on the fold's training and validation trials of all subjects (the LDA
 needs no model selection), every feature standardized per subject with the subject's training trials, and applied to
 the fold's test trials. Every trial is in one test set, so every trial gets one out-of-fold prediction per band and time.
+With --per_subject, every subject gets its own models instead, trained on that subject's training trials only
+(core.decoding.models.fit_per_subject), as the handoff's per-participant decoders, on the same folds.
 
 With --searchlight, the same sliding LDA also runs on every channel's cluster alone (the channel and its N_NEIGHBOURS
 nearest electrodes, core.utils.build_neighbor_mask) in every band (--searchlight_bands to select some): where location
@@ -27,6 +29,7 @@ Run from the project root: python -m decoding.run_sliding_lda --keys_from class_
 import argparse
 import json
 import time
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -37,7 +40,7 @@ from core import io, settings
 from core import utils as core_utils
 from core.datasets import FinetuneSplits, KFoldSplitter
 from core.decoding.data import band_file_name, band_pass_trials, decoding_times, stack_class_samples
-from core.decoding.models import decode_bands, searchlight
+from core.decoding.models import decode_bands, fit_per_subject, searchlight
 
 CH_NAMES = [name.replace("EEG ", "").replace("-REF", "") for name in settings.CHORDER_STANDARD]
 
@@ -62,7 +65,7 @@ def save_outputs(path, outputs, labels, metas, times, set_names, **attrs):
 
 def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, dict], output_root: Path,
             envelope: bool = False, n_jobs: int = 1, searchlight_bands: Optional[Sequence[int]] = None,
-            n_neighbors: int = settings.N_NEIGHBOURS):
+            n_neighbors: int = settings.N_NEIGHBOURS, per_subject: bool = False):
     """
     Trains the sliding LDA (and the searchlight) on the training and validation trials of every fold of every session and
     saves the decision values of its test trials to {output_root}/{fold}/, see the module docstring.
@@ -72,7 +75,10 @@ def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, di
     envelope: decode the Hilbert amplitude of every band. n_jobs: parallel jobs over the time points.
     searchlight_bands: indices into DECODING_BANDS to run the searchlight in, None for no searchlight.
     n_neighbors: nearest electrodes in every searchlight cluster.
+    per_subject: fit separate models per subject (fit_per_subject) instead of one pooled model.
     """
+    decode = partial(fit_per_subject, decode_bands) if per_subject else decode_bands
+    decode_clusters = partial(fit_per_subject, searchlight) if per_subject else searchlight
     class_window = {"epoch_window": settings.EPOCH_WINDOW, "patch_window": settings.CLASS_PATCH_WINDOW,
                     "fs": settings.RSFREQ, "condition_classes": settings.CONDITION_CLASS_IDS}
     output_root = Path(output_root)
@@ -80,8 +86,9 @@ def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, di
     clusters = core_utils.build_neighbor_mask(n_neighbours=n_neighbors, n_chans=settings.N_CHANNELS) if searchlight_bands else None
     band_names = list(settings.DECODING_BANDS)
     searchlight_names = [band_file_name(band_names[b]) for b in searchlight_bands] if searchlight_bands else "none"
-    print(f"Sliding LDA on {len(band_names)} bands ({'envelopes' if envelope else 'band-passed signals'}), searchlight in "
-          f"{searchlight_names}, {n_folds} folds, sessions {list(folds)}, output {output_root}")
+    print(f"Sliding LDA ({'per subject' if per_subject else 'pooled'}) on {len(band_names)} bands "
+          f"({'envelopes' if envelope else 'band-passed signals'}), searchlight in {searchlight_names}, {n_folds} folds, "
+          f"sessions {list(folds)}, output {output_root}")
 
     for k in range(n_folds):
         fold_dir = output_root / str(k + 1)
@@ -92,15 +99,16 @@ def run_lda(folds: Dict[str, List[FinetuneSplits]], interpolations: Dict[str, di
             X_train, y_train, metas_train = band_data([train, val], envelope)
             X_test, y_test, metas_test = band_data([test], envelope)
             subjects_train, subjects_test = [m["subject"] for m in metas_train], [m["subject"] for m in metas_test]
-            outputs = decode_bands(X_train, y_train, subjects_train, X_test, subjects_test, n_jobs=n_jobs)
+            outputs = decode(X_train, y_train, subjects_train, X_test, subjects_test, n_jobs=n_jobs)
             times = decoding_times(settings.CLASS_PATCH_WINDOW, settings.RSFREQ, settings.DECODING_DECIM, X_test.shape[-1])
             save_outputs(fold_dir / f"{session}_reconstruction.h5", outputs, y_test, metas_test, times,
-                         settings.DECODING_BANDS, envelope=envelope)
+                         settings.DECODING_BANDS, envelope=envelope, per_subject=per_subject)
             for b in (searchlight_bands or []):
-                cluster_outputs = searchlight(X_train[:, :, b], y_train, subjects_train, X_test[:, :, b], subjects_test,
-                                              clusters, n_jobs=n_jobs)
+                cluster_outputs = decode_clusters(X_train[:, :, b], y_train, subjects_train, X_test[:, :, b], subjects_test,
+                                                  clusters, n_jobs=n_jobs)
                 save_outputs(fold_dir / f"{session}_searchlight_{band_file_name(band_names[b])}.h5", cluster_outputs,
-                             y_test, metas_test, times, CH_NAMES, envelope=envelope, band=band_names[b], n_neighbors=n_neighbors)
+                             y_test, metas_test, times, CH_NAMES, envelope=envelope, band=band_names[b], n_neighbors=n_neighbors,
+                             per_subject=per_subject)
             print(f"Fold {k + 1} {session}: {len(y_train)} training, {len(y_test)} test trials, {time.time() - start:.0f} s")
 
 
@@ -126,7 +134,8 @@ def main(opts):
     if opts.searchlight:
         searchlight_bands = opts.searchlight_bands if opts.searchlight_bands is not None else list(range(len(settings.DECODING_BANDS)))
     run_lda({"baseline": baseline_folds, "postpatch": postpatch_folds}, interpolations, settings.INFERENCE_DIR / opts.name,
-            envelope=opts.envelope, n_jobs=opts.n_jobs, searchlight_bands=searchlight_bands, n_neighbors=opts.n_neighbors)
+            envelope=opts.envelope, n_jobs=opts.n_jobs, searchlight_bands=searchlight_bands, n_neighbors=opts.n_neighbors,
+            per_subject=opts.per_subject)
 
 
 if __name__ == "__main__":
@@ -139,4 +148,5 @@ if __name__ == "__main__":
     parser.add_argument("--searchlight_bands", type=int, nargs="+", default=None,
                         help="Indices into DECODING_BANDS of the searchlight bands (0 = broadband), default all")
     parser.add_argument("--n_neighbors", type=int, default=settings.N_NEIGHBOURS, help="Nearest electrodes in every searchlight cluster")
+    parser.add_argument("--per_subject", action="store_true", help="Separate models per subject instead of one pooled model")
     main(parser.parse_args())

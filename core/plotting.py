@@ -485,6 +485,34 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
 
+def save_panels(fig, axd, full_fig_dir, subfigs_dir, default_name="untitled", pad = 0.05):
+    name_input = widgets.Text(value=default_name, description='Filename:', placeholder='untitled')
+    save_button_comp = widgets.Button(description="Save Panel Figure")
+    output_comp = widgets.Output()
+
+    def on_save_clicked(b, fmt="svg"):
+        with output_comp:
+            full_fig_dir.mkdir(parents=True, exist_ok=True)
+            fig.savefig(full_fig_dir / f"{name_input.value}.{fmt}")
+            subfigs_dir.mkdir(parents=True, exist_ok=True)
+
+            # crop out and save the individual panels
+            labels = [t for ax in axd.values() for t in ax.texts if t.get_gid() == "panel_label"]
+            figure_texts = [t for t in [fig._suptitle, *fig.texts] if t is not None]
+            for key, ax in axd.items():
+                hidden = [a for a in fig.axes if a is not ax] + labels + figure_texts
+                visible = [artist.get_visible() for artist in hidden]
+                for artist in hidden:
+                    artist.set_visible(False)
+                fig.canvas.draw()  # the layout of the full figure, the crop must match it
+                bbox = ax.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted()).padded(
+                    pad)
+                fig.savefig(subfigs_dir / f"{name_input.value}_{key}.{fmt}", bbox_inches=bbox)
+
+    save_button_comp.on_click(on_save_clicked)
+    display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
+
+
 
 def show_delta(ax, x, val1, val2):
     """Marks the gap between two curves at x (e.g. train and validation score at the best epoch) with its absolute size."""
