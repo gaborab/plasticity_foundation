@@ -12,6 +12,9 @@ frequency window and every settings.FREQ_BANDS band):
 per subject the mean over the settings.INJECTION_N_ROI channels where the injected pattern is strongest, then median and
 quartiles over subjects. An error change much smaller than the signal change means the masked prediction absorbs the gain change.
 --mixed_injection injects the settings.MIXED_INJECTION_GAINS sources at once (fsaverage), each --injection value scaling all gains.
+--predictor fixed_mean / refit_mean scores trial-mean predictors in place of the model, on the same trials, bins and plots
+(run_mean_predictor): they bracket the model, fixed_mean ignores the injection and refit_mean follows its average change, so
+an error change of the model like refit_mean's comes from the targets' spread in dB, not from the reconstruction.
 
 Outputs (outputs/labram_injection/<model_name>/<injection>/, <injection> = {single,mixed}_{head model}): trial_errors.csv (one row per fold, trial, channel, band and gain),
 injection.csv (per gain, band, subject and channel), summary.csv (per gain and band, median [quartiles] over subjects).
@@ -72,24 +75,63 @@ def run_injection(model, dataset: InjectionDataset, gains: List[float], ch_names
 
             output = core_utils.cut_to_timewindow(output, dataset.patch_window, window, dataset.target_fs)
             targets = core_utils.cut_to_timewindow(targets, dataset.patch_window, window, dataset.target_fs)
-            # sums over time per frequency, then over every band's frequencies: (trials, versions, channels)
-            sse_freqs = ((output - targets) ** 2).sum(-1).numpy()
-            power_freqs = (10 ** (targets / 10)).sum(-1).numpy()  # linear power of the dB targets
-            sse = {band: sse_freqs[..., indices].sum(-1) for band, indices in bands.items()}
-            power = {band: power_freqs[..., indices].sum(-1) for band, indices in bands.items()}
-            n_times = targets.shape[-1]
-
-            allowed = metadata["allowed"].numpy()
-            for j in range(n_trials):
-                for c in np.flatnonzero(allowed[j]):
-                    for band, indices in bands.items():
-                        for g, gain in enumerate(gains):
-                            rows.append({"subject": metadata["subject"][j], "condition": metadata["condition"][j],
-                                         "id": int(metadata["id"][j]), "channel": ch_names[c], "band": band, "gain": gain,
-                                         "n_bins": len(indices) * n_times,
-                                         "sse_original": sse[band][j, 0, c], "sse_injected": sse[band][j, g + 1, c],
-                                         "power_original": power[band][j, 0, c], "power_injected": power[band][j, g + 1, c]})
+            rows += score_trials(output, targets, metadata, gains, ch_names, bands)
     return pd.DataFrame(rows)
+
+
+def run_mean_predictor(dataset: InjectionDataset, gains: List[float], ch_names, bands: Dict[str, np.ndarray],
+                       refit=False) -> pd.DataFrame:
+    """
+    The trial-mean predictors that bracket the model, scored as run_injection scores the model: a subject's target
+    channel is predicted by its mean dB target over the subject's trials in which the channel is not interpolated, per
+    frequency and time bin, without looking at the input. The means are computed from the scored trials themselves.
+    refit False: the mean of the original targets predicts every version, a predictor that ignores the injection.
+    refit True: every version is predicted by its own mean, a predictor that follows the injection's average change
+    exactly, so its error change is the change of the targets' spread around their mean.
+    """
+    window = settings.METRIC_WINDOWS["analysis"]["post"]
+    subject_trials = {}
+    for i, (_, metadata) in enumerate(dataset.samples):
+        subject_trials.setdefault(metadata["subject"], []).append(i)
+    rows = []
+    for k, (subject, indices) in enumerate(subject_trials.items()):
+        print(f"Scoring the trial-mean predictor on subject {subject} ({k + 1}/{len(subject_trials)})")
+        loader = torch_utils.data.DataLoader(torch_utils.data.Subset(dataset, indices), batch_size=len(indices))
+        _, targets, metadata = next(iter(loader))
+        targets = core_utils.cut_to_timewindow(targets, dataset.patch_window, window, dataset.target_fs)
+        # (versions, channels, freqs, time bins) mean over the trials in which the channel is not interpolated
+        allowed = metadata["allowed"][:, None, :, None, None].float()
+        means = (targets * allowed).sum(0) / allowed.sum(0).clamp(min=1)
+        prediction = means if refit else means[:1].expand_as(means)
+        rows += score_trials(prediction.expand_as(targets), targets, metadata, gains, ch_names, bands)
+    return pd.DataFrame(rows)
+
+
+def score_trials(output, targets, metadata, gains: List[float], ch_names, bands: Dict[str, np.ndarray]) -> List[Dict]:
+    """
+    One row per trial, allowed channel, band and gain of a batch: the summed squared error of output (dB, cut to the
+    analysis window like targets, (trials, versions, channels, freqs, time bins)) and the summed linear power of the
+    target, over the band's frequency bins, original (version 0) and injected (version g + 1).
+    """
+    # sums over time per frequency, then over every band's frequencies: (trials, versions, channels)
+    sse_freqs = ((output - targets) ** 2).sum(-1).numpy()
+    power_freqs = (10 ** (targets / 10)).sum(-1).numpy()  # linear power of the dB targets
+    sse = {band: sse_freqs[..., indices].sum(-1) for band, indices in bands.items()}
+    power = {band: power_freqs[..., indices].sum(-1) for band, indices in bands.items()}
+    n_times = targets.shape[-1]
+
+    rows = []
+    allowed = metadata["allowed"].numpy()
+    for j in range(len(allowed)):
+        for c in np.flatnonzero(allowed[j]):
+            for band, indices in bands.items():
+                for g, gain in enumerate(gains):
+                    rows.append({"subject": metadata["subject"][j], "condition": metadata["condition"][j],
+                                 "id": int(metadata["id"][j]), "channel": ch_names[c], "band": band, "gain": gain,
+                                 "n_bins": len(indices) * n_times,
+                                 "sse_original": sse[band][j, 0, c], "sse_injected": sse[band][j, g + 1, c],
+                                 "power_original": power[band][j, 0, c], "power_injected": power[band][j, g + 1, c]})
+    return rows
 
 
 def summarize(trial_errors: pd.DataFrame, roi: List[str]):
@@ -189,6 +231,10 @@ def get_args():
     parser.add_argument('--target_mode', type=str, help='user-provided target mode to use as fallback if training did not log target_mode')
     parser.add_argument('--k_folds', type=int, default=6, help='user-provided number of folds for training as fallback')
     parser.add_argument('--save_tag_name', type=str, default=None,)
+    parser.add_argument('--predictor', choices=["model", "fixed_mean", "refit_mean"], default="model",
+                        help='what reconstructs the targets: the model, or a trial-mean predictor that brackets it (run_mean_predictor): '
+                             'fixed_mean ignores the injection, refit_mean follows its average change. The predictors are '
+                             'saved next to the model results, with _{predictor} added to the injection folder')
     opts = parser.parse_args()
     if opts.injection is None:
         if not opts.mixed_injection:
@@ -228,6 +274,8 @@ def main(opts):
     injection_name = f"{'mixed' if opts.mixed_injection else 'single'}_{opts.head_model}"
     if opts.save_tag_name is not None:
         injection_name += opts.save_tag_name
+    if opts.predictor != "model":
+        injection_name += f"_{opts.predictor}"
     plot_dir = PLOT_ROOT / opts.model_name / injection_name
     plot_dir.mkdir(parents=True, exist_ok=True)
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes
@@ -266,6 +314,11 @@ def main(opts):
                                    G, gain_sets, settings.INJECTION_ONSET_RAMP, settings.FREQS, settings.PADDING,
                                    settings.WAVELET_PARAMS, pool=settings.TARGET_POOL, interpolations=trial_interpolations,
                                    target_stats=target_stats)
+        if opts.predictor != "model":
+            trial_errors = run_mean_predictor(dataset, opts.injection, ch_names, bands, refit=opts.predictor == "refit_mean")
+            trial_errors.insert(0, "fold", i + 1)
+            all_trial_errors.append(trial_errors)
+            continue
 
         model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS)
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -297,6 +350,9 @@ def main(opts):
         change_description = lambda gain: f"a {gain_label(gain)} visual-cortex source gain"
     error_description = (f"Masked reconstruction error change ({run_settings['n_neighbors']} neighbours hidden)" if masked
                          else "Reconstruction error change")
+    if opts.predictor != "model":
+        error_description = {"fixed_mean": "Error change of the trial mean of the original targets",
+                             "refit_mean": "Error change of the trial mean refitted per version"}[opts.predictor]
     plot_injection(per_channel, info, ch_names, gain_file, change_description, error_description, plot_dir)
 
     print(f"\nInjection test of {opts.model_name}, {len(folds)} fold(s), source: {description}")
