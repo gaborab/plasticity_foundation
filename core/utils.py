@@ -240,6 +240,9 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
     level_error: per channel |mean target - mean output| over the window's bins (and over the band's bins for
     level_error_bandwise), i.e. the error of the predicted mean level, in which the unpredictable bin-to-bin fluctuation
     averages out. The trial-level value is the mean over the channels, so errors of different channels do not cancel.
+    signed_error: per channel mean output - mean target (and per band), the level error with its sign; it is linear in
+    the target, so a level change the model does not follow shows up without the target's spread mixing in. The
+    trial-level value is the mean over the channels.
     Returns a dictionary containing the calculated metrics.
     """
     spectral = band_indices is not None
@@ -277,6 +280,7 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
 
         ch_metrics_dict = {}
         level_errors, level_errors_bandwise = [], []  # of every channel, averaged into the trial-level metric
+        signed_errors, signed_errors_bandwise = [], []
         signal_channel_stds = np.nanmean(signal_stds, axis=1) if spectral else signal_stds
         recon_channel_stds = np.nanmean(recon_stds, axis=1) if spectral else recon_stds
         # channel-wise metrics
@@ -294,6 +298,8 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
             ch_metrics.recon_mean = np.nanmean(trial_output[i]).item()
             ch_metrics.level_error = abs(ch_metrics.signal_mean - ch_metrics.recon_mean)
             level_errors.append(ch_metrics.level_error)
+            ch_metrics.signed_error = ch_metrics.recon_mean - ch_metrics.signal_mean
+            signed_errors.append(ch_metrics.signed_error)
 
             # channel-wise band-wise metrics
             if spectral:
@@ -305,13 +311,19 @@ def get_inference_metrics(trial_output, trial_target, band_indices: Optional[Dic
                 ch_metrics.level_error_bandwise = {band: abs(ch_metrics.signal_mean_bandwise[band] - ch_metrics.recon_mean_bandwise[band])
                                                    for band in ch_metrics.signal_mean_bandwise}
                 level_errors_bandwise.append(ch_metrics.level_error_bandwise)
+                ch_metrics.signed_error_bandwise = {band: ch_metrics.recon_mean_bandwise[band] - ch_metrics.signal_mean_bandwise[band]
+                                                    for band in ch_metrics.signal_mean_bandwise}
+                signed_errors_bandwise.append(ch_metrics.signed_error_bandwise)
 
             ch_metrics_dict[ch_key] = ch_metrics.to_dict()
 
         g_metrics["level_error"] = np.nanmean(level_errors)
+        g_metrics["signed_error"] = np.nanmean(signed_errors)
         if spectral:
             g_metrics["level_error_bandwise"] = {band: np.nanmean([errors[band] for errors in level_errors_bandwise])
                                                  for band in g_metrics["signal_mean_bandwise"]}
+            g_metrics["signed_error_bandwise"] = {band: np.nanmean([errors[band] for errors in signed_errors_bandwise])
+                                                  for band in g_metrics["signal_mean_bandwise"]}
     return g_metrics, ch_metrics_dict
 
 

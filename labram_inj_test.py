@@ -9,6 +9,9 @@ frequency window and every settings.FREQ_BANDS band):
     error change  = log(SSE injected / SSE original) of the reconstruction, summed over a subject's trials, per channel;
                     the same bins are scored with and without the injection, so this is log(MSE injected / MSE original)
     signal change = log(power injected / power original) of the target (linear power of the dB target), the same way
+    signed error change = change of the mean signed error (output - target) in dB, the part of the target's dB level
+                    change (level change) the reconstruction doesn't follow: 0 if it follows, -level change if it ignores
+                    it. Linear in the target, so unlike the squared error it is not changed by a change of the targets' spread
 per subject the mean over the settings.INJECTION_N_ROI channels where the injected pattern is strongest, then median and
 quartiles over subjects. An error change much smaller than the signal change means the masked prediction absorbs the gain change.
 --mixed_injection injects the settings.MIXED_INJECTION_GAINS sources at once (fsaverage), each --injection value scaling all gains.
@@ -19,7 +22,8 @@ an error change of the model like refit_mean's comes from the targets' spread in
 Outputs (outputs/labram_injection/<model_name>/<injection>/, <injection> = {single,mixed}_{head model}): trial_errors.csv (one row per fold, trial, channel, band and gain),
 injection.csv (per gain, band, subject and channel), summary.csv (per gain and band, median [quartiles] over subjects).
 Topomaps (outputs/plots/labram_injection/<model_name>/<injection>/): injected_source_topographies.png and, per gain, one row of bands
-of the median change over subjects per channel: topomaps_injection_signal_*.png and topomaps_injection_error_*.png.
+of the median change over subjects per channel: topomaps_injection_signal_*.png, topomaps_injection_error_*.png and
+topomaps_injection_signed_*.png.
 """
 import argparse
 import json
@@ -109,15 +113,20 @@ def run_mean_predictor(dataset: InjectionDataset, gains: List[float], ch_names, 
 
 def score_trials(output, targets, metadata, gains: List[float], ch_names, bands: Dict[str, np.ndarray]) -> List[Dict]:
     """
-    One row per trial, allowed channel, band and gain of a batch: the summed squared error of output (dB, cut to the
-    analysis window like targets, (trials, versions, channels, freqs, time bins)) and the summed linear power of the
-    target, over the band's frequency bins, original (version 0) and injected (version g + 1).
+    One row per trial, allowed channel, band and gain of a batch, over the band's frequency bins, original (version 0)
+    and injected (version g + 1): the summed squared error and the summed signed error (output - target) of output (dB,
+    cut to the analysis window like targets, (trials, versions, channels, freqs, time bins)), the summed linear power
+    of the target and the summed dB target (its level).
     """
     # sums over time per frequency, then over every band's frequencies: (trials, versions, channels)
     sse_freqs = ((output - targets) ** 2).sum(-1).numpy()
+    signed_freqs = (output - targets).sum(-1).numpy()
     power_freqs = (10 ** (targets / 10)).sum(-1).numpy()  # linear power of the dB targets
+    level_freqs = targets.sum(-1).numpy()
     sse = {band: sse_freqs[..., indices].sum(-1) for band, indices in bands.items()}
+    signed = {band: signed_freqs[..., indices].sum(-1) for band, indices in bands.items()}
     power = {band: power_freqs[..., indices].sum(-1) for band, indices in bands.items()}
+    level = {band: level_freqs[..., indices].sum(-1) for band, indices in bands.items()}
     n_times = targets.shape[-1]
 
     rows = []
@@ -130,23 +139,37 @@ def score_trials(output, targets, metadata, gains: List[float], ch_names, bands:
                                  "id": int(metadata["id"][j]), "channel": ch_names[c], "band": band, "gain": gain,
                                  "n_bins": len(indices) * n_times,
                                  "sse_original": sse[band][j, 0, c], "sse_injected": sse[band][j, g + 1, c],
-                                 "power_original": power[band][j, 0, c], "power_injected": power[band][j, g + 1, c]})
+                                 "signed_original": signed[band][j, 0, c], "signed_injected": signed[band][j, g + 1, c],
+                                 "power_original": power[band][j, 0, c], "power_injected": power[band][j, g + 1, c],
+                                 "level_original": level[band][j, 0, c], "level_injected": level[band][j, g + 1, c]})
     return rows
 
 
 def summarize(trial_errors: pd.DataFrame, roi: List[str]):
     """
     Returns (per gain, band, subject and channel: error and signal change as log ratios of the sums over the subject's
-    trials, i.e. log(MSE injected / MSE original) and log(power injected / power original), as the bins are the same;
-    per gain and band: median and quartiles over subjects of the subject's mean change over the roi channels, in %).
+    trials, i.e. log(MSE injected / MSE original) and log(power injected / power original), as the bins are the same,
+    and the change of the mean signed error and of the mean dB target (level) in dB;
+    per gain and band: median and quartiles over subjects of the subject's mean change over the roi channels, the log
+    ratios in %, the signed error and level changes in dB).
+    The signed error change is the level change the reconstruction doesn't follow: 0 if it follows the injected change,
+    -level change if it ignores it. Unlike the squared error it doesn't change when only the targets' spread changes.
     """
     keys = ["gain", "band", "subject", "channel"]
-    sums = trial_errors.groupby(keys, sort=False)[["sse_original", "sse_injected", "power_original", "power_injected"]].sum()
+    sums = trial_errors.groupby(keys, sort=False)[["sse_original", "sse_injected", "signed_original", "signed_injected", "power_original",
+                                                   "power_injected", "level_original", "level_injected", "n_bins"]].sum()
     per_channel = pd.DataFrame({"error_change": np.log(sums.sse_injected / sums.sse_original),
-                                "signal_change": np.log(sums.power_injected / sums.power_original)}).reset_index()
-    per_subject = per_channel[per_channel.channel.isin(roi)].groupby(["gain", "band", "subject"], sort=False)[["signal_change", "error_change"]].mean()
-    summary = per_subject.groupby(["gain", "band"], sort=False).agg(["median", lambda v: v.quantile(0.25), lambda v: v.quantile(0.75)]).apply(pct)
+                                "signal_change": np.log(sums.power_injected / sums.power_original),
+                                "signed_error_change": (sums.signed_injected - sums.signed_original) / sums.n_bins,
+                                "level_change": (sums.level_injected - sums.level_original) / sums.n_bins}).reset_index()
+    per_subject = per_channel[per_channel.channel.isin(roi)].groupby(["gain", "band", "subject"], sort=False)[
+        ["signal_change", "error_change", "level_change", "signed_error_change"]].mean()
+    stats = ["median", lambda v: v.quantile(0.25), lambda v: v.quantile(0.75)]
+    summary = per_subject[["signal_change", "error_change"]].groupby(["gain", "band"], sort=False).agg(stats).apply(pct)
     summary.columns = [f"{kind}_{stat}" for kind in ("signal_change", "error_change") for stat in ("median_pct", "q1_pct", "q3_pct")]
+    signed = per_subject[["level_change", "signed_error_change"]].groupby(["gain", "band"], sort=False).agg(stats)
+    signed.columns = [f"{kind}_{stat}" for kind in ("level_change", "signed_error_change") for stat in ("median_db", "q1_db", "q3_db")]
+    summary = summary.join(signed)
     summary["n_subjects"] = per_subject.groupby(["gain", "band"], sort=False).size()
     return per_channel, summary.reset_index()
 
@@ -159,7 +182,8 @@ def pct(log_ratio):
 def plot_injection(per_channel: pd.DataFrame, info, ch_names, gain_file, change_description, error_description, plot_dir: Path):
     """
     Topomaps of the median change over subjects per channel, one row of bands per gain and kind, as in ridge_leakage.py:
-    target channel power change (topomaps_injection_signal_*) and reconstruction error change (topomaps_injection_error_*).
+    target channel power change (topomaps_injection_signal_*) and reconstruction error change (topomaps_injection_error_*)
+    in %, and the signed error change (topomaps_injection_signed_*) in dB.
     """
     for gain, part in per_channel.groupby("gain", sort=False):
         n_subjects = part.subject.nunique()
@@ -169,6 +193,11 @@ def plot_injection(per_channel: pd.DataFrame, info, ch_names, gain_file, change_
             plot_topomap_row(values, info, ch_names, (-lim, lim), "RdBu_r", "change (%)",
                              f"{what} after {change_description(gain)} (median over N={n_subjects} subjects)",
                              plot_dir / f"topomaps_injection_{kind}_{gain_file(gain)}.png")
+        values = {band: rows.groupby("channel")["signed_error_change"].median() for band, rows in part.groupby("band", sort=False)}
+        lim = symmetric_limit(values, default=1.0)
+        plot_topomap_row(values, info, ch_names, (-lim, lim), "RdBu_r", "change (dB)",
+                         f"Signed error change (output - target) after {change_description(gain)} (median over N={n_subjects} subjects)",
+                         plot_dir / f"topomaps_injection_signed_{gain_file(gain)}.png")
 
 
 def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, float], info, ch_names, plot_dir: Path):
@@ -360,7 +389,9 @@ def main(opts):
     for _, row in summary.iterrows():
         print(f"  {gain_label(row.gain):>12} {row.band:16s} signal {row.signal_change_median_pct:+6.1f} % "
               f"[{row.signal_change_q1_pct:+.1f}, {row.signal_change_q3_pct:+.1f}], error {row.error_change_median_pct:+6.1f} % "
-              f"[{row.error_change_q1_pct:+.1f}, {row.error_change_q3_pct:+.1f}] (N={int(row.n_subjects)} subjects)")
+              f"[{row.error_change_q1_pct:+.1f}, {row.error_change_q3_pct:+.1f}], level {row.level_change_median_db:+.2f} dB, "
+              f"signed error {row.signed_error_change_median_db:+.2f} dB [{row.signed_error_change_q1_db:+.2f}, "
+              f"{row.signed_error_change_q3_db:+.2f}] (N={int(row.n_subjects)} subjects)")
     print(f"Results saved to {out_dir}, topomaps to {plot_dir}")
 
 

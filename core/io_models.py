@@ -35,6 +35,8 @@ class Metrics:
     recon_mean_bandwise: Dict[str, float] = None
     level_error: float = None  # |mean target - mean output| of a channel, see utils.get_inference_metrics
     level_error_bandwise: Dict[str, float] = None
+    signed_error: float = None  # mean output - mean target of a channel (> 0: predicted level too high), see utils.get_inference_metrics
+    signed_error_bandwise: Dict[str, float] = None
     recon_volatility: float = None
     recon_volatility_bandwise: Dict[str, float] = None
 
