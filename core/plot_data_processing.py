@@ -62,7 +62,7 @@ def class_channels_frame(trials: List[Trial], model: str, session: str, ch_names
 
 TIME_SERIES_METRICS = {
     'mae': lambda target, recon: np.abs(target - recon),
-    'error': lambda target, recon: target - recon,
+    'signed_error': lambda target, recon: recon - target,  # > 0: output too high, the sign of utils.get_inference_metrics' signed_error
     'target': lambda target, recon: target,
     'recon': lambda target, recon: recon,
 }

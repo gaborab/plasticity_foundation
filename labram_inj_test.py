@@ -9,9 +9,12 @@ frequency window and every settings.FREQ_BANDS band):
     error change  = log(SSE injected / SSE original) of the reconstruction, summed over a subject's trials, per channel;
                     the same bins are scored with and without the injection, so this is log(MSE injected / MSE original)
     signal change = log(power injected / power original) of the target (linear power of the dB target), the same way
-    signed error change = change of the mean signed error (output - target) in dB, the part of the target's dB level
-                    change (level change) the reconstruction doesn't follow: 0 if it follows, -level change if it ignores
-                    it. Linear in the target, so unlike the squared error it is not changed by a change of the targets' spread
+    signed error change = change of the mean signed error (output - target) of the dB targets, the part of the target's
+                    dB level change (level change) the reconstruction doesn't follow: 0 if it follows, -level change if it
+                    ignores it. Linear in the target, so unlike the squared error it is not changed by a change of the
+                    targets' spread. Both are dB differences, i.e. log power ratios, shown in % like the others: the level
+                    change is the change of the geometric mean power, the signed error change how much lower (< 0) or
+                    higher the reconstructed power change is than the target's (e.g. -16.7 % if a +20 % change is ignored)
 per subject the mean over the settings.INJECTION_N_ROI channels where the injected pattern is strongest, then median and
 quartiles over subjects. An error change much smaller than the signal change means the masked prediction absorbs the gain change.
 --mixed_injection injects the settings.MIXED_INJECTION_GAINS sources at once (fsaverage), each --injection value scaling all gains.
@@ -24,6 +27,8 @@ injection.csv (per gain, band, subject and channel), summary.csv (per gain and b
 Topomaps (outputs/plots/labram_injection/<model_name>/<injection>/): injected_source_topographies.png and, per gain, one row of bands
 of the median change over subjects per channel: topomaps_injection_signal_*.png, topomaps_injection_error_*.png and
 topomaps_injection_signed_*.png.
+--from_csv recomputes the summary, the topomaps and the printout from the trial_errors.csv of an earlier run with the same
+--mixed_injection, --head_model, --save_tag_name and --predictor, without the model or the epochs.
 """
 import argparse
 import json
@@ -149,9 +154,8 @@ def summarize(trial_errors: pd.DataFrame, roi: List[str]):
     """
     Returns (per gain, band, subject and channel: error and signal change as log ratios of the sums over the subject's
     trials, i.e. log(MSE injected / MSE original) and log(power injected / power original), as the bins are the same,
-    and the change of the mean signed error and of the mean dB target (level) in dB;
-    per gain and band: median and quartiles over subjects of the subject's mean change over the roi channels, the log
-    ratios in %, the signed error and level changes in dB).
+    and the change of the mean signed error and of the mean dB target (level), dB differences as log ratios too;
+    per gain and band: median and quartiles over subjects of the subject's mean change over the roi channels, in %).
     The signed error change is the level change the reconstruction doesn't follow: 0 if it follows the injected change,
     -level change if it ignores it. Unlike the squared error it doesn't change when only the targets' spread changes.
     """
@@ -160,16 +164,14 @@ def summarize(trial_errors: pd.DataFrame, roi: List[str]):
                                                    "power_injected", "level_original", "level_injected", "n_bins"]].sum()
     per_channel = pd.DataFrame({"error_change": np.log(sums.sse_injected / sums.sse_original),
                                 "signal_change": np.log(sums.power_injected / sums.power_original),
-                                "signed_error_change": (sums.signed_injected - sums.signed_original) / sums.n_bins,
-                                "level_change": (sums.level_injected - sums.level_original) / sums.n_bins}).reset_index()
+                                "signed_error_change": db_to_log((sums.signed_injected - sums.signed_original) / sums.n_bins),
+                                "level_change": db_to_log((sums.level_injected - sums.level_original) / sums.n_bins)}).reset_index()
     per_subject = per_channel[per_channel.channel.isin(roi)].groupby(["gain", "band", "subject"], sort=False)[
         ["signal_change", "error_change", "level_change", "signed_error_change"]].mean()
     stats = ["median", lambda v: v.quantile(0.25), lambda v: v.quantile(0.75)]
-    summary = per_subject[["signal_change", "error_change"]].groupby(["gain", "band"], sort=False).agg(stats).apply(pct)
-    summary.columns = [f"{kind}_{stat}" for kind in ("signal_change", "error_change") for stat in ("median_pct", "q1_pct", "q3_pct")]
-    signed = per_subject[["level_change", "signed_error_change"]].groupby(["gain", "band"], sort=False).agg(stats)
-    signed.columns = [f"{kind}_{stat}" for kind in ("level_change", "signed_error_change") for stat in ("median_db", "q1_db", "q3_db")]
-    summary = summary.join(signed)
+    kinds = ["signal_change", "error_change", "level_change", "signed_error_change"]
+    summary = per_subject[kinds].groupby(["gain", "band"], sort=False).agg(stats).apply(pct)
+    summary.columns = [f"{kind}_{stat}" for kind in kinds for stat in ("median_pct", "q1_pct", "q3_pct")]
     summary["n_subjects"] = per_subject.groupby(["gain", "band"], sort=False).size()
     return per_channel, summary.reset_index()
 
@@ -179,11 +181,16 @@ def pct(log_ratio):
     return 100 * (np.exp(log_ratio) - 1)
 
 
+def db_to_log(db):
+    """Converts a power difference in dB (of the dB targets, 10 * log10 of the power) to a log ratio."""
+    return db * np.log(10) / 10
+
+
 def plot_injection(per_channel: pd.DataFrame, info, ch_names, gain_file, change_description, error_description, plot_dir: Path):
     """
     Topomaps of the median change over subjects per channel, one row of bands per gain and kind, as in ridge_leakage.py:
     target channel power change (topomaps_injection_signal_*) and reconstruction error change (topomaps_injection_error_*)
-    in %, and the signed error change (topomaps_injection_signed_*) in dB.
+    and the signed error change (topomaps_injection_signed_*), in %.
     """
     for gain, part in per_channel.groupby("gain", sort=False):
         n_subjects = part.subject.nunique()
@@ -193,16 +200,21 @@ def plot_injection(per_channel: pd.DataFrame, info, ch_names, gain_file, change_
             plot_topomap_row(values, info, ch_names, (-lim, lim), "RdBu_r", "change (%)",
                              f"{what} after {change_description(gain)} (median over N={n_subjects} subjects)",
                              plot_dir / f"topomaps_injection_{kind}_{gain_file(gain)}.png")
-        values = {band: rows.groupby("channel")["signed_error_change"].median() for band, rows in part.groupby("band", sort=False)}
+        values = {band: pct(rows.groupby("channel")["signed_error_change"].median()) for band, rows in part.groupby("band", sort=False)}
         lim = symmetric_limit(values, default=1.0)
-        plot_topomap_row(values, info, ch_names, (-lim, lim), "RdBu_r", "change (dB)",
+        plot_topomap_row(values, info, ch_names, (-lim, lim), "RdBu_r", "change (%)",
                          f"Signed error change (output - target) after {change_description(gain)} (median over N={n_subjects} subjects)",
                          plot_dir / f"topomaps_injection_signed_{gain_file(gain)}.png")
 
 
-def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, float], info, ch_names, plot_dir: Path):
-    """Topomaps of the injected sources (and their net pattern for a mixed injection), as in ridge_leakage.py."""
-    values = {name: pd.Series(g, index=ch_names) for name, g in topographies.items()}
+def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, float], info, ch_names, plot_dir: Path,
+                 source_names: Optional[Dict[str, str]] = None):
+    """
+    Topomaps of the injected sources (and their net pattern for a mixed injection), as in ridge_leakage.py.
+    source_names: panel title of a source in place of its key, e.g. {"source": "pericalcarine"} for a single injection.
+    """
+    source_names = source_names or {}
+    values = {source_names.get(name, name): pd.Series(g, index=ch_names) for name, g in topographies.items()}
     if len(topographies) > 1:
         net = sum(relative_gains[name] * g for name, g in topographies.items())
         values["net change (injection 1)"] = pd.Series(net / np.abs(net).max(), index=ch_names)
@@ -230,6 +242,16 @@ def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
 
     if hyperparameters.get("target_mode") != "wavelet":
         raise ValueError(f"Only wavelet models are supported, the run's target mode is {hyperparameters.get('target_mode')}")
+    # the targets are computed with the current settings: a different frequency window keeps the output shape, so the
+    # model's rows would silently be compared with other frequencies. Runs that don't record these are not checked
+    if not opts.from_csv:
+        current = {"freq_window": list(settings.SPECTRAL_DECODER_PARAMS["freq_window"]), "target_pool": settings.TARGET_POOL}
+        recorded = {name: hyperparameters[name] for name in current if name in hyperparameters}
+        mismatched = {name: (value, current[name]) for name, value in recorded.items() if list(np.atleast_1d(value)) != list(np.atleast_1d(current[name]))}
+        if mismatched:
+            raise ValueError(f"The run was trained with other target settings than the current ones (trained, current): {mismatched}")
+        if len(recorded) < len(current):
+            print(f"WARNING: the run records no {', '.join(set(current) - set(recorded))}, the current settings are assumed to match")
     return {**{name: hyperparameters[name] for name in ("masked", "n_neighbors", "k_folds")},
             "hide_interpolated": hyperparameters.get("hide_interpolated", False)}
 
@@ -264,11 +286,14 @@ def get_args():
                         help='what reconstructs the targets: the model, or a trial-mean predictor that brackets it (run_mean_predictor): '
                              'fixed_mean ignores the injection, refit_mean follows its average change. The predictors are '
                              'saved next to the model results, with _{predictor} added to the injection folder')
+    parser.add_argument('--from_csv', action='store_true', default=False,
+                        help='only recompute the summary and the topomaps from the trial_errors.csv of an earlier run in the same '
+                             'injection folder (same --mixed_injection, --head_model, --save_tag_name and --predictor)')
     opts = parser.parse_args()
     if opts.injection is None:
-        if not opts.mixed_injection:
+        if not opts.mixed_injection and not opts.from_csv:
             parser.error("--injection is required without --mixed_injection")
-        opts.injection = [1.0]  # the MIXED_INJECTION_GAINS as they are
+        opts.injection = [1.0]  # the MIXED_INJECTION_GAINS as they are, unused with --from_csv (the gains are in the csv)
     return opts
 
 
@@ -279,11 +304,13 @@ def main(opts):
     print(f"Run settings: {run_settings}")
     masked, k_folds = run_settings["masked"], run_settings["k_folds"]
 
-    # the baseline test sets are rebuilt from the keys saved during training
-    print("Loading training split keys and building baseline inference folds...")
-    splitter = KFoldSplitter(input_data=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR,
-                             target_mode="wavelet", seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
-    folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))[:opts.n_folds]
+    # the baseline test sets are rebuilt from the keys saved during training (none with --from_csv, nothing is run)
+    folds = []
+    if not opts.from_csv:
+        print("Loading training split keys and building baseline inference folds...")
+        splitter = KFoldSplitter(input_data=settings.FINETUNE_INPUT_EPOCHS_DIR, target_data_dir=settings.FINETUNE_WAVELET_DIR,
+                                 target_mode="wavelet", seed=settings.SEED, k_folds=k_folds, no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
+        folds = splitter.split_from_keys(io.load_training_split_keys(model_dir, k_folds))[:opts.n_folds]
 
     # the injected sources and the channels where their net pattern is strongest
     topographies, relative_gains, description = core_utils.injected_sources(
@@ -308,9 +335,11 @@ def main(opts):
     plot_dir = PLOT_ROOT / opts.model_name / injection_name
     plot_dir.mkdir(parents=True, exist_ok=True)
     info = create_topomap_info()  # 10-20 labels at the positions of the recording HydroCel electrodes
-    plot_sources(topographies, relative_gains, info, ch_names, plot_dir)
+    # name of a single source in the plot titles: its aparc labels, or the sphere-model dipole
+    single_name = " + ".join(settings.INJECTION_LABELS) if opts.head_model == "fsaverage" else "occipital dipole (sphere model)"
+    plot_sources(topographies, relative_gains, info, ch_names, plot_dir, source_names={"source": single_name})
     # every bin of the frequency window and the settings.FREQ_BANDS bands, as the bands of ridge_leakage.py
-    bands = {settings.FREQ_WINDOW_LABEL: np.arange(len(settings.FREQS)), **settings.FREQ_BAND_INDICES}
+    bands = {f"all bands ({settings.FREQ_WINDOW_LABEL})": np.arange(len(settings.FREQS)), **settings.FREQ_BAND_INDICES}
 
     # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster
     trial_interpolations = None
@@ -363,20 +392,29 @@ def main(opts):
         trial_errors.insert(0, "fold", i + 1)
         all_trial_errors.append(trial_errors)
 
-    trial_errors = pd.concat(all_trial_errors, ignore_index=True)
-    per_channel, summary = summarize(trial_errors, roi)
     out_dir = OUTPUT_ROOT / opts.model_name / injection_name
+    if opts.from_csv:
+        trial_errors = pd.read_csv(out_dir / "trial_errors.csv")
+        # earlier runs named the band of all bins by its range only, e.g. "5-60 Hz"
+        trial_errors["band"] = trial_errors.band.str.replace(r"^(\d+-\d+ Hz)$", r"all bands (\1)", regex=True)
+        print(f"Loaded the trial errors of {trial_errors.fold.nunique()} fold(s) from {out_dir / 'trial_errors.csv'}")
+    else:
+        trial_errors = pd.concat(all_trial_errors, ignore_index=True)
+    per_channel, summary = summarize(trial_errors, roi)
     out_dir.mkdir(parents=True, exist_ok=True)
     trial_errors.to_csv(out_dir / "trial_errors.csv", index=False)
     per_channel.to_csv(out_dir / "injection.csv", index=False)
     summary.to_csv(out_dir / "summary.csv", index=False)
 
+    # the plot titles name the injected regions: the aparc labels (both hemispheres) with the gains actually applied
     if opts.mixed_injection:
         gain_label, gain_file = (lambda gain: f"mixed ×{gain:g}"), (lambda gain: f"mixed{gain:g}")
-        change_description = lambda gain: f"the {gain_label(gain)} injection"
+        change_description = lambda gain: (f"the {gain_label(gain)} injection ("
+                                           + ", ".join(f"{name} {100 * gain * g:+g} %" for name, g in relative_gains.items()) + ")")
     else:
         gain_label, gain_file = (lambda gain: f"{100 * gain:+g} %"), (lambda gain: f"gain{gain:g}")
-        change_description = lambda gain: f"a {gain_label(gain)} visual-cortex source gain"
+        source_name = f"{single_name} source (both hemispheres)" if opts.head_model == "fsaverage" else single_name
+        change_description = lambda gain: f"a {gain_label(gain)} gain of the {source_name}"
     error_description = (f"Masked reconstruction error change ({run_settings['n_neighbors']} neighbours hidden)" if masked
                          else "Reconstruction error change")
     if opts.predictor != "model":
@@ -384,14 +422,14 @@ def main(opts):
                              "refit_mean": "Error change of the trial mean refitted per version"}[opts.predictor]
     plot_injection(per_channel, info, ch_names, gain_file, change_description, error_description, plot_dir)
 
-    print(f"\nInjection test of {opts.model_name}, {len(folds)} fold(s), source: {description}")
+    print(f"\nInjection test of {opts.model_name}, {trial_errors.fold.nunique()} fold(s), source: {description}")
     print(f"Signal and error change in % on {', '.join(roi)}, median [quartiles] over subjects:")
     for _, row in summary.iterrows():
         print(f"  {gain_label(row.gain):>12} {row.band:16s} signal {row.signal_change_median_pct:+6.1f} % "
               f"[{row.signal_change_q1_pct:+.1f}, {row.signal_change_q3_pct:+.1f}], error {row.error_change_median_pct:+6.1f} % "
-              f"[{row.error_change_q1_pct:+.1f}, {row.error_change_q3_pct:+.1f}], level {row.level_change_median_db:+.2f} dB, "
-              f"signed error {row.signed_error_change_median_db:+.2f} dB [{row.signed_error_change_q1_db:+.2f}, "
-              f"{row.signed_error_change_q3_db:+.2f}] (N={int(row.n_subjects)} subjects)")
+              f"[{row.error_change_q1_pct:+.1f}, {row.error_change_q3_pct:+.1f}], level {row.level_change_median_pct:+6.1f} %, "
+              f"signed error {row.signed_error_change_median_pct:+6.1f} % [{row.signed_error_change_q1_pct:+.1f}, "
+              f"{row.signed_error_change_q3_pct:+.1f}] (N={int(row.n_subjects)} subjects)")
     print(f"Results saved to {out_dir}, topomaps to {plot_dir}")
 
 

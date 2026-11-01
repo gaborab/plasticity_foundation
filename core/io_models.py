@@ -109,7 +109,7 @@ class Trial:
 
     def time_series(self, metric: str, bands: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         """Returns the time series of metric as {band: (n_chans, n_timepoints) array}, including "all bands".
-        Available metrics are the ones saved in the time series file (keys of plot_data_processing.TIME_SERIES_METRICS: mae, error, target, recon).
+        Available metrics are the ones saved in the time series file (keys of plot_data_processing.TIME_SERIES_METRICS: mae, signed_error, target, recon).
         bands: only read these bands (None reads all of them).
         Reads from the file on every call, the result is not cached.
         """

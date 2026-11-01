@@ -6,7 +6,7 @@ import ipywidgets as widgets
 from IPython.display import display
 from ipywidgets import interact
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 
@@ -419,10 +419,12 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
 
 def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Optional[Dict[str, np.ndarray]] = None,
                      x_label="Time (ms)", y_label="MAE", vlines: Optional[List[float]] = None,
-                     hlines: Optional[List[float]] = None, ax=None, fig=None, n_text: str = None):
+                     hlines: Optional[List[float]] = None, ax=None, fig=None, n_text: str = None,
+                     xlim: Optional[Tuple[float, float]] = None):
     """
     Plots one line per key of means against times, with a shaded ±SEM band if sems are given (same keys as means).
     vlines: x positions of dashed vertical lines, e.g. [0] for the stimulus onset. hlines: y positions of solid horizontal lines, e.g. [0] for differences.
+    xlim: x-axis limits, e.g. the time window of binned series plotted at their bin centres; None keeps matplotlib's margins.
     """
     is_standalone = ax is None
     if is_standalone:
@@ -437,6 +439,8 @@ def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Opti
     for y in hlines or []:
         ax.axhline(y, color='black', linewidth=0.8)
 
+    if xlim is not None:
+        ax.set_xlim(*xlim)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     if n_text is not None:
@@ -452,16 +456,17 @@ def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Opti
 
 def plot_time_series_grid(times, means: Dict[str, Dict[str, np.ndarray]], suptitle: str,
                           sems: Optional[Dict[str, Dict[str, np.ndarray]]] = None, y_label="MAE",
-                          vlines: Optional[List[float]] = None, hlines: Optional[List[float]] = None, n_cols: int = 3):
+                          vlines: Optional[List[float]] = None, hlines: Optional[List[float]] = None, n_cols: int = 3,
+                          xlim: Optional[Tuple[float, float]] = None):
     """
     Plots one plot_time_series subplot per panel, e.g. per band. Expects means (and sems) as {panel title: {line label: series}}.
-    The y-axes are not shared, so panels with different scales stay readable.
+    The y-axes are not shared, so panels with different scales stay readable. xlim: x-axis limits of every panel.
     """
     n_rows = int(np.ceil(len(means) / n_cols))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
     for ax, (panel, panel_means) in zip(axes.flat, means.items()):
         plot_time_series(times, panel_means, title=panel, sems=sems[panel] if sems is not None else None,
-                         y_label=y_label, vlines=vlines, hlines=hlines, ax=ax, fig=fig)
+                         y_label=y_label, vlines=vlines, hlines=hlines, ax=ax, fig=fig, xlim=xlim)
     for ax in axes.flat[len(means):]:
         ax.set_visible(False)
 
