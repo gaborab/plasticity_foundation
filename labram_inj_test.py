@@ -29,9 +29,12 @@ of the median change over subjects per channel: topomaps_injection_signal_*.png,
 topomaps_injection_signed_*.png.
 --from_csv recomputes the summary, the topomaps and the printout from the trial_errors.csv of an earlier run with the same
 --mixed_injection, --head_model, --save_tag_name and --predictor, without the model or the epochs.
+--split_seed compares different trials as well, as two sessions are compared (summarize_split): half A of every
+subject's trials of every condition original vs half B injected, and the null (half B original), per seed.
 """
 import argparse
 import json
+import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -168,6 +171,47 @@ def summarize(trial_errors: pd.DataFrame, roi: List[str]):
                                 "signal_change": np.log(sums.power_injected / sums.power_original),
                                 "signed_error_change": db_to_log((sums.signed_injected - sums.signed_original) / sums.n_bins),
                                 "level_change": db_to_log((sums.level_injected - sums.level_original) / sums.n_bins)}).reset_index()
+    return per_channel, summarize_per_channel(per_channel, roi)
+
+
+def split_half_b(trial_errors: pd.DataFrame, seed: int) -> pd.Series:
+    """
+    Random halves of the trials, stratified by subject and condition: True for the rows of half B. Every subject's trial
+    ids of every condition are sorted, shuffled with random.Random(seed) and the second half is B, so the same seed
+    gives the same halves in every run (and as the occlusion split in notebooks/decoding_injections.ipynb).
+    """
+    rng = random.Random(seed)
+    half_b = set()
+    trials = trial_errors[["subject", "condition", "id"]].drop_duplicates()
+    for (subject, condition), group in trials.groupby(["subject", "condition"], sort=True):
+        ids = sorted(group["id"])
+        rng.shuffle(ids)
+        half_b |= {(subject, condition, idx) for idx in ids[len(ids) // 2:]}
+    return pd.Series(pd.MultiIndex.from_frame(trial_errors[["subject", "condition", "id"]]).isin(list(half_b)), index=trial_errors.index)
+
+
+def summarize_split(trial_errors: pd.DataFrame, roi: List[str], seed: int, null: bool = False):
+    """
+    As summarize, but comparing different trials of the same session, as two sessions are compared: the original trials
+    of half A (split_half_b with seed) with the injected trials of half B, or with null its original trials (the
+    difference two halves of the same trials have by chance). The changes are those of the means per bin over the
+    half's trials, as the halves can differ by a trial. Returns (per_channel, summary) like summarize.
+    """
+    half_b = split_half_b(trial_errors, seed)
+    keys = ["gain", "band", "subject", "channel"]
+    version = "original" if null else "injected"
+    a = trial_errors[~half_b].groupby(keys, sort=False)[["sse_original", "signed_original", "power_original", "level_original", "n_bins"]].sum()
+    b = trial_errors[half_b].groupby(keys, sort=False)[[f"sse_{version}", f"signed_{version}", f"power_{version}", f"level_{version}", "n_bins"]].sum()
+    a, b = a.align(b, join="inner", axis=0)
+    per_channel = pd.DataFrame({"error_change": np.log((b[f"sse_{version}"] / b.n_bins) / (a.sse_original / a.n_bins)),
+                                "signal_change": np.log((b[f"power_{version}"] / b.n_bins) / (a.power_original / a.n_bins)),
+                                "signed_error_change": db_to_log(b[f"signed_{version}"] / b.n_bins - a.signed_original / a.n_bins),
+                                "level_change": db_to_log(b[f"level_{version}"] / b.n_bins - a.level_original / a.n_bins)}).reset_index()
+    return per_channel, summarize_per_channel(per_channel, roi)
+
+
+def summarize_per_channel(per_channel: pd.DataFrame, roi: List[str]) -> pd.DataFrame:
+    """Per gain and band: median and quartiles over subjects (in %) of every subject's mean change over the roi channels."""
     per_subject = per_channel[per_channel.channel.isin(roi)].groupby(["gain", "band", "subject"], sort=False)[
         ["signal_change", "error_change", "level_change", "signed_error_change"]].mean()
     stats = ["median", lambda v: v.quantile(0.25), lambda v: v.quantile(0.75)]
@@ -175,7 +219,7 @@ def summarize(trial_errors: pd.DataFrame, roi: List[str]):
     summary = per_subject[kinds].groupby(["gain", "band"], sort=False).agg(stats).apply(pct)
     summary.columns = [f"{kind}_{stat}" for kind in kinds for stat in ("median_pct", "q1_pct", "q3_pct")]
     summary["n_subjects"] = per_subject.groupby(["gain", "band"], sort=False).size()
-    return per_channel, summary.reset_index()
+    return summary.reset_index()
 
 
 def pct(log_ratio):
@@ -291,6 +335,11 @@ def get_args():
     parser.add_argument('--from_csv', action='store_true', default=False,
                         help='only recompute the summary and the topomaps from the trial_errors.csv of an earlier run in the same '
                              'injection folder (same --mixed_injection, --head_model, --save_tag_name and --predictor)')
+    parser.add_argument('--split_seed', type=int, nargs='+', default=None,
+                        help='also compare different trials, as two sessions are compared: per seed, half A original vs half B '
+                             'injected and the null (half B original), stratified by subject and condition (summarize_split); '
+                             'csvs injection_split{seed}[_null].csv, summary_split{seed}[_null].csv and topomaps in '
+                             'split{seed}[_null]/. Works with --from_csv')
     opts = parser.parse_args()
     if opts.injection is None:
         if not opts.mixed_injection and not opts.from_csv:
@@ -430,13 +479,35 @@ def main(opts):
 
     print(f"\nInjection test of {opts.model_name}, {trial_errors.fold.nunique()} fold(s), source: {description}")
     print(f"Signal and error change in % on {', '.join(roi)}, median [quartiles] over subjects:")
+    print_summary(summary, gain_label)
+
+    # split halves (--split_seed): half A original vs half B injected, and the null (half B original), every seed with
+    # its own csvs and topomaps (plot_dir/split{seed}, plot_dir/split{seed}_null)
+    for seed in opts.split_seed or []:
+        for null in (False, True):
+            name = f"split{seed}" + ("_null" if null else "")
+            split_channel, split_summary = summarize_split(trial_errors, roi, seed, null)
+            split_channel.to_csv(out_dir / f"injection_{name}.csv", index=False)
+            split_summary.to_csv(out_dir / f"summary_{name}.csv", index=False)
+            split_dir = plot_dir / name
+            split_dir.mkdir(parents=True, exist_ok=True)
+            split_description = ((lambda gain: f"half B original vs half A original (split seed {seed}, no injection)") if null
+                                 else (lambda gain: f"{change_description(gain)} in half B vs half A original (split seed {seed})"))
+            plot_injection(split_channel, info, ch_names, gain_file, split_description, error_description, split_dir)
+            print(f"\nSplit seed {seed}, half A original vs half B {'original (null)' if null else 'injected'}, in % on "
+                  f"{', '.join(roi)}, median [quartiles] over subjects:")
+            print_summary(split_summary, gain_label)
+    print(f"Results saved to {out_dir}, topomaps to {plot_dir}")
+
+
+def print_summary(summary: pd.DataFrame, gain_label):
+    """Prints a summary (summarize, summarize_split) row by row: median [quartiles] over subjects of every change, in %."""
     for _, row in summary.iterrows():
         print(f"  {gain_label(row.gain):>12} {row.band:16s} signal {row.signal_change_median_pct:+6.1f} % "
               f"[{row.signal_change_q1_pct:+.1f}, {row.signal_change_q3_pct:+.1f}], error {row.error_change_median_pct:+6.1f} % "
               f"[{row.error_change_q1_pct:+.1f}, {row.error_change_q3_pct:+.1f}], level {row.level_change_median_pct:+6.1f} %, "
               f"signed error {row.signed_error_change_median_pct:+6.1f} % [{row.signed_error_change_q1_pct:+.1f}, "
               f"{row.signed_error_change_q3_pct:+.1f}] (N={int(row.n_subjects)} subjects)")
-    print(f"Results saved to {out_dir}, topomaps to {plot_dir}")
 
 
 if __name__ == '__main__':
