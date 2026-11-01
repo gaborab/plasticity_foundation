@@ -53,6 +53,8 @@ from core import utils as core_utils
 from core.plot_data_processing import create_topomap_info
 from core.plotting import plot_topomap_row, symmetric_limit
 from run_inference import reconstruct_batch
+import platform
+import pathlib
 
 OUTPUT_ROOT = settings.BASE_DIR / "outputs" / "labram_injection"
 PLOT_ROOT = settings.PLOT_DIR / "labram_injection"
@@ -303,6 +305,10 @@ def main(opts):
     run_settings = load_run_settings(model_dir, opts)
     print(f"Run settings: {run_settings}")
     masked, k_folds = run_settings["masked"], run_settings["k_folds"]
+
+    if platform.system() == "Windows":
+        pathlib.PosixPath = pathlib.WindowsPath  # checkpoints saved on Linux contain PosixPath objects
+
 
     # the baseline test sets are rebuilt from the keys saved during training (none with --from_csv, nothing is run)
     folds = []
