@@ -228,11 +228,16 @@ def get_args():
                              'in training (masked-channel reconstruction)')
     parser.add_argument('--class_occlusion_injection', type=float, nargs='+', default=None,
                         help='Occlusion check of a masked class run trained on the baseline: for every attenuation given, the '
-                             'posterior evoked response of --injection_conditions is attenuated (core.decoding.data.plant_attenuation) '
-                             'in every fold\'s baseline test trials, and only these are run, saved as the post-patching session of '
-                             '{model_name}_inj_{attenuation}. The regular outputs are not run or touched')
+                             'posterior evoked response of --injection_conditions is attenuated (core.decoding.data.plant_attenuation, '
+                             'or with --class_specific its location-specific part) in every fold\'s baseline test trials, and only '
+                             'these are run, saved as the post-patching session of {model_name}_inj_{attenuation}, which is '
+                             'replaced as a whole. The regular outputs are not run or touched')
     parser.add_argument('--injection_conditions', type=str, nargs='+', default=['right_2'],
                         help='Conditions attenuated with --class_occlusion_injection (default R_mid, as the LDA checks)')
+    parser.add_argument('--class_specific', action='store_true',
+                        help='With --class_occlusion_injection: attenuate only the location-specific part of the response '
+                             '(core.decoding.data.plant_class_attenuation: the class mean minus the mean over the location '
+                             'classes), as the pseudo-session runs. The plant is recorded in {model_name}_inj_{attenuation}/injection.json')
 
     return parser.parse_args()
 
@@ -284,15 +289,29 @@ def main(opts):
         if not (task_classify and masked and session == "baseline" and not pseudo):
             raise ValueError("--class_occlusion_injection needs a masked class run trained on the baseline")
         posterior = [name in settings.POSTERIOR_CHANNELS for name in ch_names]
+        plant_args = {"channel_mask": posterior, "epoch_window": settings.EPOCH_WINDOW, "fs": settings.RSFREQ,
+                      "window": settings.PLANT_ATTENUATION_WINDOW}
+        plant = "class_specific" if opts.class_specific else "whole_response"
         for attenuation in opts.class_occlusion_injection:
-            injected = decoding_data.plant_attenuation(splitter.input_target_data, opts.injection_conditions, attenuation,
-                                                       posterior, settings.EPOCH_WINDOW, settings.RSFREQ,
-                                                       settings.PLANT_ATTENUATION_WINDOW)
+            if opts.class_specific:
+                injected = decoding_data.plant_class_attenuation(splitter.input_target_data, opts.injection_conditions, attenuation,
+                                                                 **plant_args, location_conditions=list(settings.LOCATION_CLASSES))
+            else:
+                injected = decoding_data.plant_attenuation(splitter.input_target_data, opts.injection_conditions, attenuation,
+                                                           **plant_args)
             injected_splitters[attenuation] = KFoldSplitter(input_data=injected, target_data_dir=None, target_mode=target_mode,
                                                             seed=settings.SEED, k_folds=k_folds,
                                                             no_press_threshold=settings.NO_PRESS_FROM_SUBJECT)
-        print(f"Occlusion injection: {opts.injection_conditions} attenuated by {opts.class_occlusion_injection} on "
-              f"{settings.POSTERIOR_CHANNELS}, {settings.PLANT_ATTENUATION_WINDOW} s; only the injected test trials are run")
+            # the folder is replaced as a whole, so no results of an earlier injection remain in it
+            injection_root = settings.INFERENCE_DIR / f"{opts.model_name}_inj_{attenuation:g}"
+            shutil.rmtree(injection_root, ignore_errors=True)
+            injection_root.mkdir(parents=True)
+            with open(injection_root / "injection.json", "w", encoding="utf-8") as f:
+                json.dump({"plant": plant, "conditions": opts.injection_conditions, "attenuation": attenuation,
+                           "channels": settings.POSTERIOR_CHANNELS, "window": settings.PLANT_ATTENUATION_WINDOW}, f)
+        print(f"Occlusion injection ({plant.replace('_', ' ')}): {opts.injection_conditions} attenuated by "
+              f"{opts.class_occlusion_injection} on {settings.POSTERIOR_CHANNELS}, {settings.PLANT_ATTENUATION_WINDOW} s; "
+              f"only the injected test trials are run")
 
     # baseline model: every post-patching trial is reconstructed once, by the fold its stratified within-subject split assigns it to
     postpatch_folds = None

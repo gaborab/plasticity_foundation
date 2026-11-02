@@ -104,6 +104,9 @@ For preprocessing:
 ├── stimulus_intervals.py        # Analysis: time between consecutive stimuli -> outputs/stimulus_intervals/
 ├── labram_inj_test.py           # Check: gain injection test of a trained masked-channel model -> outputs/labram_injection/
 ├── ridge_leakage.py             # Check: linear masked-channel prediction (leakage), build comparison, gain injection -> outputs/ridge_leakage/
+├── decoding/
+│   ├── run_sliding_lda.py       # Time-resolved location decoding (sliding LDA per band, optional searchlight)
+│   └── run_lda_injection.py     # Check: planted delays / attenuations in baseline pseudo-sessions (handoff Task C)
 ├── pyproject.toml / uv.lock     # Environment definition
 │
 ├── core/                        # Project package
@@ -122,7 +125,9 @@ For preprocessing:
 │   ├── macro_evaluation.ipynb   # Fold-averaged learning curves, model comparison
 │   ├── plasticity_plotting.ipynb   # Baseline vs post-patching analysis on inference outputs
 │   ├── plasticity_tensor_analysis.ipynb   # Time series of errors/signals from the full tensors (cached per fold)
-│   └── preproc_plotting.ipynb   # Plots of the preprocessing QC reports (e.g. ICA removals per session)
+│   ├── preproc_plotting.ipynb   # Plots of the preprocessing QC reports (e.g. ICA removals per session)
+│   ├── LDA.ipynb                # Location decoding: logistic regression vs LaBraM, Task A / B, occlusion and searchlight maps
+│   └── decoding_injections.ipynb   # Planted-change checks of the LDA and of LaBraM occlusion, with their split-half nulls
 │
 ├── libs/
 │   ├── labram/                  # Vendored LaBraM (modified for regression), incl. checkpoints/labram-base.pth
@@ -616,7 +621,7 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 
 #### 2.7 Location classification (`--task_classify`)
 
-Task D of the decoding handoff (`HANDOFF_location_decoding.md`): LaBraM fine-tuned to classify which of the **8 mismatch locations** a trial belongs to, one prediction per trial. LaBraM gives no time course (one 1 s patch per channel), so latency and time-resolved accuracy come from the linear decoders of the handoff, which are not implemented in this repository yet.
+Task D of the decoding handoff (`HANDOFF_location_decoding.md`): LaBraM fine-tuned to classify which of the **8 mismatch locations** a trial belongs to, one prediction per trial. LaBraM gives no time course (one 1 s patch per channel), so latency and time-resolved accuracy come from the linear decoders of the handoff (`decoding/run_sliding_lda.py`, `notebooks/LDA.ipynb`).
 
 **Classes** (`LOCATION_CLASSES`, handoff table 3.1): `left_1/2/3` → 0–2 (L_far, L_mid, L_near), `right_1/2/3` → 3–5, `center_2/3` → 6–7 (T_mid, T_near; the top wall has no far location). Eccentricity 1 = far, 2 = mid, 3 = near. `global` is a different mismatch type, not a location, so it has no class and its trials are left out. Adding it would make a 9-class stimulus-type decoder.
 
@@ -991,12 +996,57 @@ The source topographies, the injection itself and the topomap helpers are in `co
   - per subject: the mean over the `INJECTION_N_ROI` channels where the injected pattern is strongest (e.g. O1, O2, T6, T5 for the sphere dipole);
   - over subjects: median and quartiles, reported as % change. Interpolated channels are left out.
 - **Mixed injection** (`--mixed_injection`, fsaverage only): the `MIXED_INJECTION_GAINS` sources at once, each `--injection` value scaling all gains (default 1). The overlap of the source topographies is printed.
+- **Split-half noise test** (`--split_seed SEED [SEED …]`, also with `--from_csv`): the scoring above compares every trial with its own injected version, so trial-to-trial noise cancels. Two sessions are different trials, so for every seed the trials of every subject × condition are also split into random halves (ids sorted, shuffled with `random.Random(seed)`, the second half is B; `split_half_b`) and scored as two sessions would be (`summarize_split`):
+  - **planted**: half B injected relative to half A original;
+  - **null**: half B original relative to half A original, the difference two halves of the same trials have by chance.
+
+  The changes are those of the means per bin of each half (the halves can differ by a trial), as log ratios (B / A − 1 in %; dB differences for level and signed error). An injection is visible against trial noise if the planted summary and maps clearly exceed the null of the same seed, across seeds. Outputs: `injection_split{seed}[_null].csv`, `summary_split{seed}[_null].csv` and the usual topomaps in `split{seed}[_null]/` of the plot folder. Single and mixed injections are separate runs, so run the split for each, with the options of the original run:
+
+  ```bash
+  uv run python labram_inj_test.py --model_name my_model --from_csv --split_seed 0 1 2
+  uv run python labram_inj_test.py --model_name my_model --mixed_injection --from_csv --split_seed 0 1 2
+  ```
+- **Signed error change**: the change of the mean (output − target) in dB, the part of the target's level change the reconstruction doesn't follow. A bias the model had before cancels. It is 0 if the reconstruction follows the change, −(level change) if it ignores it (opposite sign whenever it under-follows) and of the same sign if it overshoots; the share followed is 1 + signed / level change, in dB.
 - **Outputs** (`outputs/labram_injection/<model>/<injection>/`, with `<injection>` = `single_` or `mixed_` + head model, e.g. `single_fsaverage`, so single and mixed runs of one model keep separate results): `trial_errors.csv` (per fold, trial, channel, band and gain), `injection.csv` (per gain, band, subject and channel), `summary.csv` (per gain and band, median [quartiles] over subjects). A second run with the same injection and head model overwrites the folder. **Topomaps** (`outputs/plots/labram_injection/<model>/<injection>/`): `injected_source_topographies.png` and per gain `topomaps_injection_signal_*.png` and `topomaps_injection_error_*.png`, one row of bands with the median change over subjects per channel, as for ridge.
 - **Run** after training, e.g.
 
 ```bash
 uv run python labram_inj_test.py --model_name my_model --injection 0.1 0.25 0.5 --n_folds 1
 ```
+
+**Decoding injection tests** (handoff Task C): planted changes in baseline data, to show what the location decoders and their maps can detect, and that they find nothing when nothing is planted. All are analysed in `notebooks/decoding_injections.ipynb`. Every plant changes copies of the epochs (`core.decoding.data`), never the loaded tensors:
+- `plant_delay`: the planted condition's epochs are shifted later by d (zeros at the start), so the analysed window starts d earlier (handoff C3).
+- `plant_attenuation`: a × the subject's class-average epoch subtracted at `POSTERIOR_CHANNELS` (P3, P4, PZ, O1, O2) within `PLANT_ATTENUATION_WINDOW` (0 … 0.5 s) (handoff C4). A decoder retrained on such data can learn the weakened class as a new pattern.
+- `plant_class_attenuation`: only the class's location-specific part, a × (class mean − mean of the 8 location class means), on the same channels and window; at a = 1 no posterior location-specific average is left, for any decoder.
+
+The tests and their noise controls:
+- **Sliding LDA on pseudo-sessions** (`decoding/run_lda_injection.py`): every subject's baseline trials are split into two random halves per condition (`split_halves`, `--split_seed`), pseudo pre saved as `baseline` and pseudo post as `postpatch`, each with 3 within-subject folds and its own LDAs (`run_sliding_lda.run_lda`), as the real sessions. Runs (`outputs/inference_outputs/{name}_{plant}_split{seed}/`):
+  - `null`: nothing planted (C2); no Task B change contrast may be significant. `--null_only` runs only this, for further split seeds.
+  - `delay_{condition}_{ms}ms` for every `--delays` size (no searchlight), and `attenuation_…` / with `--class_specific` `classattenuation_…` for every `--attenuations` size, one `--conditions` condition at a time. The planted runs share the null run's folds (checked), so planted − null is a same-trials comparison without the halves' own difference.
+  - `--per_subject` fits separate models per subject (`core.decoding.models.fit_per_subject`) instead of the pooled ones; use another `--name`.
+
+  ```bash
+  uv run python -m decoding.run_lda_injection --split_seed 0 --conditions right_3 left_3 --delays 0.01 0.02 0.04 --attenuations
+  uv run python -m decoding.run_lda_injection --split_seed 0 --class_specific --delays --attenuations 0.5 1.0 --searchlight --searchlight_bands 0
+  uv run python -m decoding.run_lda_injection --split_seed 1 --null_only
+  ```
+- **LaBraM occlusion, fixed model** (`run_inference.py --class_occlusion_injection A [A …]`, masked class run trained on the baseline): every fold's own test trials once more with `plant_attenuation` of `--injection_conditions` (default `right_2`), saved as the `postpatch` session of `{model}_inj_{a}`; the regular outputs are untouched. Recorded and injected versions of the same trials: whether occlusion attributes lost evidence to the planted region.
+- **LaBraM occlusion, split halves** (notebook cell `labram_split_injection`): the noise test of the fixed-model comparison, from the outputs above without new inference. The planted class's test trials are split into halves as in `labram_inj_test.py --split_seed`; half A recorded vs half B injected, and the null half A vs half B recorded, per seed. This is the design of the real baseline vs post-patching occlusion maps of one baseline-trained model, without session drift.
+- **LaBraM occlusion, within session** (`run_general_finetune.py --pseudo_session pre|post --split_seed S [--plant_condition C --plant_attenuation A]`, then `run_inference.py`): separate masked class models trained on the two halves of the baseline (`--k_folds 3`), pseudo pre saved as `baseline`, pseudo post as `postpatch`. The null pair (pre vs unplanted post) shows how much two separately trained models differ by chance; the planted pair has to exceed it.
+
+  ```bash
+  uv run python run_general_finetune.py --model_name class_pseudo_pre --task_classify --masked --k_folds 3 --pseudo_session pre --split_seed 0
+  uv run python run_general_finetune.py --model_name class_pseudo_post_rmid --task_classify --masked --k_folds 3 --pseudo_session post --split_seed 0 --plant_condition right_2 --plant_attenuation 1.0
+  uv run python run_general_finetune.py --model_name class_pseudo_post_null --task_classify --masked --k_folds 3 --pseudo_session post --split_seed 0
+  ```
+
+**Results so far** (46 subjects):
+- **Null (C2)**: 0 of 10 change contrasts significant in splits 1 and 2, 1 of 10 in split 0 (near latency, −37 ms, not replicated).
+- **Delay (C3)**: mid-eccentricity latency can't be estimated on pseudo-sessions (SE ≈ 0.3 s). At near eccentricity the planted delays are recovered relative to the null of the same split: −9 / −19 / −36 ms for L_near (expected −10 / −20 / −40), +8 / +13 / +25 ms for R_near (expected +10 / +20 / +40).
+- **Attenuation (C4)**: not detected, neither the whole-response nor the class-specific plant up to a = 1, pooled or per subject: the LDA's mid-location information is not in the posterior average responses of P3, P4, PZ, O1, O2.
+- **Pooled vs per-subject LDA**: the pooled LDA decodes better (balanced accuracy 0.153 vs 0.144 in the accuracy window); per-subject latencies are unusable.
+- **LaBraM, fixed model**: `p_true` of R_mid drops linearly with the attenuation (−0.004 / −0.010 / −0.020 for a = 0.1 / 0.25 / 0.5, t ≈ −8) and the occlusion effect drops at the clusters containing P3 and PZ (d_z ≈ −1), not at O1 / O2.
+- **LaBraM, within session**: the planted pair's occlusion change (P3 −0.037) is not larger than the null pair's (C3 −0.045, PZ −0.037), so differences between separately trained models' maps can't show a localised change.
 
 **`qc_bad_channels.py`**: runs the automatic bad channel detector on every recording without the full preprocessing, and compares it with the manual selections. Outputs are `outputs/qc/auto_bad_channels_metrics.csv` (every channel) and `auto_bad_channels.csv` (flagged channels, with a `manually_flagged` column). Use it to review or retune `AUTO_BAD_CHANNEL_PARAMS`.
 

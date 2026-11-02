@@ -491,10 +491,11 @@ def main(opts):
             split_summary.to_csv(out_dir / f"summary_{name}.csv", index=False)
             split_dir = plot_dir / name
             split_dir.mkdir(parents=True, exist_ok=True)
-            split_description = ((lambda gain: f"half B original vs half A original (split seed {seed}, no injection)") if null
-                                 else (lambda gain: f"{change_description(gain)} in half B vs half A original (split seed {seed})"))
+            split_description = ((lambda gain: f"no injection (null test: half B uninjected relative to half A uninjected, split seed {seed})") if null
+                                 else (lambda gain: f"{change_description(gain)} in half B (injected), relative to half A (uninjected), split seed {seed}"))
             plot_injection(split_channel, info, ch_names, gain_file, split_description, error_description, split_dir)
-            print(f"\nSplit seed {seed}, half A original vs half B {'original (null)' if null else 'injected'}, in % on "
+            print(f"\nSplit seed {seed}, {'null test (no injection): half B uninjected' if null else 'half B injected'} relative to "
+                  f"half A uninjected (B / A - 1), in % on "
                   f"{', '.join(roi)}, median [quartiles] over subjects:")
             print_summary(split_summary, gain_label)
     print(f"Results saved to {out_dir}, topomaps to {plot_dir}")
