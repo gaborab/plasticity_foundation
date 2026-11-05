@@ -96,6 +96,16 @@ def calc_wavelet(tensor_data, fs, freqs, pad, max_cycles, max_reach):
         mag = mag[:, :, pad:-pad]
     return mag, freqs
 
+
+def wavelet_target(patch, fs, freqs, pad, wavelet_params, pool):
+    """
+    dB wavelet target (channels, freqs, time bins) of a (channels, time) patch tensor: the magnitudes of calc_wavelet (reflect
+    padding), pooled in time (pool_power), in dB, as make_dataset.patch_wavelet_target and FinetuneDataset compute the targets.
+    """
+    mag, _ = calc_wavelet(patch, fs=fs, freqs=freqs, pad=pad, **wavelet_params)
+    mag = pool_power(mag, pool)
+    return 20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7)
+
 def normalize_wavelet(mags, by=Optional[Path], save_path: Optional[Path] = None):
     """
     Normalizes the wavelet magnitudes by the mean and std of the training set, or by the mean and std of the current data if no path is provided.

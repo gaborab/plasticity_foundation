@@ -1,6 +1,6 @@
 import argparse
 import pathlib
-from sys import platform
+import platform
 
 import numpy as np
 import pandas as pd
@@ -30,27 +30,68 @@ def collect(loader, return_type="inputs"):
         rows.append(x.permute(0, 2, 1).reshape(-1, x.shape[1]).cpu().numpy())
     return np.concatenate(rows)
 
-def stacked_patches(dataset, patch_windows):
-    """Uninjected input patches of every trial of an InjectionDataset (n_trials * n_patches, n_chans, patch samples)
-    and their allowed-channel masks (n_trials * n_patches, n_chans)."""
+def stacked_patches(epochs, interpolations, patch_windows, epoch_window, fs):
+    """
+    Input patches of every trial of an epoch dict ({subject: {condition: [(id, (input, target)), ...]}}) cut to every
+    window of patch_windows (n_trials * n_patches, n_chans, patch samples), and their allowed-channel masks
+    (n_trials * n_patches, n_chans), False for the trial's interpolated channels (interpolations, None: none).
+    """
     X, allowed = [], []
-    for epoch, metadata in dataset.samples:
-        for window in patch_windows.values():
-            X.append(core_utils.cut_to_timewindow(torch.from_numpy(epoch), dataset.epoch_window, window, dataset.fs).numpy())
-            allowed.append(metadata["allowed"].numpy())
+    for subject, conditions in epochs.items():
+        for condition, epoch_list in conditions.items():
+            for idx, (epoch, _) in epoch_list:
+                trial_allowed = np.ones(epoch.shape[0], dtype=bool)
+                trial_allowed[list((interpolations or {}).get((subject, condition, idx), []))] = False
+                for window in patch_windows.values():
+                    X.append(core_utils.cut_to_timewindow(epoch.float(), epoch_window, window, fs).numpy())
+                    allowed.append(trial_allowed)
     return np.stack(X), np.stack(allowed)
+
+
+def fit_ridge_models(train_epochs, val_epochs, interpolations, neighbour_table, ch_names, alphas=ALPHAS):
+    """
+    Fits one ridge model per target channel on the input patches of train_epochs (every window of settings.PATCH_WINDOWS,
+    as LaBraM trained): the channel predicted from the channels visible when its cluster (neighbour_table[c]) is hidden,
+    every time sample of the trials where it is not interpolated one row, the inputs standardized. Every relative alpha
+    is scaled by the number of rows (the penalty relative to the standardized data, as RIDGE_ALPHA of ridge_leakage.py),
+    the one with the best mean validation R² over the channels (val_epochs) is kept.
+    Returns ({channel index: fitted pipeline}, sweep: train and validation R² of every alpha and channel).
+    """
+    X_train, allowed_train = stacked_patches(train_epochs, interpolations, settings.PATCH_WINDOWS, settings.EPOCH_WINDOW, settings.RSFREQ)
+    X_val, allowed_val = stacked_patches(val_epochs, interpolations, settings.PATCH_WINDOWS, settings.EPOCH_WINDOW, settings.RSFREQ)
+    models, sweep = {}, []
+    for c in range(settings.N_CHANNELS):
+        visible = ~neighbour_table[c]
+        rows = X_train[allowed_train[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
+        rows_val = X_val[allowed_val[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
+        for rel_alpha in alphas:
+            model = make_pipeline(StandardScaler(), Ridge(alpha=rel_alpha * len(rows))).fit(rows[:, visible], rows[:, c])
+            models[rel_alpha, c] = model
+            sweep.append({"alpha": rel_alpha, "channel": ch_names[c],
+                          "train_r2": model.score(rows[:, visible], rows[:, c]),
+                          "val_r2": model.score(rows_val[:, visible], rows_val[:, c])})
+    sweep = pd.DataFrame(sweep)
+    val_r2 = sweep.groupby("alpha")["val_r2"].mean()
+    best_alpha = val_r2.idxmax()
+    print(f"Ridge: relative alpha {best_alpha:g}, mean validation R² over channels {val_r2[best_alpha]:.3f}")
+    return {c: models[best_alpha, c] for c in range(settings.N_CHANNELS)}, sweep
+
+
+def predict_channels(models, x, neighbour_table):
+    """Every channel c of x (..., channels, times) predicted by models[c] from the channels visible when its cluster (neighbour_table[c]) is hidden."""
+    samples = np.moveaxis(x, -1, -2).reshape(-1, x.shape[-2])  # rows = time samples
+    predicted = np.empty_like(x)
+    for c, model in models.items():
+        predicted[..., c, :] = model.predict(samples[:, ~neighbour_table[c]]).reshape(*x.shape[:-2], x.shape[-1])
+    return predicted
+
 
 def run_injection(models, dataset: InjectionDataset, gains, ch_names, bands, neighbour_table) -> pd.DataFrame:
     loader = torch_utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, sampler=torch_utils.data.SequentialSampler(dataset))
     window = settings.METRIC_WINDOWS["analysis"]["post"]
     rows = []
     for i, (inputs, targets, metadata) in enumerate(loader):
-        x = inputs.numpy()  # (trials, versions, channels, times)
-        samples = x.transpose(0, 1, 3, 2).reshape(-1, x.shape[2])
-        predicted = np.empty_like(x)
-        for c, model in models.items():
-            visible = ~neighbour_table[c]
-            predicted[:, :, c] = model.predict(samples[:, visible]).reshape(x.shape[0], x.shape[1], x.shape[3])
+        predicted = predict_channels(models, inputs.numpy(), neighbour_table)  # (trials, versions, channels, times)
         output = torch.stack([torch.stack([dataset.wavelet_target(torch.from_numpy(version)) for version in trial])
                               for trial in predicted])  # dB, (trials, versions, channels, freqs, time bins)
         output = core_utils.cut_to_timewindow(output, dataset.patch_window, window, dataset.target_fs)
@@ -150,34 +191,12 @@ def main(opts):
         # get training stats for the target normalization of the injected sources, as the model was trained on normalized targets
 
 
-        train, val, test = [InjectionDataset(split, settings.EPOCH_WINDOW, settings.PATCH_WINDOWS["post"],
-                          settings.RSFREQ,
-                          G, gain_sets, settings.INJECTION_ONSET_RAMP, settings.FREQS, settings.PADDING,
-                          settings.WAVELET_PARAMS, pool=settings.TARGET_POOL,
-                          interpolations=trial_interpolations) for split in [fold.training_epochs, fold.validation_epochs, fold.testing_epochs]]
-        X_train, allowed_train = stacked_patches(train, settings.PATCH_WINDOWS)
-        X_val, allowed_val = stacked_patches(val, settings.PATCH_WINDOWS)
-
-        models = {}
-        sweep = []
-        for c in range(settings.N_CHANNELS):
-            visible = ~neighbour_table[c]
-            rows = X_train[allowed_train[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
-            rows_val = X_val[allowed_val[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
-            for rel_alpha in ALPHAS:
-                alpha = rel_alpha * len(rows)
-                model = make_pipeline(StandardScaler(), Ridge(alpha=alpha)).fit(rows[:, visible], rows[:, c])
-
-                models[rel_alpha, c] = model
-                sweep.append({"fold": i + 1, "alpha": rel_alpha, "channel": ch_names[c],
-                              "train_r2": model.score(rows[:, visible], rows[:, c]),
-                              "val_r2": model.score(rows_val[:, visible], rows_val[:, c])})
-
-        sweep = pd.DataFrame(sweep)
-        val_r2 = sweep.groupby("alpha")["val_r2"].mean()
-        best_alpha = val_r2.idxmax()
-        models = {c: models[best_alpha, c] for c in range(settings.N_CHANNELS)}
+        models, sweep = fit_ridge_models(fold.training_epochs, fold.validation_epochs, trial_interpolations, neighbour_table, ch_names)
+        sweep.insert(0, "fold", i + 1)
         sweeps.append(sweep)
+        test = InjectionDataset(fold.testing_epochs, settings.EPOCH_WINDOW, settings.PATCH_WINDOWS["post"], settings.RSFREQ,
+                                G, gain_sets, settings.INJECTION_ONSET_RAMP, settings.FREQS, settings.PADDING,
+                                settings.WAVELET_PARAMS, pool=settings.TARGET_POOL, interpolations=trial_interpolations)
 
 
         trial_errors = run_injection(models, test, opts.injection, ch_names, bands, neighbour_table)
