@@ -341,7 +341,7 @@ def get_stored_subject_names(data_dir: Path) -> List[str]:
     return subject_names
 
 
-def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
+def load_run_settings(model_dir: Path, opts, freq_window, target_pool) -> Dict[str, Any]:
     """
     Returns the settings of the training run the test has to match ({"masked", "n_neighbors", "k_folds", "hide_interpolated"})
     from the run's metadata.json, hide_interpolated False for runs that don't record it. Only wavelet models are supported.
@@ -361,7 +361,7 @@ def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
     # the targets are computed with the current settings: a different frequency window keeps the output shape, so the
     # model's rows would silently be compared with other frequencies. Runs that don't record these are not checked
     if not opts.from_csv:
-        current = {"freq_window": list(settings.SPECTRAL_DECODER_PARAMS["freq_window"]), "target_pool": settings.TARGET_POOL}
+        current = {"freq_window": list(freq_window), "target_pool": target_pool}
         recorded = {name: hyperparameters[name] for name in current if name in hyperparameters}
         mismatched = {name: (value, current[name]) for name, value in recorded.items() if list(np.atleast_1d(value)) != list(np.atleast_1d(current[name]))}
         if mismatched:

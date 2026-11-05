@@ -320,7 +320,7 @@ def get_args():
 def main(opts):
     print(f"Running injection test with {opts.model_name} model")
     model_dir = settings.FINETUNE_OUTPUT_DIR / opts.model_name
-    run_settings = io.load_run_settings(model_dir, opts)
+    run_settings = io.load_run_settings(model_dir, opts, settings.SPECTRAL_DECODER_PARAMS["freq_window"], settings.TARGET_POOL)
     print(f"Run settings: {run_settings}")
     masked, k_folds = run_settings["masked"], run_settings["k_folds"]
 
