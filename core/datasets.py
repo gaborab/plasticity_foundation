@@ -246,12 +246,15 @@ class InjectionDataset(torch.utils.data.Dataset):
         inputs, targets = [], []
         for x in epochs:
             patch = utils.cut_to_timewindow(torch.from_numpy(x), self.epoch_window, self.patch_window, self.fs)
-            mag, _ = utils.calc_wavelet(patch, fs=self.fs, freqs=self.freqs, pad=self.pad, **self.wavelet_params)
-            mag = utils.pool_power(mag, self.pool)
-            # (freqs, channels, time) -> (channels, freqs, time) in dB, as make_dataset and FinetuneDataset
-            targets.append(20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7))
+            targets.append(self.wavelet_target(patch))
             inputs.append(patch)
         return torch.stack(inputs), torch.stack(targets), metadata
+
+    def wavelet_target(self, patch):
+        """dB wavelet target (channels, freqs, time bins) of a (channels, time) patch, as make_dataset.patch_wavelet_target."""
+        mag, _ = utils.calc_wavelet(patch, fs=self.fs, freqs=self.freqs, pad=self.pad, **self.wavelet_params)
+        mag = utils.pool_power(mag, self.pool)
+        return 20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7)
 
 
 class FinetuneSplits:

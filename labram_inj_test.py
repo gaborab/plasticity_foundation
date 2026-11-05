@@ -271,37 +271,6 @@ def plot_sources(topographies: Dict[str, np.ndarray], relative_gains: Dict[str, 
                      plot_dir / "injected_source_topographies.png")
 
 
-def load_run_settings(model_dir: Path, opts) -> Dict[str, Any]:
-    """
-    Returns the settings of the training run the test has to match ({"masked", "n_neighbors", "k_folds", "hide_interpolated"})
-    from the run's metadata.json, hide_interpolated False for runs that don't record it. Only wavelet models are supported.
-    """
-    with open(model_dir / "metadata.json", "r", encoding="utf-8") as f:
-        hyperparameters = json.load(f)["hyperparameters"]
-
-    if hyperparameters.get("target_mode") is None:
-        print(f"WARNING: target_mode is None in training run settings,using CLI provided target mode {opts.target_mode} as fallback.")
-        hyperparameters["target_mode"] = opts.target_mode
-    if hyperparameters.get("k_folds") is None:
-        print(f"WARNING: k_folds is None in training run settings,using CLI provided k_folds {opts.k_folds} as fallback.")
-        hyperparameters["k_folds"] = opts.k_folds
-
-    if hyperparameters.get("target_mode") != "wavelet":
-        raise ValueError(f"Only wavelet models are supported, the run's target mode is {hyperparameters.get('target_mode')}")
-    # the targets are computed with the current settings: a different frequency window keeps the output shape, so the
-    # model's rows would silently be compared with other frequencies. Runs that don't record these are not checked
-    if not opts.from_csv:
-        current = {"freq_window": list(settings.SPECTRAL_DECODER_PARAMS["freq_window"]), "target_pool": settings.TARGET_POOL}
-        recorded = {name: hyperparameters[name] for name in current if name in hyperparameters}
-        mismatched = {name: (value, current[name]) for name, value in recorded.items() if list(np.atleast_1d(value)) != list(np.atleast_1d(current[name]))}
-        if mismatched:
-            raise ValueError(f"The run was trained with other target settings than the current ones (trained, current): {mismatched}")
-        if len(recorded) < len(current):
-            print(f"WARNING: the run records no {', '.join(set(current) - set(recorded))}, the current settings are assumed to match")
-    return {**{name: hyperparameters[name] for name in ("masked", "n_neighbors", "k_folds")},
-            "hide_interpolated": hyperparameters.get("hide_interpolated", False)}
-
-
 def load_target_stats(fold_dir: Path) -> Optional[TargetStats]:
     """Returns the target stats saved with a fold (target_stats.json), None if the fold has none."""
     stats_path = fold_dir / "target_stats.json"
@@ -351,7 +320,7 @@ def get_args():
 def main(opts):
     print(f"Running injection test with {opts.model_name} model")
     model_dir = settings.FINETUNE_OUTPUT_DIR / opts.model_name
-    run_settings = load_run_settings(model_dir, opts)
+    run_settings = io.load_run_settings(model_dir, opts)
     print(f"Run settings: {run_settings}")
     masked, k_folds = run_settings["masked"], run_settings["k_folds"]
 
