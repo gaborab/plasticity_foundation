@@ -20,7 +20,7 @@ from labram_inj_test import plot_sources, BATCH_SIZE, score_trials, summarize, s
 
 PLOT_ROOT = settings.PLOT_DIR / "ridge_inj_labram"
 OUTPUT_ROOT = settings.BASE_DIR / "outputs" / "ridge_inj_labram"
-ALPHAS = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+ALPHAS = [1e-2, 1e-1, 1, 10, 100]
 
 def collect(loader, return_type="inputs"):
     rows = []
@@ -62,6 +62,7 @@ def fit_ridge_models(train_epochs, val_epochs, interpolations, neighbour_table, 
     models, sweep = {}, []
     for c in range(settings.N_CHANNELS):
         visible = ~neighbour_table[c]
+
         rows = X_train[allowed_train[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
         rows_val = X_val[allowed_val[:, c]].transpose(0, 2, 1).reshape(-1, settings.N_CHANNELS)
         for rel_alpha in alphas:

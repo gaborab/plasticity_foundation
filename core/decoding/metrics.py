@@ -114,6 +114,32 @@ def fractional_peak_latency(times: np.ndarray, curve: np.ndarray, chance: float,
     return float(t[i - 1] + (threshold - c[i - 1]) / (c[i] - c[i - 1]) * (t[i] - t[i - 1]))
 
 
+def fractional_area_latency(times: np.ndarray, curve: np.ndarray, chance: float, fraction: float = 0.5,
+                            search: Tuple[float, float] = (0.0, 0.5), floor: float = 0.0) -> float:
+    """
+    Time in the search window at which the area of the curve above a floor (its positive part, max(curve - floor level, 0),
+    trapezoidal), accumulated from the start of the window, reaches fraction of its total in the window, linearly
+    interpolated. The floor level is chance + floor * (peak in the window - chance): with floor > 0 the low-level noise
+    before and after the response adds no area. Unlike the fractional peak latency it changes continuously with the
+    curve, so a small bump near a threshold can't make it jump, and the jackknife over subjects stays valid. NaN if the
+    curve never rises above chance in the window.
+    """
+    inside = (times >= search[0] - 1e-9) & (times <= search[1] + 1e-9)
+    t, c = times[inside], np.nan_to_num(curve[inside] - chance, nan=0.0)
+    peak = c.max()
+    if peak <= 0:
+        return np.nan
+    above = np.clip(c - floor * peak, 0, None)
+    cumulative = np.concatenate([[0.0], np.cumsum((above[1:] + above[:-1]) / 2 * np.diff(t))])
+    if cumulative[-1] <= 0:
+        return np.nan
+    target = fraction * cumulative[-1]
+    i = int(np.searchsorted(cumulative, target))  # first sample with cumulative >= target, cumulative[i - 1] < target
+    if i == 0:
+        return float(t[0])
+    return float(t[i - 1] + (target - cumulative[i - 1]) / (cumulative[i] - cumulative[i - 1]) * (t[i] - t[i - 1]))
+
+
 def jackknife(statistic: Callable[[np.ndarray], float], data: np.ndarray) -> Dict[str, float]:
     """
     Jackknife test of statistic, computed on the mean over subjects of data (n_subjects, ...), as handoff B3
@@ -182,16 +208,17 @@ def accuracy_contrasts(baseline: np.ndarray, postpatch: np.ndarray) -> pd.DataFr
 
 
 def latency_contrasts(times: np.ndarray, baseline: np.ndarray, postpatch: np.ndarray, chance: float, fraction: float,
-                      search: Tuple[float, float]) -> pd.DataFrame:
+                      search: Tuple[float, float], floor: float = 0.0) -> pd.DataFrame:
     """
-    Q4 latency contrasts (handoff B3) of per-subject slot curves (n_subjects, n_slots, n_times), already smoothed: the
-    fractional peak latency of every slot on the mean curves, Δ = post-patching - baseline, the contrast, tested with
-    the jackknife (each subject left out of both sessions). Also the baseline-only contrasts.
+    Q4 latency contrasts of per-subject slot curves (n_subjects, n_slots, n_times), already smoothed: the
+    fractional area latency (fraction, floor: fractional_area_latency) of every slot on the mean curves, Δ = post-patching
+    - baseline, the contrast, tested with the jackknife (each subject left out of both sessions). Also the baseline-only
+    contrasts.
     """
     data = np.stack([baseline, postpatch], axis=1)  # (n_subjects, 2, n_slots, n_times)
 
     def slot_latencies(mean_curves):  # (n_slots, n_times) -> (n_slots,)
-        return np.array([fractional_peak_latency(times, curve, chance, fraction, search) for curve in mean_curves])
+        return np.array([fractional_area_latency(times, curve, chance, fraction, search, floor) for curve in mean_curves])
 
     rows = []
     for name, ecc in Q4_CONTRASTS:

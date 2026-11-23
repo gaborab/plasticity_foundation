@@ -247,7 +247,13 @@ DECODING_DECIM = 2
 Q4_ACCURACY_WINDOW = None  # (start, end) in s of the accuracy measure, fixed once from the baseline grand average (B1) before post data are looked at; None: the notebook suggests one
 Q4_LATENCY_SEARCH = (0.0, 0.5)  # s, the handoff's 0-0.6 s limited by the end of the window (button presses)
 Q4_LATENCY_SMOOTHING = 0.02  # s, moving average of the AUC curves before the latency
-Q4_PEAK_FRACTION = 0.5  # latency = first time the curve reaches this fraction of its peak above chance
+# latency = fractional area latency (decoding.metrics.fractional_area_latency): the time at which Q4_AREA_FRACTION of the
+# area of the mean AUC curve above Q4_AREA_FLOOR x its peak height (above chance) in Q4_LATENCY_SEARCH has accumulated.
+# Replaces the handoff's fractional peak latency (first crossing of 50 % of the peak), which jumped between threshold
+# crossings when a small bump sat near the threshold (jackknife SE 64 ms in a null split); the floor keeps the noise
+# before and after the response out of the area. Chosen on the null injection runs (baseline data only): near SE 7-8 ms
+Q4_AREA_FRACTION = 0.5
+Q4_AREA_FLOOR = 0.5
 # planted-change checks (decoding/run_lda_injection.py, handoff Task C): the posterior channel set of handoff 3.5 (O*, P*
 # of the montage; T5/T6, which newer naming calls P7/P8, are left out) and the window of the planted attenuation
 POSTERIOR_CHANNELS = ['P3', 'P4', 'PZ', 'O1', 'O2']

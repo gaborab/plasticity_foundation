@@ -231,7 +231,8 @@ def get_args():
                              'location-specific posterior response of --injection_conditions is attenuated '
                              '(core.decoding.data.plant_class_attenuation, as the pseudo-session runs) in every fold\'s baseline '
                              'test trials, and only these are run, saved as the post-patching session of '
-                             '{model_name}_inj_{attenuation}. The regular outputs are not run or touched')
+                             '{model_name}_inj_{attenuation} ({model_name}_inj_{conditions}_{attenuation} for '
+                             '--injection_conditions other than right_2). The regular outputs are not run or touched')
     parser.add_argument('--injection_conditions', type=str, nargs='+', default=['right_2'],
                         help='Conditions attenuated with --class_occlusion_injection (default R_mid, as the LDA checks)')
 
@@ -371,8 +372,10 @@ def main(opts):
 
         if injected_splitters:
             # the fold's own (unseen) test trials with the injection, saved as the post-patching session of {model}_inj_{a}
+            # (default condition right_2) or {model}_inj_{conditions}_{a}, so runs of other conditions don't overwrite it
+            injection_tag = "" if opts.injection_conditions == ["right_2"] else "_".join(opts.injection_conditions) + "_"
             for attenuation, injected_splitter in injected_splitters.items():
-                injected_path = settings.INFERENCE_DIR / f"{opts.model_name}_inj_{attenuation:g}" / str(i + 1)
+                injected_path = settings.INFERENCE_DIR / f"{opts.model_name}_inj_{injection_tag}{attenuation:g}" / str(i + 1)
                 injected_path.mkdir(parents=True, exist_ok=True)  # the fold's file of an earlier run is overwritten
                 print(f"Running injected test trials, attenuation {attenuation:g}...")
                 injected_dataset = build_test_dataset(task_classify, injected_splitter.select(fold.keys["test"]),
