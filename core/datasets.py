@@ -32,14 +32,11 @@ class FinetuneDataset(torch.utils.data.Dataset):
     n_eval_channels: number of evaluation target channels per sample, see utils.balanced_eval_channels.
     """
 
-    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]],
-                 epoch_window: Tuple[float, float],
-                 patch_windows: Dict[str, Tuple[float, float]], fs: int, target_fs: Optional[int] = None,
-                 target_mode='wavelet',
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]], epoch_window: Tuple[float, float],
+                 patch_windows: Dict[str, Tuple[float, float]], fs: int, target_fs: Optional[int] = None, target_mode='wavelet',
                  log: bool = True, normalize: bool = True,
                  masks: Optional[Dict[str, np.ndarray]] = None, target_stats: Optional[TargetStats] = None,
-                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0,
-                 n_eval_channels: int = 3):
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0, n_eval_channels: int = 3):
         if target_mode not in ('autoencoder', 'wavelet'):
             raise ValueError(f"Unknown target mode '{target_mode}', expected 'autoencoder' or 'wavelet'")
         target_fs = target_fs or fs
@@ -48,8 +45,7 @@ class FinetuneDataset(torch.utils.data.Dataset):
         self.eval_channels = []
         self.epoch = 0
         self.subjects = list(epochs_dict.keys())
-        self.masks = None if masks is None else {patch: torch.as_tensor(mask, dtype=torch.bool) for patch, mask in
-                                                 masks.items()}
+        self.masks = None if masks is None else {patch: torch.as_tensor(mask, dtype=torch.bool) for patch, mask in masks.items()}
         self.normalize = normalize
         self.target_stats = target_stats
         for subj, conds in epochs_dict.items():
@@ -75,12 +71,11 @@ class FinetuneDataset(torch.utils.data.Dataset):
                     if target_mode == 'wavelet':
                         target_data = target_tensor.clone().detach().float()  # targets are stored as float16
                         # log scale wavelet magnitudes
-                        if log: target_data = 20 * torch.log10(target_data + 1e-7)  # add small value to avoid log(0)
+                        if log: target_data = 20*torch.log10(target_data + 1e-7) # add small value to avoid log(0)
 
                     for patch, patch_window in patch_windows.items():
                         patch_input = utils.cut_to_timewindow(epoch_data, epoch_window, patch_window, fs)
-                        patch_target = patch_input if target_mode == 'autoencoder' else utils.cut_to_timewindow(
-                            target_data, epoch_window, patch_window, target_fs)
+                        patch_target = patch_input if target_mode == 'autoencoder' else utils.cut_to_timewindow(target_data, epoch_window, patch_window, target_fs)
                         self.samples.append((patch_input, patch_target, {**metadata, "patch": patch}))
                         self.perms.append(utils.channel_permutation((subj, cond, idx, patch), allowed, seed=seed))
         # fixed evaluation target channels, every channel evaluated about equally often over the dataset
@@ -210,13 +205,10 @@ class InjectionDataset(torch.utils.data.Dataset):
     (1 + n_injections, n_chans, n_freqs, patch time bins), index 0 uninjected and index i + 1 injected with gain_sets[i].
     """
 
-    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]],
-                 epoch_window: Tuple[float, float],
-                 patch_window: Tuple[float, float], fs: int, topographies: np.ndarray, gain_sets: List[np.ndarray],
-                 ramp_duration: float,
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Tuple[Any, Any]]]]], epoch_window: Tuple[float, float],
+                 patch_window: Tuple[float, float], fs: int, topographies: np.ndarray, gain_sets: List[np.ndarray], ramp_duration: float,
                  freqs: np.ndarray, pad: int, wavelet_params: Dict[str, float], pool: int = 1,
-                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None,
-                 target_stats: Optional[TargetStats] = None):
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, target_stats: Optional[TargetStats] = None):
         self.epoch_window, self.patch_window, self.fs = epoch_window, patch_window, fs
         self.topographies, self.gain_sets, self.ramp_duration = topographies, gain_sets, ramp_duration
         self.freqs, self.pad, self.wavelet_params, self.pool = freqs, pad, wavelet_params, pool
@@ -240,9 +232,8 @@ class InjectionDataset(torch.utils.data.Dataset):
         """Returns (inputs, targets, metadata) of one trial's patch, uninjected first, then one per gain set."""
         epoch, metadata = self.samples[idx]
         times = self.epoch_window[0] + np.arange(epoch.shape[-1]) / self.fs
-        epochs = [epoch] + [
-            utils.inject_sources(epoch, self.topographies, gains, times, self.ramp_duration).astype(np.float32)
-            for gains in self.gain_sets]
+        epochs = [epoch] + [utils.inject_sources(epoch, self.topographies, gains, times, self.ramp_duration).astype(np.float32)
+                            for gains in self.gain_sets]
         inputs, targets = [], []
         for x in epochs:
             patch = utils.cut_to_timewindow(torch.from_numpy(x), self.epoch_window, self.patch_window, self.fs)
@@ -263,8 +254,7 @@ class FinetuneSplits:
     saved with the fold so inference can rebuild the same split.
     """
 
-    def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict,
-                 keys: Dict[str, List[Tuple[str, str, int]]] = None):
+    def __init__(self, training_dict: Dict, validation_dict: Dict, testing_dict: Dict, keys: Dict[str, List[Tuple[str, str, int]]] = None):
         self.training_epochs = training_dict
         self.validation_epochs = validation_dict
         self.testing_epochs = testing_dict
@@ -278,13 +268,11 @@ class FinetuneSplits:
         missing from a split are listed instead.
         """
         splits = {"train": self.training_epochs, "val": self.validation_epochs, "test": self.testing_epochs}
-        groups = {name: {(subject, cond) for subject, conds in epochs.items() for cond in conds} for name, epochs in
-                  splits.items()}
+        groups = {name: {(subject, cond) for subject, conds in epochs.items() for cond in conds} for name, epochs in splits.items()}
         within_subjects = bool(set(self.training_epochs) & set(self.testing_epochs))
         lines = []
         for name, epochs in splits.items():
-            trials_per_subject = {subject: sum(len(pairs) for pairs in conds.values()) for subject, conds in
-                                  epochs.items()}
+            trials_per_subject = {subject: sum(len(pairs) for pairs in conds.values()) for subject, conds in epochs.items()}
             n_conditions = len({cond for _, cond in groups[name]})
             line = f"  {name:5s}: {sum(trials_per_subject.values())} trials, {len(trials_per_subject)} subjects, {n_conditions} conditions"
             if trials_per_subject:
@@ -312,10 +300,9 @@ class FinetuneSplits:
         training targets of the allowed channels (wavelet mode with masks only). The stats used are stored in self.target_stats.
         interpolations, seed, n_eval_channels: see FinetuneDataset.
         """
-        datasets = [
-            FinetuneDataset(epochs, **patch_params, target_mode=target_mode, log=log, normalize=normalize, masks=masks,
-                            interpolations=interpolations, seed=seed, n_eval_channels=n_eval_channels)
-            for epochs in (self.training_epochs, self.validation_epochs, self.testing_epochs)]
+        datasets = [FinetuneDataset(epochs, **patch_params, target_mode=target_mode, log=log, normalize=normalize, masks=masks,
+                                    interpolations=interpolations, seed=seed, n_eval_channels=n_eval_channels)
+                    for epochs in (self.training_epochs, self.validation_epochs, self.testing_epochs)]
         if normalize and target_stats is None and target_mode == 'wavelet':
             if masks is None:
                 print("WARNING: no masks given, unable to fit target stats, targets are not normalized")
@@ -400,10 +387,9 @@ class KFoldSplitter:
             train_val_subj = [s for s in grouped_shuffle_subjects if s not in test_subj]
             val_subj = []
             for paradigm in groups.keys():
-                paradigm_subj = [s for s in train_val_subj if
-                                 subject_paradigm(s, thresh=self.no_press_threshold) == paradigm]
+                paradigm_subj = [s for s in train_val_subj if subject_paradigm(s, thresh=self.no_press_threshold) == paradigm]
                 rng.shuffle(paradigm_subj)
-                val_subj.extend(paradigm_subj[:len(paradigm_subj) // 5])  # 20% for validation
+                val_subj.extend(paradigm_subj[:len(paradigm_subj)//5])  # 20% for validation
             train_subj = [s for s in train_val_subj if s not in val_subj]
             train = {subject: self.input_target_data[subject] for subject in train_subj}
             val = {subject: self.input_target_data[subject] for subject in val_subj}
@@ -444,7 +430,7 @@ class KFoldSplitter:
             for group_keys in groups.values():
                 group_train_val = [key for key in group_keys if key not in test_set]
                 rng.shuffle(group_train_val)
-                val_keys.extend(group_train_val[:len(group_train_val) // 5])  # 20% for validation
+                val_keys.extend(group_train_val[:len(group_train_val)//5])  # 20% for validation
             val_set = set(val_keys)
             train_keys = [key for key in grouped_shuffle_keys if key not in test_set and key not in val_set]
             keys = {"train": train_keys, "val": val_keys, "test": test_keys}
@@ -474,8 +460,7 @@ class KFoldSplitter:
         """
         Returns the (subject, condition, id) keys of all epochs in the {subject: {condition: [(id, (input, target)), ...]}} format.
         """
-        return [(subject, cond, idx) for subject, conds in epochs.items() for cond, epoch_list in conds.items() for
-                idx, _ in epoch_list]
+        return [(subject, cond, idx) for subject, conds in epochs.items() for cond, epoch_list in conds.items() for idx, _ in epoch_list]
 
     def select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """
@@ -489,3 +474,4 @@ class KFoldSplitter:
                 if kept:
                     selected.setdefault(subject, {})[cond] = kept
         return selected
+

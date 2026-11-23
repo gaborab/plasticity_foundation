@@ -1,5 +1,4 @@
 import time, datetime
-from functools import partial
 from collections import OrderedDict
 from pathlib import Path
 
@@ -8,13 +7,13 @@ import torch
 import core.plot_data_processing
 from core import settings, io
 from core import utils as core_utils
-from core.architectures import EEGAutoencoder, EEGSpectralDecoder, LocationDecoder
+from core.architectures import EEGAutoencoder, EEGSpectralDecoder
 from core.datasets import KFoldSplitter
 from core.decoding import data as decoding_data
 import torch.nn as nn
 
 from libs.labram import utils
-from libs.labram.engine_for_finetuning import train_one_epoch, evaluate, evaluate_classification, reconstruction_step, classification_step
+from libs.labram.engine_for_finetuning import train_one_epoch, evaluate
 from libs.labram.optim_factory import create_optimizer, LayerDecayValueAssigner
 from libs.labram.utils import NativeScalerWithGradNormCount
 from timm.utils import ModelEmaV2 as ModelEma
@@ -109,11 +108,6 @@ def main(opts):
     This function can be implemented to run the full fine-tuning pipeline, including loading datasets, creating
     dataloaders, initializing the model, and training/evaluating across folds.
     """
-    if opts.task_classify:
-        opts.target_mode = 'classify'  # the splitter loads the inputs only, the labels come from the conditions
-    # validation metric of the best checkpoint: balanced accuracy for classification, R2 for reconstruction
-    best_metric = 'balanced_accuracy' if opts.task_classify else 'r2'
-
     torch.manual_seed(settings.SEED)
     # the session the model is trained on: its input epochs, wavelet targets and epochs manifest (interpolated channels)
     if opts.postpatch:
@@ -146,20 +140,15 @@ def main(opts):
         print("Please specify model name")
         return
 
-    # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster.
-    # classification with --masked: a random cluster is hidden in half of the training epochs of every trial
+    # masked-channel reconstruction: interpolated channels are never targets, a target is hidden with its cluster
     trial_interpolations = None
     neighbour_table = None
     if opts.masked:
         trial_interpolations = io.load_interpolated_channels(session_dir / "epochs_manifest.csv")
         neighbour_table = core_utils.build_neighbor_mask(n_neighbours=opts.n_neighbors, n_chans=settings.N_CHANNELS)
-        if opts.task_classify:
-            print(f"Classification with cluster hiding: in half of a trial's training epochs a channel is hidden with its "
-                  f"{opts.n_neighbors} nearest electrodes" + (", interpolated channels are always hidden" if opts.hide_interpolated else ""))
-        else:
-            print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
-                  f"{N_EVAL_CHANNELS} evaluation channels per validation sample"
-                  + (", interpolated channels are hidden from the input" if opts.hide_interpolated else ""))
+        print(f"Masked-channel reconstruction: every target channel is hidden with its {opts.n_neighbors} nearest electrodes, "
+              f"{N_EVAL_CHANNELS} evaluation channels per validation sample"
+              + (", interpolated channels are hidden from the input" if opts.hide_interpolated else ""))
     hide_interpolated = opts.masked and opts.hide_interpolated
 
     LR = opts.lr
@@ -231,8 +220,8 @@ def main(opts):
         checkpoint_model = core_utils.add_prefix_dict_keys(checkpoint_model, prefix='model')
 
     total_time = 0
-    best_scores = []
-    best_val_epochs = []
+    max_r2s = []
+    max_r2_val_epochs = []
     i = 1
     # ----------- CROSS-VALIDATION LOOP ------------
     for fold in folds:
@@ -258,11 +247,9 @@ def main(opts):
             model = EEGSpectralDecoder(**settings.SPECTRAL_DECODER_PARAMS, pretrained=USE_PRETRAINED)
         elif opts.target_mode == 'autoencoder':
             model = EEGAutoencoder(**settings.AUTOENCODER_PARAMS, pretrained=USE_PRETRAINED)
-        elif opts.target_mode == 'classify':
-            model = LocationDecoder(**settings.LOCATION_DECODER_PARAMS, pretrained=USE_PRETRAINED)
         else:
             raise ValueError(
-                f"Invalid target mode: {opts.target_mode}. Must be 'wavelet', 'superlet', 'autoencoder' or 'classify'.")
+                f"Invalid target mode: {opts.target_mode}. Must be 'wavelet', 'superlet' or 'autoencoder'.")
 
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         device = torch.device(dev)
@@ -286,23 +273,11 @@ def main(opts):
         model.to(device)
         fold_neighbour_table = torch.as_tensor(neighbour_table, device=device) if neighbour_table is not None else None
 
-        # the loss of one training batch: classification or (masked-channel) reconstruction
-        if opts.task_classify:
-            train_step = partial(classification_step, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated)
-        else:
-            train_step = partial(reconstruction_step, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated)
-
         # INITIALIZING
         # initialize samplers
         print(f"Initializing datasets with {opts.target_mode} target mode...")
         # the targets are normalized with mu and sigma of the pooled masked training targets
-        if opts.task_classify:
-            train_dataset, val_dataset, test_dataset = fold.initialize_class_datasets(
-                epoch_window=settings.EPOCH_WINDOW, patch_window=settings.CLASS_PATCH_WINDOW, fs=settings.RSFREQ,
-                condition_classes=settings.CONDITION_CLASS_IDS, interpolations=trial_interpolations, seed=settings.SEED)
-            print(f"Class samples: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test")
-        else:
-            train_dataset, val_dataset, test_dataset = fold.initialize_datasets(patch_params=settings.PATCH_PARAMS,
+        train_dataset, val_dataset, test_dataset = fold.initialize_datasets(patch_params=settings.PATCH_PARAMS,
                                                                             target_mode=opts.target_mode, masks=masks, interpolations=trial_interpolations,
                                                                             seed=settings.SEED, n_eval_channels=N_EVAL_CHANNELS)
         if fold.target_stats is not None:
@@ -333,10 +308,7 @@ def main(opts):
             print("Using EMA with decay = %.8f" % 0.9999)
         # initialize optimizer, learning rate and weight decay schedules, and loss function
         print("Initializing parameters and utils...")
-        if opts.task_classify:
-            criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-        else:
-            criterion = nn.SmoothL1Loss(beta=opts.huber_beta) if not opts.mse else nn.MSELoss()
+        criterion = nn.SmoothL1Loss(beta=opts.huber_beta) if not opts.mse else nn.MSELoss()
         total_batch_size = BATCH_SIZE * UPDATE_FREQ
         num_training_steps_per_epoch = len(train_dataset) // total_batch_size
         assigner = LayerDecayValueAssigner(
@@ -358,8 +330,8 @@ def main(opts):
         # initialize log writer
         log_writer = utils.TensorboardLogger(log_dir=log_dir)
         start_time = time.time()
-        best_score = float("-inf")  # the first validation always saves a best checkpoint, even with a negative R2
-        best_val_epoch = 0
+        max_r2 = float("-inf")  # the first validation always saves a best checkpoint, even with a negative R2
+        max_r2_val_epoch = 0
         # --------- TRAINING LOOP ----------
         print(f"Training for {EPOCHS} epochs")
         for epoch in range(EPOCHS):
@@ -373,7 +345,7 @@ def main(opts):
                 log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
                 lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
                 num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=UPDATE_FREQ,
-                ch_names=ch_names, step=train_step
+                ch_names=ch_names, neighbour_table=fold_neighbour_table, hide_interpolated=hide_interpolated
             )
             print("train statistics: ", train_stats)
             print(f"Saving model to {output_dir}")
@@ -389,14 +361,10 @@ def main(opts):
                 )
             if epoch % 3 == 0 or epoch == EPOCHS - 1:
                 print(f" Evaluating on validation set at epoch {epoch}")
-                if opts.task_classify:
-                    val_stats = evaluate_classification(val_loader, model, device, criterion, header='Val:', ch_names=ch_names,
-                                                        n_classes=settings.N_LOCATION_CLASSES, hide_interpolated=hide_interpolated)
-                else:
-                    val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
-                                         is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table,
-                                         hide_interpolated=hide_interpolated)
-                print(f"{best_metric} of the network on the {len(val_dataset)} val EEG: {val_stats[best_metric]:.3f}")
+                val_stats = evaluate(val_loader, model, device, header='Val:', ch_names=ch_names, metrics=metrics,
+                                     is_binary=False, criterion=criterion, neighbour_table=fold_neighbour_table,
+                                     hide_interpolated=hide_interpolated)
+                print(f"R2 of the network on the {len(val_dataset)} val EEG: {val_stats['r2']:.2f}")
 
                 print(f"Logging val stats to {log_dir}")
                 write_stat_logs(log_writer, val_stats, epoch)
@@ -410,10 +378,10 @@ def main(opts):
                 with open(os.path.join(output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                     f.write(json.dumps(log_stats) + "\n")
 
-                if val_stats[best_metric] > best_score:
-                    best_score = val_stats[best_metric]
-                    best_val_epoch = epoch
-                    print(f"New best {best_metric} on val: {best_score:.4f}. Saving model.")
+                if val_stats['r2'] > max_r2:
+                    max_r2 = val_stats['r2']
+                    max_r2_val_epoch = epoch
+                    print(f"New best R2 on val: {max_r2:.4f}. Saving model.")
                     utils.save_model(
                         args=argparse.Namespace(**{"output_dir": output_dir}),
                         model=model,
@@ -424,12 +392,12 @@ def main(opts):
                         model_ema=model_ema
                     )
 
-        # save the best validation score of the fold
+        # save max r2 for val
         stats = {
-            "val": best_score,
+            "val": max_r2,
         }
-        best_scores.append(stats)
-        best_val_epochs.append(best_val_epoch)
+        max_r2s.append(stats)
+        max_r2_val_epochs.append(max_r2_val_epoch)
 
         fold_time = time.time() - start_time
         fold_time_str = str(datetime.timedelta(seconds=int(fold_time)))
@@ -440,25 +408,21 @@ def main(opts):
     print("=" * 30)
     print(f"Training finished for {i-1} folds.")
     print("Results:")
-    for i, fold_res in enumerate(best_scores):
+    for i, fold_res in enumerate(max_r2s):
         print(f"      {i}", fold_res)
     print("")
     print("Average results: ")
-    mean_val_score = np.mean([fold_res['val'] for fold_res in best_scores])
-    print(f"     validation {best_metric}: ", mean_val_score)
+    mean_val_r2 = np.mean([fold_res['val'] for fold_res in max_r2s])
+    print("     validation r2: ", mean_val_r2)
 
     run_metadata["results"] = {
-        f"{best_metric}_per_fold": best_scores,
-        f"mean_val_{best_metric}": float(mean_val_score),
-        f"max_{best_metric}_val_epochs": best_val_epochs,
+        "r2_per_fold": max_r2s,
+        "mean_val_r2": float(mean_val_r2),
+        "max_r2_val_epochs": max_r2_val_epochs,
     }
 
-    if opts.task_classify:
-        run_metadata["model_params"] = {**settings.LOCATION_DECODER_PARAMS, "patch_window": settings.CLASS_PATCH_WINDOW,
-                                      "classes": settings.LOCATION_CLASSES, "loss_type": "cross_entropy_label_smoothing_0.1"}
-    else:
-        run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS
-        run_metadata["model_params"]["loss_type"] = "mse" if opts.mse else f"huber_{opts.huber_beta}"
+    run_metadata["model_params"] = settings.SPECTRAL_DECODER_PARAMS if opts.target_mode == 'wavelet' or opts.target_mode == 'superlet' else settings.AUTOENCODER_PARAMS
+    run_metadata["model_params"]["loss_type"] = "mse" if opts.mse else f"huber_{opts.huber_beta}"
 
     print(f"Total training time: {total_time_str}")
 

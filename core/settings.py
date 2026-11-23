@@ -76,24 +76,6 @@ PATCH_PARAMS = {
 # target bins of every patch the training loss, the validation metrics and the target stats use, masked by utils.valid_wavelet_bins:
 # all bins of the patch computed from its own data, set to PRE_TARGET_WINDOW / POST_TARGET_WINDOW to train on the scored bins only
 LOSS_WINDOWS = {'pre': PRE_WINDOW, 'post': POST_WINDOW}
-# location decoding (HANDOFF_location_decoding.md, table 3.1): the 8 mismatch locations by stimulus condition key.
-# Eccentricity 1 = far, 2 = mid, 3 = near; center is the top wall, which has no far location. 'global' is a different
-# mismatch type, not a location, so it has no class and its trials are left out of decoding
-LOCATION_CLASSES = {
-    'left_1': {'class_id': 0, 'label': 'L_far', 'side': 'L', 'ecc': 'far'},
-    'left_2': {'class_id': 1, 'label': 'L_mid', 'side': 'L', 'ecc': 'mid'},
-    'left_3': {'class_id': 2, 'label': 'L_near', 'side': 'L', 'ecc': 'near'},
-    'right_1': {'class_id': 3, 'label': 'R_far', 'side': 'R', 'ecc': 'far'},
-    'right_2': {'class_id': 4, 'label': 'R_mid', 'side': 'R', 'ecc': 'mid'},
-    'right_3': {'class_id': 5, 'label': 'R_near', 'side': 'R', 'ecc': 'near'},
-    'center_2': {'class_id': 6, 'label': 'T_mid', 'side': 'T', 'ecc': 'mid'},
-    'center_3': {'class_id': 7, 'label': 'T_near', 'side': 'T', 'ecc': 'near'},
-}
-CONDITION_CLASS_IDS = {cond: info['class_id'] for cond, info in LOCATION_CLASSES.items()}
-N_LOCATION_CLASSES = len(LOCATION_CLASSES)
-# input of the location decoder: one LaBraM patch of real 200 Hz data. It ends at MIN_REACTION_TIME: the response keys are
-# location-specific and presses earlier than that are dropped, so no button press (motor response) falls into the window
-CLASS_PATCH_WINDOW = (-0.5, 0.5)
 # masked-channel reconstruction: a target channel is hidden together with its N_NEIGHBOURS nearest electrodes
 # (HydroCel-65 positions), the same cluster as the "cluster" scheme of ridge_leakage.py
 N_NEIGHBOURS = 4
@@ -201,11 +183,6 @@ LABRAM_VERSION = 'labram_base_patch200_200'
 AUTOENCODER_PARAMS = {
     'n_chans': N_CHANNELS,
     'target_dim': TARGET_WINDOW_SIZE,
-    'model_version': LABRAM_VERSION,
-}
-
-LOCATION_DECODER_PARAMS = {
-    'n_classes': N_LOCATION_CLASSES,
     'model_version': LABRAM_VERSION,
 }
 
