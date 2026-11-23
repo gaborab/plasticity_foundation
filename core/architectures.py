@@ -3,6 +3,41 @@ from timm.models import create_model
 from einops import rearrange
 from libs.labram import modeling_finetune # this import is needed for model to work
 
+class LocationDecoder(nn.Module):
+    """
+    Classifies the stimulus location of a trial from one LaBraM patch per channel.
+    LaBraM's own head is replaced by Linear(embed_dim, n_classes), which LaBraM applies to every channel token after its
+    LayerNorm (fc_norm). The class logits are the mean of the channel tokens' logits, so get_unflattened_output splits them
+    exactly into the contribution of every channel (the head is linear). LaBraM's standard classifier averages the tokens
+    before the LayerNorm instead, which gives no exact split.
+    """
+
+    def __init__(self, n_classes, model_version='labram_base_patch200_200', pretrained=True):
+        super().__init__()
+        self.model = create_model(model_version, pretrained=pretrained, drop_path_rate=0.1)
+        self.n_classes = n_classes
+        # LaBraM's forward applies self.model.head, a head stored anywhere else would never be used
+        self.model.head = nn.Linear(self.model.embed_dim, n_classes)
+
+    def forward(self, x, input_chans, channel_mask=None):
+        """Returns the (batch, n_classes) class logits. channel_mask: (batch, n_chans) bool tensor of hidden channels."""
+        return self.get_unflattened_output(x, input_chans, channel_mask).mean(dim=1)
+
+    def get_num_layers(self):
+        return self.model.get_num_layers()
+
+    def get_unflattened_output(self, x, input_chans=None, channel_mask=None):
+        """Returns the (batch, n_chans, n_classes) logits of every channel token, their mean over channels is forward()."""
+        return self.model(x, input_chans, return_patch_tokens=True, bool_masked_pos=channel_mask)
+
+    def no_weight_decay(self):
+        """
+        Returns the names of the parameters excluded from weight decay (LaBraM's position/time embeddings and special tokens),
+        prefixed with "model." like this wrapper's parameter names, which the optimizer matches them against.
+        """
+        return {f"model.{name}" for name in self.model.no_weight_decay()}
+
+
 class BaseMLPWrapper(nn.Module):
     """
     Parent class for models with an MLP head.

@@ -5,15 +5,64 @@ import numpy as np
 
 from core import settings
 from core.io_models import Trial, Metrics
+from scipy.special import softmax
 from scipy.stats import sem
 import numpy as np
+import pandas as pd
 from collections import defaultdict
 
 ALL_BANDS = "all bands"
 
+def class_trials_frame(trials: List[Trial], model: str, session: str) -> pd.DataFrame:
+    """
+    One row per trial of a class run (load_inference_trials with stim_patch=None): model, session, subject, condition, id,
+    label, pred and the class probabilities p0 ... p{n_classes - 1}.
+    The class logits are the mean of the trial's output rows (23 per-channel rows for LaBraM, one row for the logistic
+    regression), the probabilities their softmax and pred their argmax.
+    """
+    rows = []
+    for trial in trials:
+        logits = trial.recon_data.mean(axis=0) # take mean along channels
+        rows.append({"model": model, "session": session, "subject": trial.subject, "condition": trial.condition,
+                     "id": int(trial.idx), "label": int(trial.target_data), "pred": int(logits.argmax()),
+                     **{f"p{k}": p for k, p in enumerate(softmax(logits))}})
+    return pd.DataFrame(rows)
+
+
+def class_channels_frame(trials: List[Trial], model: str, session: str, ch_names: List[str]) -> pd.DataFrame:
+    """
+    One row per trial and channel of a class run with per-channel output rows (LaBraM): model, session, subject,
+    condition, id, label, channel, interpolated,
+      channel_pred, channel_p_true: the prediction and the true-class probability of the channel's row alone (its softmax);
+                                    after attention, so the channel's vote, not the information it carries
+    and for a model trained with masking:
+      occluded_p_true:  the true-class probability with the channel's cluster hidden (NaN for interpolated channels,
+                        whose clusters were never hidden in training)
+      occlusion_effect: the true-class probability without hiding minus occluded_p_true, the drop caused by the cluster.
+    ch_names: one name per output row.
+    """
+    rows = []
+    for trial in trials:
+        output, label = trial.recon_data, int(trial.target_data)
+        p_true = softmax(output.mean(axis=0))[label]
+        channel_proba = softmax(output, axis=-1)
+        occlusion = trial.occlusion_data
+        occluded_p_true = softmax(occlusion, axis=-1)[:, label] if occlusion is not None else None  # NaN rows stay NaN
+        interpolated = set(trial.interpolated.tolist())
+        for c, ch_name in enumerate(ch_names):
+            row = {"model": model, "session": session, "subject": trial.subject, "condition": trial.condition,
+                   "id": int(trial.idx), "label": label, "channel": ch_name, "interpolated": c in interpolated,
+                   "channel_pred": int(output[c].argmax()), "channel_p_true": channel_proba[c, label]}
+            if occluded_p_true is not None:
+                row["occluded_p_true"] = occluded_p_true[c]
+                row["occlusion_effect"] = p_true - occluded_p_true[c]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 TIME_SERIES_METRICS = {
     'mae': lambda target, recon: np.abs(target - recon),
-    'error': lambda target, recon: target - recon,
+    'signed_error': lambda target, recon: recon - target,  # > 0: output too high, the sign of utils.get_inference_metrics' signed_error
     'target': lambda target, recon: target,
     'recon': lambda target, recon: recon,
 }
@@ -290,6 +339,47 @@ def calc_subjectwise_metric_stats(trial_list: List[Trial], bands: List[str], met
 
     return subjectwise_metric, subjectwise_sem
 
+
+LOG_AGGREGATIONS = ("mean_of_logs", "log_of_mean")
+
+def calc_subject_channel_band_means(trial_list: List[Trial], metric_name: str, bands: List[str], log: str = None) -> Tuple[List[str], np.ndarray, np.ndarray]:
+    """
+    Calculates every subject's mean of a channel-level metric (e.g. "mae") for every channel and band, as one array for subject-level tests.
+    Channels are ch_0 ... ch_{N_CHANNELS-1} in channel order, bands are bands followed by "all bands" (the channel's global value).
+    log: None averages the values, "mean_of_logs" averages the natural log of every trial's value (the log of the geometric mean),
+         "log_of_mean" takes the natural log of the subject mean. Both raise a ValueError if a value to take the log of is not positive.
+    NaN values (trials in which the channel was interpolated) are left out; a cell without any finite value gets NaN.
+    Returns the subjects (sorted), the means of shape (subjects, channels, bands + 1) and the number of trials averaged into every mean (same shape).
+    """
+    if log is not None and log not in LOG_AGGREGATIONS:
+        raise ValueError(f"Unknown log '{log}', expected None or one of {LOG_AGGREGATIONS}")
+    band_keys = [*bands, ALL_BANDS]
+    channels = [f"ch_{ch}" for ch in range(settings.N_CHANNELS)]
+    trials_by_subject = _group_by(trial_list, 'subject')
+    subjects = sorted(trials_by_subject)
+
+    means = np.full((len(subjects), len(channels), len(band_keys)), np.nan)
+    counts = np.zeros(means.shape, dtype=int)
+    for i, subject in enumerate(subjects):
+        values = np.array([[[_band_value(trial.channel_metrics[ch], metric_name, band) for band in band_keys] for ch in channels]
+                           for trial in trials_by_subject[subject]], dtype=float)  # (trials, channels, bands)
+        if log == "mean_of_logs":
+            values = _positive_log(values, f"trial values of {metric_name} ({subject})")
+        finite = np.isfinite(values)
+        counts[i] = finite.sum(axis=0)
+        with np.errstate(invalid="ignore"):
+            means[i] = np.where(finite, values, 0.0).sum(axis=0) / counts[i]  # 0 / 0 = NaN for cells without a finite value
+    if log == "log_of_mean":
+        means = _positive_log(means, f"subject means of {metric_name}")
+    return subjects, means, counts
+
+
+def _positive_log(values: np.ndarray, label: str) -> np.ndarray:
+    """Natural log of values, NaN stays NaN. Raises a ValueError if a value is not positive instead of silently dropping it."""
+    n_not_positive = np.sum(values <= 0)  # NaN compares False
+    if n_not_positive:
+        raise ValueError(f"{n_not_positive} {label} are not positive, their log is undefined")
+    return np.log(values)
 
 
 def get_subjectwise_metric_mean(trial_list: List[Trial], bands: List[str], metric_name: str) -> Tuple[Dict[str, float], Dict[str, float]]:

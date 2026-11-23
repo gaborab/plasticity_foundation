@@ -35,8 +35,8 @@ Gain injection (--inject GAIN [GAIN ...], baseline session of the main build onl
       fiducials. fsaverage (~200 MB) is downloaded into the MNE data folder on first use.
       --head_model sphere: radial dipole at SOURCE_DEPTH of the head radius towards the midpoint of O1 and O2, 3-shell sphere
       model fitted to the electrodes, no download
-    - --mixed_injection: every MIXED_INJECT label is a separate fsaverage source with its own gain (e.g. +10 % V1, -10 %
-      lingual), injected at once; each --inject value scales all gains (default 1). The sources' activity is estimated
+    - --mixed_injection: every MIXED_INJECT label is a separate fsaverage source with its own gain (e.g. +25 % V1, -25 %
+      lateral occipital), injected at once; each --inject value scales all gains (default 1). The sources' activity is estimated
       jointly by least squares, and the report gives the overlap of their topographies (cosine similarity, condition number).
       --check_sources only computes the topographies and their overlap, without EEG data
     - the topography is average-referenced over the 65 channels (as in the preprocessing), then the 23 model channels are
@@ -425,9 +425,13 @@ def injected_sources(head_model, labels, mixed_injection):
                                        settings.RSFREQ, settings.EGI_TO_1020_MAP, settings.CHORDER_STANDARD)
 
 
-def source_report(topographies, relative_gains, info, plot_dir):
-    """Topomaps of the injected sources (and their net pattern if mixed) and the overlap lines of the report."""
-    values = {name: pd.Series(g, index=CHANNEL_NAMES) for name, g in topographies.items()}
+def source_report(topographies, relative_gains, info, plot_dir, source_names=None):
+    """
+    Topomaps of the injected sources (and their net pattern if mixed) and the overlap lines of the report.
+    source_names: panel title of a source in place of its key, e.g. {"source": "pericalcarine"} for a single injection.
+    """
+    source_names = source_names or {}
+    values = {source_names.get(name, name): pd.Series(g, index=CHANNEL_NAMES) for name, g in topographies.items()}
     if len(topographies) > 1:
         net = sum(relative_gains[name] * g for name, g in topographies.items())
         values["net change (--inject 1)"] = pd.Series(net / np.abs(net).max(), index=CHANNEL_NAMES)
@@ -458,13 +462,20 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
     gain_sets = {gain: gain * relative for gain in gains}
     net = G @ relative  # injected pattern per unit of --inject: the channels where it is strongest are reported
     roi = [CHANNEL_NAMES[c] for c in np.argsort(-np.abs(net))[:N_SOURCE_ROI]]
-    overlap_lines = source_report(topographies, relative_gains, info, plot_dir)
+    # name of a single source in the plot titles: its aparc labels, or the sphere-model dipole
+    single_name = " + ".join(labels) if head_model == "fsaverage" else "occipital dipole (sphere model)"
+    overlap_lines = source_report(topographies, relative_gains, info, plot_dir, source_names={"source": single_name})
+    # the plot titles name the injected regions: the aparc labels (both hemispheres) with the gains actually applied
     if mixed_injection:
         gain_label = lambda gain: f"mixed ×{gain:g}"
         gain_file = lambda gain: f"mixed{gain:g}"
+        change_description = lambda gain: (f"the {gain_label(gain)} injection ("
+                                           + ", ".join(f"{name} {100 * gain * g:+g} %" for name, g in relative_gains.items()) + ")")
     else:
         gain_label = lambda gain: f"{100 * gain:+g} %"
         gain_file = lambda gain: f"gain{gain:g}"
+        source_name = f"{single_name} source (both hemispheres)" if head_model == "fsaverage" else single_name
+        change_description = lambda gain: f"a {gain_label(gain)} gain of the {source_name}"
 
     directory = Path(root) / SESSIONS["baseline"]
     interp = interpolated_channels(directory / "epochs_manifest.csv")
@@ -504,9 +515,8 @@ def injection_test(root, gains, head_model, labels, neighbours, info, out_dir, p
             values = {band: pct(part[part.band == band].groupby("channel")[f"{kind}_change"].median()) for band in BANDS}
             lim = symmetric_limit(values, default=1.0)
             what = "Target channel power change" if kind == "signal" else f"Masked prediction error change ({scheme} masking)"
-            change = f"the {gain_label(gain)} injection" if mixed_injection else f"a {gain_label(gain)} visual-cortex source gain"
             plot_topomap_row(values, info, CHANNEL_NAMES, (-lim, lim), "RdBu_r", "change (%)",
-                             f"{what} after {change} (median over N={n_subjects} subjects)",
+                             f"{what} after {change_description(gain)} (median over N={n_subjects} subjects)",
                              plot_dir / f"topomaps_injection_{kind}{'' if kind == 'signal' else '_' + scheme}_{gain_file(gain)}.png")
 
     if mixed_injection:

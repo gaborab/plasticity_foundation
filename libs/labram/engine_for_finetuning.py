@@ -16,16 +16,74 @@ from . import utils as utils
 from einops import rearrange
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
+from core import utils as  core_utils
 
-def train_class_batch(model, samples, target, mask, criterion, ch_names, channel_mask=None):
+
+
+
+# ADDED: one step function per task. A step computes the loss of one batch and returns (loss, batch_stats), where
+# batch_stats() returns the metrics logged for the batch. train_one_epoch only calls it on logging steps, as reading
+# values from the GPU synchronizes it.
+
+def reconstruction_step(model, batch, criterion, device, input_chans, neighbour_table=None, hide_interpolated=False):
     """
     MODIFIED: returns the loss over the masked-in target bins and the model outputs of one batch.
     target and mask are flattened to (batch, n_outputs), mask is a boolean tensor of the same shape.
     channel_mask: (batch, n_chans) boolean tensor of the hidden channels (masked-channel reconstruction), None hides nothing.
     """
-    outputs = model(samples, ch_names, channel_mask=channel_mask)
-    loss = criterion(outputs[mask], target[mask])
-    return loss, outputs
+    samples, targets, metadata, masks, target_ch, _ = batch
+    # flatten to shape (batch_size, n_channels*time) or (batch_size, n_channels*n_freqs*time) for spectral targets
+    targets = targets.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
+    masks = masks.to(device, non_blocking=True)
+    # hidden cluster of every sample's target channel, and the loss over the target channel's masked-in bins only
+    interpolated = ~metadata["allowed"].to(device, non_blocking=True) if hide_interpolated else None
+    hidden, loss_mask = target_channel_masks(masks, target_ch.to(device, non_blocking=True), neighbour_table, interpolated)
+
+    output = model(core_utils.prepare_eeg(samples, device), input_chans, channel_mask=hidden)
+    loss = criterion(output[loss_mask], targets[loss_mask])
+
+    def batch_stats():
+        o, t = output.detach().float()[loss_mask], targets[loss_mask]
+        return {"mse": torch.nn.functional.mse_loss(o, t).item(),
+                "r2": (1 - ((t - o) ** 2).sum() / ((t - t.mean()) ** 2).sum()).item()}
+
+    return loss, batch_stats
+
+
+def classification_step(model, batch, criterion, device, input_chans, neighbour_table=None, hide_interpolated=False):
+    """
+    Loss of one batch of (input, class id, metadata, hidden_centre) from ClassFinetuneDataset, criterion on the class logits.
+    neighbour_table: (n_chans, n_chans) boolean cluster table on device: every sample's hidden_centre is hidden with its
+    cluster (nothing for -1), so the model can't rely on one region. None hides no clusters.
+    hide_interpolated: hide every sample's interpolated channels (metadata["allowed"] False) as well.
+    Logged: accuracy of the batch.
+    """
+    samples, labels, metadata, hidden_centre = batch
+    labels = labels.to(device, non_blocking=True)
+    hidden = class_channel_mask(metadata, hidden_centre, device, neighbour_table, hide_interpolated)
+
+    logits = model(core_utils.prepare_eeg(samples, device), input_chans, channel_mask=hidden)
+    loss = criterion(logits, labels)
+
+    def batch_stats():
+        return {"accuracy": (logits.detach().argmax(dim=1) == labels).float().mean().item()}
+
+    return loss, batch_stats
+
+
+def class_channel_mask(metadata, hidden_centre, device, neighbour_table=None, hide_interpolated=False):
+    """
+    ADDED: the (batch, n_chans) boolean channel_mask of a classification batch: the cluster of every sample's hidden_centre
+    (neighbour_table row, none for -1) and, with hide_interpolated, the sample's interpolated channels. None if nothing is hidden.
+    """
+    hidden = None
+    if neighbour_table is not None:
+        centre = hidden_centre.to(device, non_blocking=True)
+        hidden = neighbour_table[centre.clamp(min=0)] & (centre >= 0)[:, None]  # -1 hides no cluster
+    if hide_interpolated:
+        interpolated = ~metadata["allowed"].to(device, non_blocking=True)
+        hidden = interpolated if hidden is None else hidden | interpolated
+    return hidden
 
 
 def target_channel_masks(masks, target_ch, neighbour_table, interpolated=None):
@@ -232,8 +290,7 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
         EEG = batch[0]
         target = batch[1]
 
-        EEG = EEG.float().to(device, non_blocking=True) / 100
-        EEG = rearrange(EEG, 'B N (A T) -> B N A T', T=200)
+        EEG = core_utils.prepare_eeg(EEG, device)  # to device, float32, divide by 100, (batch, n_chans, n_freqs, time)
         mask = batch[3].to(device, non_blocking=True) if len(batch) > 3 else torch.ones_like(target, dtype=torch.bool, device=device)
         target = target.to(device, dtype=torch.float32, non_blocking=True).flatten(1)
         interpolated = ~batch[2]["allowed"].to(device, non_blocking=True) if hide_interpolated else None
@@ -250,4 +307,40 @@ def evaluate(data_loader, model, device, header='Test:', ch_names=None, metrics=
 
     ret = error_sums.results()
     print(f'* {header} Loss {ret["loss"]:.4f} MSE {ret["mse"]:.4f} MAE {ret["mae"]:.4f} R2 {ret["r2"]:.4f}')
+    return ret
+
+
+@torch.no_grad()
+def evaluate_classification(data_loader, model, device, criterion, header='Val:', ch_names=None, n_classes=None,
+                            hide_interpolated=False):
+    """
+    ADDED: evaluates a classifier on batches of (input, class id, metadata, hidden_centre) from ClassFinetuneDataset.
+    No cluster is hidden; with hide_interpolated every sample's interpolated channels are, as in training.
+    The logits and labels of all batches are collected on the device and scored once at the end.
+    Returns {"loss", "accuracy", "balanced_accuracy" (mean recall over the classes, chance 1 / n_classes),
+    "per_class_recall" (list, NaN for a class without samples), "confusion_matrix" (list of rows: true class, columns: predicted)}.
+    """
+    input_chans = utils.get_input_chans(ch_names) if ch_names is not None else None
+    model.eval()
+    all_logits, all_labels = [], []
+    for samples, labels, metadata, hidden_centre in data_loader:
+        hidden = class_channel_mask(metadata, hidden_centre, device, hide_interpolated=hide_interpolated)
+        with torch.cuda.amp.autocast():
+            all_logits.append(model(core_utils.prepare_eeg(samples, device), input_chans=input_chans, channel_mask=hidden).float())
+        all_labels.append(labels.to(device, non_blocking=True))
+    logits, labels = torch.cat(all_logits), torch.cat(all_labels)
+
+    n_classes = n_classes or logits.shape[1]
+    predicted = logits.argmax(dim=1)
+    confusion = torch.zeros(n_classes, n_classes, dtype=torch.long, device=device)
+    confusion.index_put_((labels, predicted), torch.ones_like(labels), accumulate=True)
+    per_class = confusion.diag().float() / confusion.sum(dim=1).float()  # recall, NaN for a class without samples
+    ret = {
+        "loss": criterion(logits, labels).item(),
+        "accuracy": (predicted == labels).float().mean().item(),
+        "balanced_accuracy": per_class.nanmean().item(),
+        "per_class_recall": per_class.tolist(),
+        "confusion_matrix": confusion.tolist(),
+    }
+    print(f'* {header} Loss {ret["loss"]:.4f} Accuracy {ret["accuracy"]:.4f} Balanced accuracy {ret["balanced_accuracy"]:.4f}')
     return ret

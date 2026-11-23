@@ -104,6 +104,9 @@ For preprocessing:
 ├── stimulus_intervals.py        # Analysis: time between consecutive stimuli -> outputs/stimulus_intervals/
 ├── labram_inj_test.py           # Check: gain injection test of a trained masked-channel model -> outputs/labram_injection/
 ├── ridge_leakage.py             # Check: linear masked-channel prediction (leakage), build comparison, gain injection -> outputs/ridge_leakage/
+├── decoding/
+│   ├── run_sliding_lda.py       # Time-resolved location decoding (sliding LDA per band, optional searchlight)
+│   └── run_lda_injection.py     # Check: planted delays / attenuations in baseline pseudo-sessions (handoff Task C)
 ├── pyproject.toml / uv.lock     # Environment definition
 │
 ├── core/                        # Project package
@@ -122,7 +125,9 @@ For preprocessing:
 │   ├── macro_evaluation.ipynb   # Fold-averaged learning curves, model comparison
 │   ├── plasticity_plotting.ipynb   # Baseline vs post-patching analysis on inference outputs
 │   ├── plasticity_tensor_analysis.ipynb   # Time series of errors/signals from the full tensors (cached per fold)
-│   └── preproc_plotting.ipynb   # Plots of the preprocessing QC reports (e.g. ICA removals per session)
+│   ├── preproc_plotting.ipynb   # Plots of the preprocessing QC reports (e.g. ICA removals per session)
+│   ├── LDA.ipynb                # Location decoding: logistic regression vs LaBraM, Task A / B, occlusion and searchlight maps
+│   └── decoding_injections.ipynb   # Planted-change checks of the LDA and of LaBraM occlusion, with their split-half nulls
 │
 ├── libs/
 │   ├── labram/                  # Vendored LaBraM (modified for regression), incl. checkpoints/labram-base.pth
@@ -157,7 +162,7 @@ Every script and notebook reads its configuration from this module at import tim
 | `PATCH_SIZE` = `TARGET_WINDOW_SIZE` | 200 | Samples per patch, and per predicted raw-signal target (autoencoder) |
 | `TARGET_POOL`, `TARGET_FS`, `SPECTRAL_TIME_BINS` | 5, 40, 40 | The wavelet targets are pooled in time: the mean power of 5 consecutive samples (`utils.pool_power`), i.e. 25 ms bins, 40 bins per second and per patch. Times of target bins are converted with `TARGET_FS`, times of the input with `RSFREQ` |
 | `PATCH_PARAMS` | `epoch_window` = `EPOCH_WINDOW`, `patch_windows` = `{'pre': PRE_WINDOW, 'post': POST_WINDOW}`, `fs` = `RSFREQ`, `target_fs` = `TARGET_FS` | Time window arguments of `FinetuneDataset`, which cuts every saved trial into one sample per patch |
-| `INJECTION_ONSET_RAMP`, `INJECTION_SOURCE_DEPTH`, `INJECTION_LABELS`, `MIXED_INJECTION_GAINS`, `INJECTION_N_ROI` | 0.02 s, 0.7, `["pericalcarine"]`, V1 +10 % / lateral occipital +25 % / lingual −10 %, 4 | Gain injection of `ridge_leakage.py` and `labram_inj_test.py`: raised-cosine ramp of the gain after onset, depth of the sphere-model dipole, aparc labels of the fsaverage source, sources and gains of a mixed injection, and the number of channels (where the injected pattern is strongest) the results are averaged over |
+| `INJECTION_ONSET_RAMP`, `INJECTION_SOURCE_DEPTH`, `INJECTION_LABELS`, `MIXED_INJECTION_GAINS`, `INJECTION_N_ROI` | 0.02 s, 0.7, `["pericalcarine"]`, V1 +25 % / lateral occipital −25 %, 4 | Gain injection of `ridge_leakage.py` and `labram_inj_test.py`: raised-cosine ramp of the gain after onset, depth of the sphere-model dipole, aparc labels of the fsaverage source, sources and gains of a mixed injection, and the number of channels (where the injected pattern is strongest) the results are averaged over |
 | `N_NEIGHBOURS` | 4 | Nearest electrodes (HydroCel-65 positions) hidden together with a target channel in masked-channel reconstruction. Default of `--n_neighbors` in training and inference, and of the "cluster" scheme of `ridge_leakage.py` |
 | `LOSS_WINDOWS` | `{'pre': PRE_WINDOW, 'post': POST_WINDOW}` | Target bins of every patch used by the training loss, the validation metrics and the target normalization, masked with `valid_wavelet_bins`. The whole patch keeps every bin computed from the patch's own data (1 231 of 2 000 pooled bins per patch). Set to `PRE_TARGET_WINDOW` / `POST_TARGET_WINDOW` to train on the scored bins only |
 | `PRE_TARGET_WINDOW` | (−1.0, −0.6) s | Scored part of the pre patch, 0.4 s like `POST_TARGET_WINDOW`. Wavelet support −1.29 … −0.32 s |
@@ -602,14 +607,34 @@ Checkpoints contain `model`, `optimizer`, `epoch`, `args` and `scaler`.
 `metadata.json` contains:
 
 - `hyperparameters`: `target_mode`, `k_folds`, batch_size, epochs, warm-up, weight_decay, lr, pretrained, `loss_windows` (`LOSS_WINDOWS`, wavelet mode), `masked`, with `--masked` `n_neighbors` and `n_eval_channels`, `hide_interpolated`, and in wavelet mode `target_pool` and `freq_window`. Inference reads `target_mode`, `k_folds`, `masked`, `n_neighbors` and `hide_interpolated` from here. The file is written when all folds are done. Inference has to use the same `n_neighbors`.
-- `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken.
-- `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`.
+- `results`: `r2_per_fold` (best validation R² per fold), `mean_val_r2`, and `max_r2_val_epochs`, the epoch at which each fold's best checkpoint was taken. Class runs store `balanced_accuracy_per_fold`, `mean_val_balanced_accuracy` and `max_balanced_accuracy_val_epochs` instead.
+- `model_params`: the `SPECTRAL_DECODER_PARAMS` / `AUTOENCODER_PARAMS` used, plus `loss_type`. Class runs: `LOCATION_DECODER_PARAMS`, `patch_window`, the class table `classes` and `loss_type`. `hyperparameters.task_classify` marks a class run.
+
+#### 2.7 Location classification (`--task_classify`)
+
+Task D of the decoding handoff (`HANDOFF_location_decoding.md`): LaBraM fine-tuned to classify which of the **8 mismatch locations** a trial belongs to, one prediction per trial. LaBraM gives no time course (one 1 s patch per channel), so latency and time-resolved accuracy come from the linear decoders of the handoff (`decoding/run_sliding_lda.py`, `notebooks/LDA.ipynb`).
+
+**Classes** (`LOCATION_CLASSES`, handoff table 3.1): `left_1/2/3` → 0–2 (L_far, L_mid, L_near), `right_1/2/3` → 3–5, `center_2/3` → 6–7 (T_mid, T_near; the top wall has no far location). Eccentricity 1 = far, 2 = mid, 3 = near. `global` is a different mismatch type, not a location, so it has no class and its trials are left out. Adding it would make a 9-class stimulus-type decoder.
+
+**Input** (`CLASS_PATCH_WINDOW` = −0.5 … 0.5 s): one patch of real 200 Hz data, cut from the saved epochs (−1.3 … 0.7 s). It ends at `MIN_REACTION_TIME`: the response keys are location-specific (left/up/right arrow, down for global) and presses earlier than 0.5 s are dropped in `make_dataset.py`, so no button press falls into the window, and the decoder can't read the motor response instead of the visual one. The handoff's −0.2 … 0.8 s would need longer epochs and would include presses.
+
+**Data**: with `--task_classify` the script sets `target_mode = "classify"`. `KFoldSplitter` then loads the inputs only (`EpochIO.load_all_epochs`, `{subject: {stimulus: [(id, input), …]}}`) and splits them with `split_within_subjects` as usual (6 folds, 20 % of every subject × stimulus group's remaining trials for validation). `FinetuneSplits.initialize_class_datasets` builds a `ClassFinetuneDataset` per split: one sample per trial, `(input (23, 200), class id, {"subject", "condition", "id", "allowed"}, hidden_centre)`, trials of conditions without a class left out. `allowed` is False for the trial's interpolated channels (with `--masked`, from `epochs_manifest.csv`).
+
+**Model**: `LocationDecoder` replaces LaBraM's head with `Linear(200, 8)`. LaBraM applies it to every channel token after its own LayerNorm (`fc_norm`), and `forward` returns the mean of the 23 channel tokens' logits. Because the head is linear, `get_unflattened_output` returns these per-channel logits (B, 23, 8) and their mean is exactly the class logits: every channel's contribution to the decision. The tokens are contextualised by attention, so a contribution shows where the evidence ends up, not where it was measured. LaBraM's standard classifier (mean of the tokens, then LayerNorm and head) gives no such split. `channel_mask` hides channels with the pretrained `mask_token`, as in masked-channel reconstruction.
+
+**Cluster hiding** (`--masked`, cluster size `--n_neighbors`): there is no target channel, the target is the class. Hiding removes part of the input, so the model can't rely on one region and spreads its evidence over the head; it is not trained to reconstruct the hidden channels. It also makes the planned occlusion analysis (hiding a cluster at test time and measuring the accuracy drop) an input the model has seen in training, so a drop measures the information the region adds beyond the rest of the head, not the unfamiliar input. The hidden cluster follows the scheme of the reconstruction target channels (2.3): every sample has a fixed random order of its allowed channels with as many "hide nothing" entries (−1) shuffled in (`utils.channel_permutation(..., n_unmasked=...)`, seeded with `SEED` and the trial's key), and epoch *e* uses entry *e* (`ClassFinetuneDataset.set_epoch`). So every allowed channel's cluster is hidden equally often, half of a trial's epochs are unmasked, and the order is the same in every run. With `--hide_interpolated` (the default) the trial's interpolated channels are hidden in every training and validation pass as well. Validation hides no cluster. `classification_step` and `evaluate_classification` build the mask with `class_channel_mask`.
+
+**Training**: `nn.CrossEntropyLoss(label_smoothing=0.1)`, otherwise the optimiser settings of 2.5. Validation with `evaluate_classification`: loss, accuracy, **balanced accuracy** (mean recall over the classes, chance 1/8), per-class recall and the confusion matrix (rows: true class). The best checkpoint is the one with the highest validation balanced accuracy.
+
+**Not implemented yet**:
+- **Analysis of class runs.** `run_inference.py` writes the out-of-fold baseline logits (handoff D4) and the post-patching logits (D6) per trial, and for masked-trained runs the occlusion logits (see 3. Inference). Accuracy, balanced accuracy and AUC per participant, the side contrasts and the occlusion maps are not computed anywhere yet.
+- **Class-count equalization** per participant, class and session (handoff ground rule 5).
 
 ---
 
 ### 3. Inference: `run_inference.py`
 
-Reconstructs every fold's **held-out baseline test trials** with that fold's best checkpoint and, with `--postpatch`, a sixth of the post-patching trials per fold. It stores targets, reconstructions and per-trial metrics for both patches of every trial.
+Runs every fold's best checkpoint on the fold's **held-out baseline test trials** and, with `--postpatch`, on a sixth of the post-patching trials per fold. Reconstruction runs store targets, reconstructions and per-trial metrics for both patches of every trial; class runs store the class id and the logits of every trial (see *Class runs* below).
 
 **CLI**
 
@@ -619,24 +644,27 @@ Reconstructs every fold's **held-out baseline test trials** with that fold's bes
 | `--postpatch` | off | Also reconstruct post-patching trials, each in one fold (see step 7) |
 | `--target_mode`, `--masked`, `--n_neighbors`, `--hide_interpolated` | `wavelet`, off, `N_NEIGHBOURS`, off | **Fallbacks only.** Inference reads these from the run's `metadata.json`; the CLI values are used, with a warning, only for runs whose metadata doesn't record them |
 
-**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors`, `hide_interpolated` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, and `k_folds` falls back to the number of numbered fold folders.
+**Run settings** (`load_run_settings`): `target_mode`, `masked`, `n_neighbors`, `hide_interpolated`, `task_classify` and `k_folds` come from `hyperparameters` in `metadata.json`, so inference always matches training. If an older run's metadata lacks a field, the CLI value is used, `task_classify` falls back to False, and `k_folds` to the number of numbered fold folders.
 
 **Steps**
 
 1. Load all baseline input/target pairs with `KFoldSplitter` and rebuild every fold's split from its saved `keys.json` (`io.load_training_split_keys`, `KFoldSplitter.split_from_keys`), so the test sets are exactly those of training. Keys missing from the loaded data, e.g. after a rebuild of the dataset, are reported.
 2. With `--postpatch`, split the post-patching trials with `split_within_subjects` (same seed and *k*) and use fold *i*'s test set for fold *i*'s model (see below).
-3. With `masked`, load the interpolated channels of both sessions from their `epochs_manifest.csv` and build the cluster table with the run's `n_neighbors`.
+3. Load the interpolated channels of both sessions from their `epochs_manifest.csv`, for every run: they are never scored and every trial records them. They are hidden from the input only if training hid them (the run's `hide_interpolated`, which training sets only with `--masked`). With `masked`, build the cluster table with the run's `n_neighbors`.
 4. Per fold: skip the fold if it has no `checkpoint-best_val.pth`, and load `target_stats.json` (required in wavelet mode).
-5. Build the test `FinetuneDataset` with `normalize=False` (dB targets), the fold's `target_stats` and the interpolations, load the model strictly from the checkpoint and switch it to `eval()`.
+5. Build the test dataset (`build_test_dataset`): a `FinetuneDataset` with `normalize=False` (dB targets), the fold's `target_stats` and the interpolations, or for class runs a `ClassFinetuneDataset` on `CLASS_PATCH_WINDOW`. Load the model strictly from the checkpoint and switch it to `eval()`.
 6. Delete the fold's output folder `{model_name}/{fold}/` if it exists, so no file of a previous run is left next to the new outputs. Anything stored there by hand is deleted too.
 7. `run_reconstruction` on the baseline test set, then, with `--postpatch`, on the fold's post-patching trials, whose keys are saved as `postpatch_keys.json`.
 
 **Post-patching folds.** With within-subject folds every subject is a test subject of every fold, so the post-patching trials are split into the same *k* folds with the same stratified slicing per subject × stimulus. Every baseline and every post-patching trial is reconstructed exactly once, and each subject's trials of both sessions are spread evenly over the *k* models, so differences between the fold models cancel in the session contrast.
 
 **`run_reconstruction`**, per batch of 256 samples (patches):
-- **Reconstruction** (`reconstruct_batch`): without masking, one pass of `get_unflattened_output`. With masking, one pass per channel *c*: *c*'s cluster is hidden in every sample of the batch, and row *c* of the output is taken from that pass. That is 23 passes per batch. With the run's `hide_interpolated`, every sample's interpolated channels are hidden in all its passes as well.
+- **Passes** (`reconstruct_batch`, returns `(output, occlusion)`), built from two functions:
+  - `unmasked_pass`: one pass of `get_unflattened_output` that hides nothing but (with the run's `hide_interpolated`) the interpolated channels.
+  - `masked_pass`: one pass per channel *c* that hides *c*'s cluster in every sample of the batch, 23 passes per batch. Reconstruction keeps row *c* of each pass, the hidden channel's reconstruction; classification keeps the mean over all channel tokens, the class logits with *c*'s cluster hidden (the same pooling as in training, so hidden tokens count as they did there).
+  - Reconstruction uses the masked pass for a model trained with masking and the unmasked pass otherwise; `occlusion` is None. Classification always uses the unmasked pass as `output` (the per-channel logits) and, for a model trained with masking, the masked pass as `occlusion`. A regularly trained model gets no occlusion passes: hidden clusters would be inputs it never saw.
 - **Back to dB**: `dataset.target_stats.denormalize(output)`. The fold's normalization is one global scale, so errors in dB are the normalized errors times the fold's σ: R² and NMAE are unchanged, and all folds share one scale.
-- **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them.
+- **Interpolated channels** (`metadata["allowed"]` False) are set to NaN in the output, so they are left out of every metric, and the trial group's `interpolated` attribute lists them. The interpolations are loaded for every run, so this also holds for runs trained without `--masked`, whose earlier inference files scored the interpolated channels.
 - **Metrics per window** of `METRIC_WINDOWS`: the output is set to NaN outside the patch's valid bins (`valid_wavelet_bins` over the whole patch, i.e. the bins that don't reach into the reflect padding), both arrays are cut to the window with `cut_to_timewindow` ([start, end), at `TARGET_FS`), and `get_inference_metrics` computes the NaN-aware metrics. The saved output keeps all bins of the allowed channels.
 
 | Window | pre patch | post patch | Scored bins per channel |
@@ -666,6 +694,22 @@ baseline_reconstruction.h5   /   postpatch_reconstruction.h5        postpatch_ke
 `{window}` is every key of `METRIC_WINDOWS`: `full` and `analysis`. Files of the previous design have no `pre/` / `post/` level and also contain `button` and `reference` windows; the current code doesn't read them. Metrics of interpolated channels are NaN (JSON `NaN`).
 
 (In `autoencoder` mode, `target`/`output` are (23, 200) µV, there are no band-wise metrics and no valid-bin masking.)
+
+**Class runs** (`task_classify` in the run's metadata): the same folds, keys and files, one group per trial (no patch level). Every trial is run once without hiding a cluster, and a model trained with masking also once per cluster (occlusion):
+
+```text
+baseline_reconstruction.h5   /   postpatch_reconstruction.h5
+└── {subject}/{stimulus}/{id}/         lateral and top stimuli only, global has no class
+    ├── attrs: interpolated    indices of the trial's interpolated channels
+    ├── target     scalar int           class id (LOCATION_CLASSES)
+    ├── output     (23, 8) float32      per-channel logits; their mean over the channels is the class logits,
+    │                                    softmax and argmax give the probabilities and the prediction
+    └── occlusion  (23, 8) float32      only for a model trained with masking: row c = class logits with channel c's
+                                         cluster hidden. NaN rows for clusters centred on the trial's interpolated channels
+```
+
+No metrics are stored per trial: accuracy, balanced accuracy, per-class AUC and occlusion effects (class logits without
+hiding minus the occlusion rows) need many trials and are computed in the analysis, per participant.
 
 #### Metric definitions: `core.utils.get_inference_metrics` / `calculate_bandwise_metrics`
 
@@ -921,7 +965,7 @@ Only local autoreject was ported.
   - In the pseudo-post trials, the activity of a visual-cortex source, estimated with the least-squares spatial filter of its topography g (`s = g·x / g·g`), is made 1 + gain times stronger after stimulus onset (20 ms raised-cosine ramp): `x + gain · g · s(t)`. Everything else is unchanged.
   - Source (`--head_model fsaverage`, default): all sources of the `--inject_labels` aparc labels (default `pericalcarine`, i.e. primary visual cortex, both hemispheres) on the MNE `fsaverage` template, normal to the cortex with equal amplitude, through the 3-layer fsaverage BEM; the HydroCel-65 electrodes are aligned by their fiducials. **fsaverage (~200 MB) is downloaded into the MNE data folder on first use.** `--head_model sphere` uses a radial occipital dipole in a 3-shell sphere model instead, with no download. The topography is average-referenced over the 65 electrodes, then the 23 model channels are taken.
   - Every model is scored on the same pseudo-post trials with and without the injection (0 … 0.4 s): signal power change of the target channel versus error change of its masked prediction. An error change much smaller than the signal change means masked prediction absorbs the gain change. The table reports the 4 channels where the injected change is strongest. Negative gains (e.g. `--inject -0.25`) make the source weaker; masked error responds much less to decreases than to increases.
-  - **Mixed injection** (`--mixed_injection`): the `MIXED_INJECT` labels in `ridge_leakage.py` (default V1 `pericalcarine` +10 %, `lateraloccipital` +25 %, `lingual` −10 %) are injected at once as separate `fsaverage` sources, each with its own gain; every `--inject` value scales all gains (default ×1). Their activity is estimated jointly by least squares (`pinv` of the three topographies), so activity in overlapping fields isn't counted twice. The report and `injected_source_topographies.png` show how distinguishable the sources are on the 23 channels: pairwise cosine similarity of the topographies (flagged above |0.9|) and the condition number (flagged above 10). With overlapping sources the joint estimate becomes unstable and the injected change much larger than the gains; a signal power change far above the gains is the sign of it. Then merge the overlapping labels into one source or choose other labels.
+  - **Mixed injection** (`--mixed_injection`): the `MIXED_INJECT` labels in `ridge_leakage.py` (default V1 `pericalcarine` +25 %, `lateraloccipital` −25 %, two sources with distinct scalp patterns changed in opposite directions) are injected at once as separate `fsaverage` sources, each with its own gain; every `--inject` value scales all gains (default ×1). Their activity is estimated jointly by least squares (`pinv` of the topographies), so activity in overlapping fields isn't counted twice. The report and `injected_source_topographies.png` show how distinguishable the sources are on the 23 channels: pairwise cosine similarity of the topographies (flagged above |0.9|) and the condition number (flagged above 10). With overlapping sources the joint estimate becomes unstable and the injected change much larger than the gains; a signal power change far above the gains is the sign of it. Then merge the overlapping labels into one source or choose other labels.
   - **Source check only** (`--check_sources`, with or without `--mixed_injection`): computes the injected topographies and their overlap without any EEG data and exits. Run it before a long injection run.
 - **Outputs** (`outputs/ridge_leakage/<label>/`): `report.md` (method and report-ready markdown tables, with the preprocessing steps of each build read from its `build_info.json`), `summary.csv`, `per_channel.csv` (interpolation rate per session and median R²), `interpolation.csv`, `eigenvalues.csv`, `r2_subject_channel.csv`, and with the options `comparison_<compare_label>.csv` and `injection.csv`. The second build gets its own complete folder. **Topomaps** (`outputs/plots/ridge_leakage/<label>/`), one row per band as in `plasticity_plotting.ipynb`: R² per scheme and session, the interpolation gain, the R² difference between builds, the injected source topography, and the signal and error change per gain.
 - **Run** after `make_dataset.py` (and the second build, if compared); about 6–7 min for the main analysis on the full dataset:
@@ -943,12 +987,57 @@ The source topographies, the injection itself and the topomap helpers are in `co
   - per subject: the mean over the `INJECTION_N_ROI` channels where the injected pattern is strongest (e.g. O1, O2, T6, T5 for the sphere dipole);
   - over subjects: median and quartiles, reported as % change. Interpolated channels are left out.
 - **Mixed injection** (`--mixed_injection`, fsaverage only): the `MIXED_INJECTION_GAINS` sources at once, each `--injection` value scaling all gains (default 1). The overlap of the source topographies is printed.
+- **Split-half noise test** (`--split_seed SEED [SEED …]`, also with `--from_csv`): the scoring above compares every trial with its own injected version, so trial-to-trial noise cancels. Two sessions are different trials, so for every seed the trials of every subject × condition are also split into random halves (ids sorted, shuffled with `random.Random(seed)`, the second half is B; `split_half_b`) and scored as two sessions would be (`summarize_split`):
+  - **planted**: half B injected relative to half A original;
+  - **null**: half B original relative to half A original, the difference two halves of the same trials have by chance.
+
+  The changes are those of the means per bin of each half (the halves can differ by a trial), as log ratios (B / A − 1 in %; dB differences for level and signed error). An injection is visible against trial noise if the planted summary and maps clearly exceed the null of the same seed, across seeds. Outputs: `injection_split{seed}[_null].csv`, `summary_split{seed}[_null].csv` and the usual topomaps in `split{seed}[_null]/` of the plot folder. Single and mixed injections are separate runs, so run the split for each, with the options of the original run:
+
+  ```bash
+  uv run python labram_inj_test.py --model_name my_model --from_csv --split_seed 0 1 2
+  uv run python labram_inj_test.py --model_name my_model --mixed_injection --from_csv --split_seed 0 1 2
+  ```
+- **Signed error change**: the change of the mean (output − target) in dB, the part of the target's level change the reconstruction doesn't follow. A bias the model had before cancels. It is 0 if the reconstruction follows the change, −(level change) if it ignores it (opposite sign whenever it under-follows) and of the same sign if it overshoots; the share followed is 1 + signed / level change, in dB.
 - **Outputs** (`outputs/labram_injection/<model>/<injection>/`, with `<injection>` = `single_` or `mixed_` + head model, e.g. `single_fsaverage`, so single and mixed runs of one model keep separate results): `trial_errors.csv` (per fold, trial, channel, band and gain), `injection.csv` (per gain, band, subject and channel), `summary.csv` (per gain and band, median [quartiles] over subjects). A second run with the same injection and head model overwrites the folder. **Topomaps** (`outputs/plots/labram_injection/<model>/<injection>/`): `injected_source_topographies.png` and per gain `topomaps_injection_signal_*.png` and `topomaps_injection_error_*.png`, one row of bands with the median change over subjects per channel, as for ridge.
 - **Run** after training, e.g.
 
 ```bash
 uv run python labram_inj_test.py --model_name my_model --injection 0.1 0.25 0.5 --n_folds 1
 ```
+
+**Decoding injection tests** (handoff Task C): planted changes in baseline data, to show what the location decoders and their maps can detect, and that they find nothing when nothing is planted. All are analysed in `notebooks/decoding_injections.ipynb`. Every plant changes copies of the epochs (`core.decoding.data`), never the loaded tensors:
+- `plant_delay`: the planted condition's epochs are shifted later by d (zeros at the start), so the analysed window starts d earlier (handoff C3).
+- `plant_attenuation`: a × the subject's class-average epoch subtracted at `POSTERIOR_CHANNELS` (P3, P4, PZ, O1, O2) within `PLANT_ATTENUATION_WINDOW` (0 … 0.5 s) (handoff C4). A decoder retrained on such data can learn the weakened class as a new pattern.
+- `plant_class_attenuation`: only the class's location-specific part, a × (class mean − mean of the 8 location class means), on the same channels and window; at a = 1 no posterior location-specific average is left, for any decoder.
+
+The tests and their noise controls:
+- **Sliding LDA on pseudo-sessions** (`decoding/run_lda_injection.py`): every subject's baseline trials are split into two random halves per condition (`split_halves`, `--split_seed`), pseudo pre saved as `baseline` and pseudo post as `postpatch`, each with 3 within-subject folds and its own LDAs (`run_sliding_lda.run_lda`), as the real sessions. Runs (`outputs/inference_outputs/{name}_{plant}_split{seed}/`):
+  - `null`: nothing planted (C2); no Task B change contrast may be significant. `--null_only` runs only this, for further split seeds.
+  - `delay_{condition}_{ms}ms` for every `--delays` size (no searchlight), and `attenuation_…` / with `--class_specific` `classattenuation_…` for every `--attenuations` size, one `--conditions` condition at a time. The planted runs share the null run's folds (checked), so planted − null is a same-trials comparison without the halves' own difference.
+  - `--per_subject` fits separate models per subject (`core.decoding.models.fit_per_subject`) instead of the pooled ones; use another `--name`.
+
+  ```bash
+  uv run python -m decoding.run_lda_injection --split_seed 0 --conditions right_3 left_3 --delays 0.01 0.02 0.04 --attenuations
+  uv run python -m decoding.run_lda_injection --split_seed 0 --class_specific --delays --attenuations 0.5 1.0 --searchlight --searchlight_bands 0
+  uv run python -m decoding.run_lda_injection --split_seed 1 --null_only
+  ```
+- **LaBraM occlusion, fixed model** (`run_inference.py --class_occlusion_injection A [A …]`, masked class run trained on the baseline): every fold's own test trials once more with `plant_class_attenuation` of `--injection_conditions` (default `right_2`), the plant of the retrained tests, saved as the `postpatch` session of `{model}_inj_{a}` (a later run of the same size overwrites it); the regular outputs are untouched. Uninjected and injected versions of the same trials: whether occlusion attributes lost location information to the planted region.
+- **LaBraM occlusion, split halves** (notebook cell `labram_split_injection`): the noise test of the fixed-model comparison, from the outputs above without new inference. The planted class's test trials are split into halves as in `labram_inj_test.py --split_seed`; half A recorded vs half B injected, and the null half A vs half B recorded, per seed. This is the design of the real baseline vs post-patching occlusion maps of one baseline-trained model, without session drift.
+- **LaBraM occlusion, within session** (`run_general_finetune.py --pseudo_session pre|post --split_seed S [--plant_condition C --plant_attenuation A]`, then `run_inference.py`): separate masked class models trained on the two halves of the baseline (`--k_folds 3`), pseudo pre saved as `baseline`, pseudo post as `postpatch`. The null pair (pre vs unplanted post) shows how much two separately trained models differ by chance; the planted pair has to exceed it.
+
+  ```bash
+  uv run python run_general_finetune.py --model_name class_pseudo_pre --task_classify --masked --k_folds 3 --pseudo_session pre --split_seed 0
+  uv run python run_general_finetune.py --model_name class_pseudo_post_rmid --task_classify --masked --k_folds 3 --pseudo_session post --split_seed 0 --plant_condition right_2 --plant_attenuation 1.0
+  uv run python run_general_finetune.py --model_name class_pseudo_post_null --task_classify --masked --k_folds 3 --pseudo_session post --split_seed 0
+  ```
+
+**Results so far** (46 subjects):
+- **Null (C2)**: 0 of 10 change contrasts significant in splits 1 and 2, 1 of 10 in split 0 (near latency, −37 ms, not replicated).
+- **Delay (C3)**: mid-eccentricity latency can't be estimated on pseudo-sessions (SE ≈ 0.3 s). At near eccentricity the planted delays are recovered relative to the null of the same split: −9 / −19 / −36 ms for L_near (expected −10 / −20 / −40), +8 / +13 / +25 ms for R_near (expected +10 / +20 / +40).
+- **Attenuation (C4)**: not detected, neither the whole-response nor the class-specific plant up to a = 1, pooled or per subject: the LDA's mid-location information is not in the posterior average responses of P3, P4, PZ, O1, O2.
+- **Pooled vs per-subject LDA**: the pooled LDA decodes better (balanced accuracy 0.153 vs 0.144 in the accuracy window); per-subject latencies are unusable.
+- **LaBraM, fixed model** (earlier whole-response plant; to be replaced by the rerun with the location-specific plant): `p_true` of R_mid drops linearly with the attenuation (−0.004 / −0.010 / −0.020 for a = 0.1 / 0.25 / 0.5, t ≈ −8) and the occlusion effect drops at the clusters containing P3 and PZ (d_z ≈ −1), not at O1 / O2.
+- **LaBraM, within session**: the planted pair's occlusion change (P3 −0.037) is not larger than the null pair's (C3 −0.045, PZ −0.037), so differences between separately trained models' maps can't show a localised change.
 
 **`qc_bad_channels.py`**: runs the automatic bad channel detector on every recording without the full preprocessing, and compares it with the manual selections. Outputs are `outputs/qc/auto_bad_channels_metrics.csv` (every channel) and `auto_bad_channels.csv` (flagged channels, with a `manually_flagged` column). Use it to review or retune `AUTO_BAD_CHANNEL_PARAMS`.
 

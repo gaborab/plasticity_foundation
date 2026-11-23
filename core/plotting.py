@@ -6,7 +6,7 @@ import ipywidgets as widgets
 from IPython.display import display
 from ipywidgets import interact
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
 
@@ -419,10 +419,12 @@ def plot_grouped_bar(x_text, width, means: List[List[Any]], labels: List[str], t
 
 def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Optional[Dict[str, np.ndarray]] = None,
                      x_label="Time (ms)", y_label="MAE", vlines: Optional[List[float]] = None,
-                     hlines: Optional[List[float]] = None, ax=None, fig=None, n_text: str = None):
+                     hlines: Optional[List[float]] = None, ax=None, fig=None, n_text: str = None,
+                     xlim: Optional[Tuple[float, float]] = None):
     """
     Plots one line per key of means against times, with a shaded ±SEM band if sems are given (same keys as means).
     vlines: x positions of dashed vertical lines, e.g. [0] for the stimulus onset. hlines: y positions of solid horizontal lines, e.g. [0] for differences.
+    xlim: x-axis limits, e.g. the time window of binned series plotted at their bin centres; None keeps matplotlib's margins.
     """
     is_standalone = ax is None
     if is_standalone:
@@ -437,6 +439,8 @@ def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Opti
     for y in hlines or []:
         ax.axhline(y, color='black', linewidth=0.8)
 
+    if xlim is not None:
+        ax.set_xlim(*xlim)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     if n_text is not None:
@@ -452,16 +456,17 @@ def plot_time_series(times, means: Dict[str, np.ndarray], title: str, sems: Opti
 
 def plot_time_series_grid(times, means: Dict[str, Dict[str, np.ndarray]], suptitle: str,
                           sems: Optional[Dict[str, Dict[str, np.ndarray]]] = None, y_label="MAE",
-                          vlines: Optional[List[float]] = None, hlines: Optional[List[float]] = None, n_cols: int = 3):
+                          vlines: Optional[List[float]] = None, hlines: Optional[List[float]] = None, n_cols: int = 3,
+                          xlim: Optional[Tuple[float, float]] = None):
     """
     Plots one plot_time_series subplot per panel, e.g. per band. Expects means (and sems) as {panel title: {line label: series}}.
-    The y-axes are not shared, so panels with different scales stay readable.
+    The y-axes are not shared, so panels with different scales stay readable. xlim: x-axis limits of every panel.
     """
     n_rows = int(np.ceil(len(means) / n_cols))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows), squeeze=False)
     for ax, (panel, panel_means) in zip(axes.flat, means.items()):
         plot_time_series(times, panel_means, title=panel, sems=sems[panel] if sems is not None else None,
-                         y_label=y_label, vlines=vlines, hlines=hlines, ax=ax, fig=fig)
+                         y_label=y_label, vlines=vlines, hlines=hlines, ax=ax, fig=fig, xlim=xlim)
     for ax in axes.flat[len(means):]:
         ax.set_visible(False)
 
@@ -484,6 +489,46 @@ def save_button(fig, save_dir: Path, default_name="untitled"):
 
     save_button_comp.on_click(on_save_clicked)
     display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
+
+def save_panels(fig, axd, full_fig_dir, subfigs_dir, default_name="untitled", pad = 0.05):
+    name_input = widgets.Text(value=default_name, description='Filename:', placeholder='untitled')
+    save_button_comp = widgets.Button(description="Save Panel Figure")
+    output_comp = widgets.Output()
+
+    def on_save_clicked(b, fmt="svg"):
+        with output_comp:
+            full_fig_dir.mkdir(parents=True, exist_ok=True)
+            fig.savefig(full_fig_dir / f"{name_input.value}.{fmt}")
+            subfigs_dir.mkdir(parents=True, exist_ok=True)
+
+            # crop out and save the individual panels
+            labels = [t for ax in axd.values() for t in ax.texts if t.get_gid() == "panel_label"]
+            figure_texts = [t for t in [fig._suptitle, *fig.texts] if t is not None]
+            for key, ax in axd.items():
+                hidden = [a for a in fig.axes if a is not ax] + labels + figure_texts
+                visible = [artist.get_visible() for artist in hidden]
+                for artist in hidden:
+                    artist.set_visible(False)
+                fig.canvas.draw()  # the layout of the full figure, the crop must match it
+                bbox = ax.get_tightbbox(fig.canvas.get_renderer()).transformed(fig.dpi_scale_trans.inverted()).padded(
+                    pad)
+                fig.savefig(subfigs_dir / f"{name_input.value}_{key}.{fmt}", bbox_inches=bbox)
+
+    save_button_comp.on_click(on_save_clicked)
+    display(widgets.VBox([widgets.HBox([name_input]), save_button_comp, output_comp]))
+
+
+
+def show_delta(ax, x, val1, val2):
+    """Marks the gap between two curves at x (e.g. train and validation score at the best epoch) with its absolute size."""
+    delta = np.absolute(val2 - val1)
+    midpoint = (val1 + val2) / 2
+    ax.plot(x, val1, 'ko', markersize=4)
+    ax.plot(x, val2, 'ko', markersize=4)
+    ax.vlines(x=x, ymin=min(val1, val2), ymax=max(val1, val2), color='black', linestyle='--')
+    ax.annotate(rf"$\Delta$: {delta:.4f}", xy=(x, midpoint), xytext=(10, 0), textcoords='offset points', va='center',
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', ec='black', alpha=0.8), color='black', fontsize=10)
+
 
 # functions for saving signal waveforms (for debugging purposes)
 def save_heatmap(channel_data, save_dir: Path, title="Wavelet transform heatmap", xlabel="Time (ms)", ylabel="Frequency (bins)"):

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core import utils
 from core.io import EpochIO
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 import torch
 import numpy as np
 
@@ -125,6 +125,70 @@ class FinetuneDataset(torch.utils.data.Dataset):
         self.epoch = epoch
 
 
+class ClassFinetuneDataset(torch.utils.data.Dataset):
+    """
+    One sample per trial for stimulus classification: the input cut to patch_window and the class of the trial's condition.
+    Expects input dictionaries in the format of EpochIO.load_all_epochs: {subject: {condition: [(id1, input_tensor1), ...]}}.
+    epoch_window: (start, end) in s of the saved input epochs. patch_window: (start, end) in s of the classified input,
+    a multiple of 1 s (one LaBraM patch per second). fs: sampling frequency of the inputs.
+    condition_classes: {condition: class id}; trials of conditions without a class (e.g. global) are left out.
+    interpolations: {(subject, condition, id): interpolated channel indices}, see io.load_interpolated_channels.
+    metadata["allowed"] is False for them. Without it every channel is allowed.
+    seed: seed of the per-sample hiding orders. Like the target channels of FinetuneDataset, every sample has a fixed random
+    order of its allowed channels, here with as many "hide nothing" entries (-1) shuffled in, and epoch e uses entry e:
+    the centre of the channel cluster hidden in that epoch (see set_epoch). Over the epochs every allowed channel's cluster
+    is hidden equally often, and half of a sample's epochs are unmasked. Only the training step uses it.
+    """
+
+    def __init__(self, epochs_dict: Dict[str, Dict[str, List[tuple[int, Any]]]], epoch_window: Tuple[float, float],
+                 patch_window: Tuple[float, float], fs: int, condition_classes: Dict[str, int],
+                 interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None, seed: int = 0,
+                 unmasked: bool = True):
+        self.samples = []
+        self.perms = []
+        self.epoch = 0
+        self.target_stats = None
+        for subj, conds in epochs_dict.items():
+            for cond, epoch_list in conds.items():
+                if cond not in condition_classes:
+                    continue
+                for idx, input_tensor in epoch_list:
+                    allowed = torch.ones(input_tensor.shape[0], dtype=torch.bool)
+                    if interpolations is not None:
+                        allowed[interpolations.get((subj, cond, idx), [])] = False
+                    metadata = {"subject": subj, "condition": cond, "id": idx, "allowed": allowed}
+                    patch_input = utils.cut_to_timewindow(input_tensor.clone().detach(), epoch_window, patch_window, fs)
+                    self.samples.append((patch_input, condition_classes[cond], metadata))
+                    self.perms.append(utils.channel_permutation((subj, cond, idx), allowed, seed=seed,
+                                                                n_unmasked=int(allowed.sum()) if unmasked else 0))
+
+    def __len__(self):
+        """Returns the number of samples, one per trial of a condition with a class."""
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        """Returns (input, class id, metadata, hidden_centre) of one trial: hidden_centre is the centre channel of the
+        cluster hidden in the current epoch (see set_epoch), -1 to hide nothing."""
+        input_tensor, label, metadata = self.samples[idx]
+        perm = self.perms[idx]
+        return input_tensor, label, metadata, int(perm[self.epoch % len(perm)])
+
+    def set_epoch(self, epoch: int):
+        """Sets the epoch number, which selects every sample's hidden cluster of this epoch from its order."""
+        self.epoch = epoch
+
+    def get_stacked_items(self):
+        inputs = []
+        targets = []
+        metas = []
+        for input_tensor, label, metadata in self.samples:
+            inputs.append(input_tensor)
+            targets.append(label)
+            metas.append(metadata)
+
+        return np.array(inputs).reshape(len(self.samples), -1), np.array(targets), metas
+
+
 class InjectionDataset(torch.utils.data.Dataset):
     """
     One patch of every trial with and without gain injections, for the injection test of masked-channel reconstruction.
@@ -173,12 +237,13 @@ class InjectionDataset(torch.utils.data.Dataset):
         inputs, targets = [], []
         for x in epochs:
             patch = utils.cut_to_timewindow(torch.from_numpy(x), self.epoch_window, self.patch_window, self.fs)
-            mag, _ = utils.calc_wavelet(patch, fs=self.fs, freqs=self.freqs, pad=self.pad, **self.wavelet_params)
-            mag = utils.pool_power(mag, self.pool)
-            # (freqs, channels, time) -> (channels, freqs, time) in dB, as make_dataset and FinetuneDataset
-            targets.append(20 * torch.log10(torch.tensor(mag, dtype=torch.float32).permute(1, 0, 2) + 1e-7))
+            targets.append(self.wavelet_target(patch))
             inputs.append(patch)
         return torch.stack(inputs), torch.stack(targets), metadata
+
+    def wavelet_target(self, patch):
+        """dB wavelet target (channels, freqs, time bins) of a (channels, time) patch, as make_dataset.patch_wavelet_target."""
+        return utils.wavelet_target(patch, self.fs, self.freqs, self.pad, self.wavelet_params, self.pool)
 
 
 class FinetuneSplits:
@@ -250,20 +315,48 @@ class FinetuneSplits:
         training_dataset, validation_dataset, testing_dataset = datasets
         return training_dataset, validation_dataset, testing_dataset
 
+    def initialize_class_datasets(self, epoch_window: Tuple[float, float], patch_window: Tuple[float, float], fs: int,
+                                  condition_classes: Dict[str, int],
+                                  interpolations: Optional[Dict[Tuple[str, str, int], List[int]]] = None,
+                                  seed: int = 0) -> Tuple[
+        ClassFinetuneDataset, ClassFinetuneDataset, ClassFinetuneDataset]:
+        """
+        Builds the training, validation and testing ClassFinetuneDataset of this fold, the arguments are those of ClassFinetuneDataset.
+        Expects the fold's epochs without targets (KFoldSplitter with target_mode "classify").
+        """
+        datasets = [
+            ClassFinetuneDataset(epochs, epoch_window, patch_window, fs, condition_classes, interpolations, seed)
+            for epochs in (self.training_epochs, self.validation_epochs, self.testing_epochs)]
+
+        training_dataset, validation_dataset, testing_dataset = datasets
+        return training_dataset, validation_dataset, testing_dataset
+
+
 class KFoldSplitter:
     """
     Build a list of `FinetuneSplits` instances, one per fold.
-    The constructor loads the input epochs of `input_data_dir` paired with their targets in `target_data_dir` using `EpochIO`.
-    target_mode: "wavelet" loads the wavelet targets, "autoencoder" uses every input as its own target and does not read target_data_dir.
+    input_data: a directory, from which the constructor loads the input epochs paired with their targets in `target_data_dir`
+    using `EpochIO`, or epochs already loaded in the format below (e.g. part of a loaded directory), used as they are.
+    target_mode: "wavelet" loads the wavelet targets, "autoencoder" uses every input as its own target and does not read target_data_dir,
+    "classify" loads the inputs only, as {subject: {condition: [(id1, input_tensor1), ...]}} (the labels come from the condition).
     seed: seed of the shuffling, the same seed and data give the same folds.
     no_press_threshold: first subject number of the paradigm without button presses, split_by_subject stratifies by paradigm.
     """
 
-    def __init__(self, input_data_dir: Path, target_data_dir: Optional[Path], target_mode: str, seed: int, k_folds: int = 6, no_press_threshold: int = 59):
+    def __init__(self, input_data: Union[Path, str, Dict[str, Dict[str, List[Tuple[int, Any]]]]], target_data_dir: Optional[Path],
+                 target_mode: str, seed: int, k_folds: int = 6, no_press_threshold: int = 59):
         io_handler = EpochIO(ext='.pt')
-        # loads data in format {subject: {condition: [(id1, (input_tensor1, target_tensor1)), ...]}}
-
-        self.input_target_data = io_handler.load_all_input_target_data(input_dir=input_data_dir, target_dir=target_data_dir, target_mode=target_mode)
+        if isinstance(input_data, (str, Path)):
+            input_data = Path(input_data)
+            if target_mode == "classify":
+                self.input_target_data = io_handler.load_all_epochs(input_data, marker="_input")
+            else:
+                # loads data in format {subject: {condition: [(id1, (input_tensor1, target_tensor1)), ...]}}
+                self.input_target_data = io_handler.load_all_input_target_data(input_dir=input_data,
+                                                                               target_dir=target_data_dir,
+                                                                               target_mode=target_mode)
+        else:
+            self.input_target_data = input_data
         self.k_folds = k_folds
         self.seed = seed
         self.no_press_threshold = no_press_threshold
@@ -341,8 +434,8 @@ class KFoldSplitter:
             val_set = set(val_keys)
             train_keys = [key for key in grouped_shuffle_keys if key not in test_set and key not in val_set]
             keys = {"train": train_keys, "val": val_keys, "test": test_keys}
-            splits.append(FinetuneSplits(training_dict=self._select(train_keys), validation_dict=self._select(val_keys),
-                                         testing_dict=self._select(test_keys), keys=keys))
+            splits.append(FinetuneSplits(training_dict=self.select(train_keys), validation_dict=self.select(val_keys),
+                                         testing_dict=self.select(test_keys), keys=keys))
         return splits
 
     def split_from_keys(self, keys: List[Dict[str, List[Tuple[str, str, int]]]]) -> List[FinetuneSplits]:
@@ -357,8 +450,9 @@ class KFoldSplitter:
             missing = {split: len(set(split_keys) - loaded) for split, split_keys in fold.items()}
             if any(missing.values()):
                 print(f"WARNING: fold {i + 1} has saved keys missing from the loaded data: {missing}")
-            splits.append(FinetuneSplits(training_dict=self._select(fold["train"]), validation_dict=self._select(fold["val"]),
-                                         testing_dict=self._select(fold["test"]), keys=fold))
+            splits.append(
+                FinetuneSplits(training_dict=self.select(fold["train"]), validation_dict=self.select(fold["val"]),
+                               testing_dict=self.select(fold["test"]), keys=fold))
         return splits
 
     @staticmethod
@@ -368,7 +462,7 @@ class KFoldSplitter:
         """
         return [(subject, cond, idx) for subject, conds in epochs.items() for cond, epoch_list in conds.items() for idx, _ in epoch_list]
 
-    def _select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
+    def select(self, keys: List[Tuple[str, str, Any]]) -> Dict[str, Dict[str, List[tuple[int, Any]]]]:
         """
         Returns the epochs with the given (subject, condition, id) keys in the {subject: {condition: [(id, (input, target)), ...]}} format of FinetuneDataset.
         """

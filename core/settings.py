@@ -83,8 +83,10 @@ N_NEIGHBOURS = 4
 INJECTION_ONSET_RAMP = 0.02  # s, raised-cosine ramp of the injected gain after stimulus onset
 INJECTION_SOURCE_DEPTH = 0.7  # sphere model: dipole position as a fraction of the head radius, towards the midpoint of O1 and O2
 INJECTION_LABELS = ["pericalcarine"]  # fsaverage model: aparc labels of the injected source (pericalcarine = primary visual cortex)
-# mixed injection: fsaverage aparc labels injected as separate sources and their gains, an injection value scales all of them
-MIXED_INJECTION_GAINS = {"pericalcarine": 0.1, "lateraloccipital": 0.25, "lingual": -0.1}
+# mixed injection: fsaverage aparc labels injected as separate sources and their gains, an injection value scales all of them.
+# Two sources with distinct scalp patterns (cosine -0.22) changed in opposite directions; lingual (cosine +0.92 with
+# pericalcarine) and precuneus (+0.44 / +0.56) overlap them too much for the joint estimate to separate them
+MIXED_INJECTION_GAINS = {"pericalcarine": 0.25, "lateraloccipital": -0.25}
 INJECTION_N_ROI = 4  # the injection results are averaged over the channels where the injected pattern is strongest (largest |g|)
 MIN_REACTION_TIME = 0.5  # s, trials with a button press earlier than this after onset are dropped in make_dataset.py (~1.4% of trials)
 PAD_TIME = 0.3  # reflect padding of each patch for its wavelet transform, only reaches bins outside the scored targets
@@ -98,6 +100,10 @@ ANALYSIS_WINDOW = POST_TARGET_WINDOW  # before every button press
 METRIC_WINDOWS = {
     'full': PATCH_WINDOWS,
     'analysis': {'pre': PRE_TARGET_WINDOW, 'post': POST_TARGET_WINDOW},
+}
+
+CLASS_METRIC_WINDOWS = {
+    'full': CLASS_PATCH_WINDOW,
 }
 
 
@@ -161,6 +167,8 @@ PATCH_WAVELET_DIR = PATCH_DIR / WAVELET_DIR_NAME
 
 FINETUNE_OUTPUT_DIR = BASE_DIR / "outputs" / "finetune_outputs"
 PLOT_DIR = BASE_DIR / "outputs" / "plots"
+THESIS_FIGURE_DIR = PLOT_DIR / "thesis_figures"
+SUBFIGURES_DIR = THESIS_FIGURE_DIR / "subfigures"
 INFERENCE_DIR = BASE_DIR / "outputs" / "inference_outputs"
 PLOT_MACRO = PLOT_DIR / "macro_plots"
 PLOT_INFERENCE = PLOT_DIR / "inference_plots"
@@ -206,5 +214,26 @@ FREQ_BANDS = {
     'gamma (30-45Hz)': (30, 45)
 }
 FREQ_WINDOW_LABEL = f"{SPECTRAL_DECODER_PARAMS['freq_window'][0]}-{SPECTRAL_DECODER_PARAMS['freq_window'][1]} Hz"  # all bins
+
+# time-resolved location decoding (decoding/run_sliding_lda.py, handoff Task A): the CLASS_PATCH_WINDOW of every trial is
+# band-passed into every band (broadband: low-pass only, it keeps the slow evoked response below 5 Hz), then decimated
+# by DECODING_DECIM (200 -> 100 Hz, all bands stay below the new Nyquist frequency)
+DECODING_BANDS = {f'broadband ({L_FREQ}-45Hz)': (None, 45), **FREQ_BANDS}
+DECODING_DECIM = 2
+# side contrasts (handoff Task B)
+Q4_ACCURACY_WINDOW = None  # (start, end) in s of the accuracy measure, fixed once from the baseline grand average (B1) before post data are looked at; None: the notebook suggests one
+Q4_LATENCY_SEARCH = (0.0, 0.5)  # s, the handoff's 0-0.6 s limited by the end of the window (button presses)
+Q4_LATENCY_SMOOTHING = 0.02  # s, moving average of the AUC curves before the latency
+# latency = fractional area latency (decoding.metrics.fractional_area_latency): the time at which Q4_AREA_FRACTION of the
+# area of the mean AUC curve above Q4_AREA_FLOOR x its peak height (above chance) in Q4_LATENCY_SEARCH has accumulated.
+# Replaces the handoff's fractional peak latency (first crossing of 50 % of the peak), which jumped between threshold
+# crossings when a small bump sat near the threshold (jackknife SE 64 ms in a null split); the floor keeps the noise
+# before and after the response out of the area. Chosen on the null injection runs (baseline data only): near SE 7-8 ms
+Q4_AREA_FRACTION = 0.5
+Q4_AREA_FLOOR = 0.5
+# planted-change checks (decoding/run_lda_injection.py, handoff Task C): the posterior channel set of handoff 3.5 (O*, P*
+# of the montage; T5/T6, which newer naming calls P7/P8, are left out) and the window of the planted attenuation
+POSTERIOR_CHANNELS = ['P3', 'P4', 'PZ', 'O1', 'O2']
+PLANT_ATTENUATION_WINDOW = (0.0, 0.5)
 # indices of the FREQS bins falling into each band, used to index the frequency dimension of spectral tensors
 FREQ_BAND_INDICES = {name: np.where((FREQS >= low) & (FREQS <= high))[0] for name, (low, high) in FREQ_BANDS.items()}

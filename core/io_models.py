@@ -35,8 +35,11 @@ class Metrics:
     recon_mean_bandwise: Dict[str, float] = None
     level_error: float = None  # |mean target - mean output| of a channel, see utils.get_inference_metrics
     level_error_bandwise: Dict[str, float] = None
+    signed_error: float = None  # mean output - mean target of a channel (> 0: predicted level too high), see utils.get_inference_metrics
+    signed_error_bandwise: Dict[str, float] = None
     recon_volatility: float = None
     recon_volatility_bandwise: Dict[str, float] = None
+
 
 
 def ch_metrics_from_json(ch_json: str) -> Dict[str, Metrics]:
@@ -83,6 +86,18 @@ class Trial:
         return self.trial_data["output"][()]
 
     @property
+    def occlusion_data(self) -> Optional[np.ndarray]:
+        """The (n_chans, n_classes) occlusion logits of a class trial of a model trained with masking, None without them."""
+        return self.trial_data["occlusion"][()] if "occlusion" in self.trial_data else None
+
+    @property
+    def interpolated(self) -> np.ndarray:
+        """Indices of the trial's interpolated channels: an attribute of the trial group, the parent of a patch group in
+        reconstruction files and the loaded group itself in class files."""
+        group = self.trial_data if "interpolated" in self.trial_data.attrs else self.trial_data.parent
+        return np.asarray(group.attrs["interpolated"], dtype=int)
+
+    @property
     def metrics(self) -> Metrics:
         """Trial-level metrics of the selected window, the same cached object as {window}_metrics (e.g. analysis_metrics)."""
         return getattr(self, f"{self.window}_metrics")
@@ -94,7 +109,7 @@ class Trial:
 
     def time_series(self, metric: str, bands: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         """Returns the time series of metric as {band: (n_chans, n_timepoints) array}, including "all bands".
-        Available metrics are the ones saved in the time series file (keys of plot_data_processing.TIME_SERIES_METRICS: mae, error, target, recon).
+        Available metrics are the ones saved in the time series file (keys of plot_data_processing.TIME_SERIES_METRICS: mae, signed_error, target, recon).
         bands: only read these bands (None reads all of them).
         Reads from the file on every call, the result is not cached.
         """
